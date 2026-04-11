@@ -5,7 +5,11 @@
       "Bash(git -C E:/Projects/InoAgentDemo/Plugins/InoAgents status)",
       "Bash(git -C E:/Projects/InoAgentDemo/Plugins/InoAgents diff --stat)",
       "WebFetch(domain:elevenlabs.io)",
-      "Bash(grep -E \"\\\\.\\(h|cpp\\)$\")"
+      "Bash(grep -E \"\\\\.\\(h|cpp\\)$\")",
+      "Read(//e/Epic Games/UE_5.7/Engine/Source/**)",
+      "Bash(find . -name \"BlueprintAsyncActionBase.h\")",
+      "Read(//e//**)",
+      "Read(//c/Program Files/Epic Games/**)"
     ]
   }
 }
