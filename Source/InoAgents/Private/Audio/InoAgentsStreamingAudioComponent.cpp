@@ -23,32 +23,34 @@ UInoAgentsStreamingAudioComponent::UInoAgentsStreamingAudioComponent(
     // a transform and set attenuation; that stays fully supported.
     bAutoActivate = false;
 
-    // Build the procedural wave subobject at CDO-construction time so
-    // every instance gets its own. SetSound binds it to this component
-    // (inherited UAudioComponent::Sound UPROPERTY). We hide the Sound
-    // category in UCLASS metadata so designers don't accidentally
-    // swap it in the details panel.
-    ProceduralWave = ObjectInitializer.CreateDefaultSubobject<USoundWaveProcedural>(
-        this, TEXT("ProceduralWave"));
-    if (ProceduralWave != nullptr)
-    {
-        // UE 5.7 made USoundWave::SampleRate protected — use the public
-        // SetSampleRate setter instead of direct assignment. NumChannels,
-        // Duration, SoundGroup, and bLooping are still public.
-        ProceduralWave->SetSampleRate(static_cast<uint32>(PcmSampleRate));
-        ProceduralWave->NumChannels = PcmNumChannels;
-        ProceduralWave->Duration    = INDEFINITELY_LOOPING_DURATION;
-        ProceduralWave->SoundGroup  = SOUNDGROUP_Default;
-        ProceduralWave->bLooping    = false;
-        SetSound(ProceduralWave);
-
-        // Mirror the default PCM format into the active-format tracking
-        // so the very first FeedAudioBytes for a 44100/mono PCM stream
-        // can hit the fast path (Play without rebuild). Mismatches
-        // still go through the rebuild branch in EnsureProceduralWave.
-        ActiveSampleRate  = PcmSampleRate;
-        ActiveNumChannels = PcmNumChannels;
-    }
+    // IMPORTANT: we do NOT use CreateDefaultSubobject<USoundWaveProcedural>
+    // here, even though that would be the idiomatic UE pattern for a
+    // CDO-owned child UObject.
+    //
+    // Reason: USoundWave (the parent of USoundWaveProcedural) owns an
+    // AssetImportData UPROPERTY that is editor-only and marked private.
+    // When a user wraps this component inside a Blueprint, the Blueprint
+    // compiler walks the CDO's subobject tree to build a GEN_VARIABLE
+    // template, reaches the ProceduralWave default subobject, and tries
+    // to serialise a reference to its AssetImportData. The save fails
+    // with:
+    //
+    //     Illegal reference to private object:
+    //     AssetImportData /Script/InoAgents.Default__InoAgentsStreamingAudioComponent
+    //         :ProceduralWave.AssetImportData
+    //
+    // The fix is to keep ProceduralWave null on the CDO and allocate it
+    // lazily via NewObject the first time EnsureProceduralWave runs (at
+    // the first FeedAudioBytes call). With no default subobject, there
+    // is no subobject tree for the Blueprint compiler to traverse, and
+    // no chance for the private AssetImportData to leak into a Blueprint
+    // asset's serialised state.
+    //
+    // ProceduralWave remains UPROPERTY(Transient) so it is never saved,
+    // and every instance gets a fresh one on first use.
+    ProceduralWave    = nullptr;
+    ActiveSampleRate  = 0;
+    ActiveNumChannels = 0;
 }
 
 void UInoAgentsStreamingAudioComponent::BeginDestroy()
