@@ -68,18 +68,22 @@ Gemma 4's **31B dense** and **26B A4B MoE** server-class variants are **intentio
 Plugins/InoAgents/
 ├── InoAgents.uplugin
 ├── LiteRtLm/                                      ← Bazel build workspace (self-contained)
-│   ├── vendor/LiteRT-LM/                          ← git submodule, upstream pinned at v0.10.1
+│   ├── vendor/LiteRT-LM/                          ← git submodule, upstream pinned at v0.10.1 (c7b77b5)
 │   ├── overlay/                                   ← files staged into the submodule before each build
+│   │   └── ino/
+│   │       ├── BUILD.bazel                        ← //ino:LiteRtLm target, deps //c:engine_cpu
+│   │       └── LiteRtLm_exports.cc                ← force-reference stub (see "Custom Bazel target")
 │   ├── scripts/                                   ← setup.ps1, build-win64.ps1, update-litert.ps1, clean.ps1
-│   ├── .bazelversion, .bazelrc, LITERT_LM_TAG
+│   ├── LITERT_LM_TAG
 │   └── README.md
 ├── Source/
 │   ├── InoAgents/                                 ← runtime module (UE-facing, wraps the C API)
 │   └── ThirdParty/InoAgentsLibrary/               ← External module consuming the built artifacts
-│       ├── Public/litert/lm/                      ← staged headers (c/engine.h copy)
-│       └── Win64/LiteRtLm.lib                     ← staged import library
+│       ├── Public/litert/lm/engine.h              ← staged header (copy of vendor/LiteRT-LM/c/engine.h)
+│       └── Win64/LiteRtLm.lib                     ← staged import library (~108 KB)
 └── Binaries/ThirdParty/InoAgentsLibrary/Win64/
-    └── LiteRtLm.dll                               ← staged runtime DLL (produced by build script; gitignored)
+    ├── LiteRtLm.dll                               ← main runtime DLL (~17 MB, gitignored)
+    └── libGemmaModelConstraintProvider.dll        ← required sibling runtime DLL (~13 MB, gitignored)
 ```
 
 **`LiteRtLm/vendor/LiteRT-LM/`** is a git submodule (`https://github.com/google-ai-edge/LiteRT-LM.git`) pinned at tag **v0.10.1** (commit `c7b77b5`). We never edit files inside the submodule directly. Version bumps happen via `LiteRtLm/scripts/update-litert.ps1`, which updates the submodule pointer and re-runs the overlay + build.
@@ -103,19 +107,42 @@ Key facts about the upstream Bazel setup:
   - `--copt=/DLITERT_DISABLE_OPENCL_SUPPORT=1` — OpenCL disabled (we use D3D12 anyway)
   - `--shell_executable="C:/Program Files/Git/bin/bash.exe"` — **upstream hardcodes Git at this exact path** for shell genrules
   - `startup --windows_enable_symlinks` + `--enable_runfiles` — requires Developer Mode enabled
-- **Windows symbol export pattern** (from `runtime/engine/BUILD:180` and `c/engine.h`): two layers acting together:
-  1. `c/engine.h` annotates the `litert_lm_*` C functions with `__declspec(dllexport)` (compile-time)
-  2. `runtime/engine:litert_lm_main` attaches `@litert//litert/c:windows_exported_symbols.def` as a linker input via `/DEF:$(location ...)` linkopt (link-time, for the internal `LiteRt*` accelerator ABI)
-  Our DLL target reuses both mechanisms verbatim.
+- **Windows static-library export quirk (IMPORTANT).** Upstream `build:windows --legacy_whole_archive=0` disables `--whole-archive` on Windows (upstream bug `b/469455895`). This has a non-obvious consequence: when our `cc_binary(linkshared=1)` target depends on a `cc_library` like `//c:engine_cpu`, **MSVC's linker only pulls in `.obj` files from that static library that are referenced by already-included code**. A `__declspec(dllexport)` annotation on a function in an otherwise-unreferenced `.obj` is silently dropped — the build succeeds, but the function never reaches the DLL's export table. See "Custom Bazel target" for how we work around this with a force-reference stub.
 
 ## Custom Bazel target
 
 We define exactly one new Bazel target via the overlay, in a new package inside the submodule:
 
-- **`//ino:LiteRtLm.dll`** — a `cc_binary(name=..., linkshared=1)` that depends on `//c:engine` (the full public engine library: CPU + GPU backends, multimodal, tool calling)
-- Reuses `windows_exported_symbols.def` linker input + linkopt exactly as `runtime/engine:litert_lm_main` does
-- Reuses `build:windows --config=monolithic` so all transitive deps land in the single DLL
-- Alternate CPU-only dependency available: `//c:engine_cpu` (smaller surface area, smaller transitive dep graph — useful for first-build bring-up, can be swapped to `//c:engine` once the end-to-end path works)
+- **`//ino:LiteRtLm`** — a `cc_binary(linkshared=1, linkstatic=1)` that depends on `//c:engine_cpu` (start with CPU-only; swap to `//c:engine` when GPU support is added in a later iteration)
+- Built output: `LiteRtLm.dll` (automatic Windows naming from `cc_binary(linkshared=1)`)
+- Reuses `build:windows --config=monolithic` from upstream `.bazelrc` — all transitive deps link statically into the single DLL
+- **We do NOT use a `/DEF:` file** (unlike upstream's `runtime/engine:litert_lm_main`). `/DEF:` is *exclusive* — it overrides `__declspec(dllexport)` and the linker's `/OPT:REF` dead-strips anything not listed. Trying it produced a 12 MB DLL with zero `litert_lm_*` exports.
+
+### Why `LiteRtLm_exports.cc` exists
+
+Bazel's `cc_binary` rule requires at least one source file. Ours, `overlay/ino/LiteRtLm_exports.cc`, serves two roles:
+
+1. **DllMain stub** (standard Windows DLL entry point).
+2. **Force-reference of every `litert_lm_*` C API function** — a `volatile` array of function pointers that takes the address of each exported API function. Because `LiteRtLm_exports.cc` is part of the `cc_binary`'s own `srcs` (not a static library), its `.obj` is always linked. Taking the address of each function creates hard link-time references, forcing MSVC to pull in the `.obj` files from `//c:engine_cpu`'s static archive. Once those `.obj` files are pulled in, the `__declspec(dllexport)` annotations on their symbols (via `LITERT_LM_C_API_EXPORT` in `c/engine.h`) drive the export table.
+
+**Maintenance:** the force-reference array must be kept in sync with the functions declared in `c/engine.h`. When LiteRT-LM is upgraded, re-extract the current list with:
+
+```bash
+awk '/^LITERT_LM_C_API_EXPORT$/{flag=1; next} flag{
+     match($0, /litert_lm_[a-zA-Z_0-9]+/);
+     print substr($0, RSTART, RLENGTH); flag=0}' \
+     vendor/LiteRT-LM/c/engine.h
+```
+
+and reconcile against `LiteRtLm_exports.cc`. A missing entry results in the corresponding symbol silently dropping from `LiteRtLm.dll` — the build succeeds, but callers fail at UE link time with "unresolved external symbol".
+
+### Upstream bugs worked around in BUILD.bazel
+
+- **`litert_lm_set_min_log_level`**: upstream `c/litert_lm_logging.h` declares this function without `__declspec(dllexport)`, while `c/engine.h` declares the *same function* with it. Since `litert_lm_logging.cc` includes only the non-exporting header, its `.obj` is compiled without the export marker, and force-reference alone is insufficient. Work around with an additive `/EXPORT:litert_lm_set_min_log_level` linkopt in our BUILD.bazel. File upstream issue and remove the linkopt when fixed.
+
+### `libGemmaModelConstraintProvider.dll`
+
+Our `LiteRtLm.dll` depends on `libGemmaModelConstraintProvider.dll` at runtime. This is an upstream **prebuilt** (LFS-tracked) binary at `vendor/LiteRT-LM/prebuilt/windows_x86_64/libGemmaModelConstraintProvider.dll`, ~13 MB. Some `cc_library` target in the `//c:engine_cpu` dep graph declares it as a data dependency, and Bazel symlinks it into `bazel-bin/ino/` alongside our DLL. `build-win64.ps1` copies the symlink target (the real file) into `Binaries/ThirdParty/InoAgentsLibrary/Win64/`. `InoAgentsLibrary.Build.cs` must list it in `PublicDelayLoadDLLs` and `RuntimeDependencies` so UE stages it alongside the executable. Without it, `LiteRtLm.dll` fails to load at runtime.
 
 ## Toolchain requirements (Windows host)
 
@@ -129,10 +156,10 @@ A developer machine needs all of the following before `scripts/build-win64.ps1` 
 | **Bazelisk on PATH** | `winget install Bazel.Bazelisk`. Bazelisk auto-downloads the Bazel version pinned by `.bazelversion`. |
 | **Git at `C:\Program Files\Git`** | Required because upstream `.bazelrc` hardcodes `C:/Program Files/Git/bin/bash.exe` for shell genrules. |
 | **Python 3 on PATH** | Used by Bazel's protobuf / XNNPACK build rules. Any 3.10+ works. |
-| **Windows long paths enabled** | `HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`. Bazel builds create deeply nested output paths that overflow MAX_PATH without this. |
-| **40+ GB free on the Bazel output drive** | First cold build of LiteRT-LM + all transitive deps is enormous. |
-| **Bazel output root on a short path** | Recommend `startup --output_user_root=C:/b` in `LiteRtLm/.bazelrc` — further mitigates MAX_PATH issues and speeds up Windows Defender scans by staying in one predictable location. |
-| **Antivirus exclusion for Bazel output root** | Real-time scanning of `C:\b\...` slows cold builds 3–5x. Not mandatory but strongly recommended. |
+| **Windows long paths enabled** | `HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`. Necessary but NOT sufficient — `link.exe` does not transparently use the `\\?\` prefix for its input files, so some tools in the build still hit MAX_PATH even with long paths on. The short `--output_base` below is the actual fix. |
+| **40+ GB free on the Bazel output drive** | First cold build of LiteRT-LM + all transitive deps is ~20 GB of caches + outputs. |
+| **Short Bazel `--output_base`** (MANDATORY, not optional) | `scripts/build-win64.ps1` passes `bazelisk --output_base=C:/b/ino build ...`. Matches upstream CI's pattern (`D:/w-<hash>/`) from `.github/workflows/ci-build-win.yml`. Without this, intermediate filenames like `…/crate_index__macro_rules_attribute-proc_macro-0.2.2/…cgu.0.rcgu.o` exceed 260 chars and `link.exe` fails with `LNK1181: cannot open input file`. `setup.ps1` creates `C:/b/ino` on first run — no admin needed on a modern Windows 10/11 user profile. |
+| **Antivirus exclusion for `C:\b\`** | Real-time scanning of Bazel's output root slows cold builds 3–5x. Not mandatory but strongly recommended. |
 
 The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and should be the first thing a new dev runs.
 
@@ -194,10 +221,15 @@ No backend abstraction layer. LiteRT-LM is the one backend, and its public C API
 
 ## Windows gotchas
 
-- **DXC runtime DLLs.** On Windows GPU path, D3D12 shader compilation at runtime needs `dxil.dll` + `dxcompiler.dll` from Microsoft's [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) releases. These are **not** Bazel outputs — they're prebuilt binaries we download separately via `scripts/fetch-dxc.ps1` and stage into `Binaries/ThirdParty/InoAgentsLibrary/Win64/` as `RuntimeDependencies`. Whether we actually need them depends on which GPU backend LiteRT-LM ends up using at runtime; we'll know once the first end-to-end run is working. If we stay on CPU backend, they're irrelevant.
-- **Delay-load the DLL.** `InoAgentsLibrary.Build.cs` uses `PublicDelayLoadDLLs.Add("LiteRtLm.dll")` so the game / editor launches even if the DLL is missing. `FInoAgentsModule::StartupModule` calls `FPlatformProcess::GetDllHandle` explicitly and surfaces a `UE_LOG` error on failure — **no `FMessageDialog` fallback.** The original plugin template showed a blocking dialog on missing DLL; that dialog is removed.
-- **Monolithic DLL.** Upstream `build:windows --config=monolithic` links all transitive dependencies (absl, protobuf, tensorflow lite, xnnpack, tokenizers_cpp, llguidance, minja, miniaudio, sentencepiece, etc.) statically into `LiteRtLm.dll`. We do not ship separate dependency DLLs.
-- **MSVC runtime.** Build with `/MD` (dynamic CRT) to match UE. `/MT` would link successfully but produce two CRTs in the same process at runtime, causing silent heap corruption across allocator boundaries. This is pinned in our `LiteRtLm/.bazelrc`.
+- **Runtime DLLs to ship alongside the executable.** Two files must end up in `Binaries/ThirdParty/InoAgentsLibrary/Win64/`:
+  - `LiteRtLm.dll` (~17 MB) — our monolithic output
+  - `libGemmaModelConstraintProvider.dll` (~13 MB) — upstream prebuilt, required sibling. See "Custom Bazel target → libGemmaModelConstraintProvider.dll".
+  Both are handled by `build-win64.ps1` on the Bazel side and by `InoAgentsLibrary.Build.cs` on the UE side (both listed in `PublicDelayLoadDLLs` and `RuntimeDependencies`).
+- **DXC runtime DLLs (conditional).** If/when we enable GPU inference by swapping the BUILD target to `//c:engine`, LiteRT-LM's D3D12 shader compilation at runtime may require `dxil.dll` + `dxcompiler.dll` from Microsoft's [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) releases. These are **not** Bazel outputs. With the current CPU-only build (`//c:engine_cpu`) they are not needed and not shipped. Revisit when switching to GPU.
+- **Delay-load the DLLs.** `InoAgentsLibrary.Build.cs` uses `PublicDelayLoadDLLs.Add(...)` for both runtime DLLs so the game / editor launches even if they're missing. `FInoAgentsModule::StartupModule` calls `FPlatformProcess::GetDllHandle` explicitly and surfaces a `UE_LOG` error on failure — **no `FMessageDialog` fallback.** The original plugin template showed a blocking dialog on missing DLL; that dialog must be removed.
+- **Monolithic DLL.** Upstream `build:windows --config=monolithic` links all transitive dependencies (absl, protobuf, tensorflow lite, xnnpack, tokenizers_cpp, llguidance, minja, miniaudio, sentencepiece, etc.) statically into `LiteRtLm.dll`. We do not ship separate dependency DLLs except for `libGemmaModelConstraintProvider.dll`, which is a prebuilt upstream binary outside the Bazel graph.
+- **MSVC runtime.** Build with `/MD` (dynamic CRT) to match UE. `/MT` would link successfully but produce two CRTs in the same process at runtime, causing silent heap corruption across allocator boundaries. Upstream `build:windows` already handles this correctly — no explicit override needed in our overlay.
+- **Force-reference the C API symbols.** See "Custom Bazel target → Why `LiteRtLm_exports.cc` exists". Without this, the DLL builds but exports no `litert_lm_*` functions because MSVC drops unreferenced `.obj` files from static libraries, and upstream disables `--whole-archive` on Windows.
 
 ## Model file distribution
 
