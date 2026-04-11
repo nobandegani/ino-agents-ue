@@ -38,10 +38,14 @@ public class InoAgents : ModuleRules
 			new string[]
 			{
 				"Core",
-				"InoAgentsLibrary",
+				"CoreUObject",       // UObject, UCLASS, UENUM, dynamic delegate macros — used throughout
+				                     // Source/InoAgents/Public/LiteRtLm/ starting at Milestone D.1.
+				"Engine",            // UDataAsset, UGameInstanceSubsystem, GEngine, FWorldContext —
+				                     // used in ULiteRtLmModelConfig and ULiteRtLmSubsystem.
+				"InoAgentsLibrary",  // LiteRT-LM C API via the staged header.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
-				"Projects"
-				// ... add other public dependencies that you statically link with here ...
+				                     // (used by Phase 1 smoke tests and by D.4 tool-call parsing).
+				"Projects",          // IPluginManager for locating the plugin's base directory at runtime.
 			}
 			);
 			
