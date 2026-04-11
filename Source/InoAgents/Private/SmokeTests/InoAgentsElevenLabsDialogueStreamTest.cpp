@@ -48,20 +48,20 @@ namespace
 {
     // Defaults used when the console command is invoked with no args.
     //
-    // Voice IDs in ElevenLabs are account-specific: public-library voices
-    // you haven't imported into your own library return 404. These two
-    // are the ones most likely to exist in a fresh account:
+    // Voice IDs in ElevenLabs are account-specific: public-library
+    // voices return 404 unless they've been imported into the caller's
+    // personal library. The two below are known-good IDs from the
+    // project owner's ElevenLabs account — they won't work on every
+    // developer's machine.
     //
-    //   JBFqnCBsd6RMkjVDRZzb — "George"  (docs example, widely available)
-    //   21m00Tcm4TlvDq8ikWAM — "Rachel"  (one of the original premade
-    //                                     voices, present since day one)
-    //
-    // If you still hit voice_not_found, pass your own voice IDs as args:
+    // If you hit voice_not_found, pass your own voice IDs as args:
     //   InoAgents.ElevenLabs.DialogueStreamTest <voiceA> <voiceB>
     // Find yours at https://elevenlabs.io/app/voice-lab or by calling
-    // GET /v1/voices with your API key.
-    constexpr const TCHAR* kDefaultVoiceA = TEXT("JBFqnCBsd6RMkjVDRZzb");
-    constexpr const TCHAR* kDefaultVoiceB = TEXT("21m00Tcm4TlvDq8ikWAM");
+    //   GET https://api.elevenlabs.io/v1/voices
+    // with your API key. The response's "voices[*].voice_id" fields
+    // are the strings you want.
+    constexpr const TCHAR* kDefaultVoiceA = TEXT("AyCt0WmAXUcPJR11zeeP");
+    constexpr const TCHAR* kDefaultVoiceB = TEXT("lhgliD0TncfFOY1Nc93M");
 
     UElevenLabsSubsystem* FindSubsystem()
     {
