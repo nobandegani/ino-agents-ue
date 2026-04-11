@@ -4,6 +4,8 @@
 
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
+#include "LiteRtLm/LiteRtLmSubsystem.h"
+#include "LiteRtLm/LiteRtLmTool.h"
 
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
@@ -17,11 +19,23 @@
 
 #include "litert/lm/engine.h"
 
+namespace
+{
+    // Safety cap for the agent loop. If the model keeps calling tools
+    // without producing final text for this many rounds in a row, we
+    // bail with an error rather than spinning forever. The number is
+    // pulled out of the air but generous — real interactions rarely
+    // need more than 2-3 rounds.
+    constexpr int32 kMaxAgentLoopRounds = 8;
+}
+
 FLiteRtLmConversationWorker::FLiteRtLmConversationWorker(
     TWeakObjectPtr<ULiteRtLmConversation> InOwner,
+    TWeakObjectPtr<ULiteRtLmSubsystem>    InSubsystem,
     LiteRtLmConversation* InConversation,
     LiteRtLmConversationConfig* InConversationConfig)
     : WeakOwner(InOwner)
+    , WeakSubsystem(InSubsystem)
     , NativeConversation(InConversation)
     , NativeConversationConfig(InConversationConfig)
 {
@@ -212,39 +226,150 @@ void FLiteRtLmConversationWorker::ProcessMessage(const FString& UserText)
         return;
     }
 
-    // Reset per-send state BEFORE calling into LiteRT-LM. StreamEvent
+    // ==================================================================
+    // Multi-round agent loop
+    // ==================================================================
+    //
+    // Round 0: send the user message.
+    // Round N+1: if round N produced tool calls, execute them on the
+    //            game thread, build a tool_result message, and send
+    //            that as a fresh stream on the same native conversation.
+    // Terminate: when a round produces no tool calls, its accumulated
+    //            text is the final answer — dispatch OnComplete.
+    //
+    // Safety cap: bail with an error after kMaxAgentLoopRounds rounds
+    // to avoid spinning on a stuck tool-call loop.
+
+    // Build the initial user message. Shape (same as D.3 / Phase 1
+    // ConversationTest): {"role":"user","content":[{"type":"text","text":...}]}
+    // EscapeJsonString includes the surrounding quotes (UE convention)
+    // so the format string must NOT re-wrap %s in "".
+    FString CurrentMessageJson;
+    {
+        const FString EscapedPromptQuoted = EscapeJsonString(UserText);
+        CurrentMessageJson = FString::Printf(
+            TEXT(R"({"role":"user","content":[{"type":"text","text":%s}]})"),
+            *EscapedPromptQuoted);
+    }
+
+    for (int32 Round = 0; Round < kMaxAgentLoopRounds; ++Round)
+    {
+        // --- Run the stream for this round ---
+        if (!RunOneStreamRound(CurrentMessageJson))
+        {
+            // RunOneStreamRound populates StreamError on failure
+            // (stream failed to start). Dispatch and bail.
+            DispatchErrorOnGameThread(StreamError);
+            return;
+        }
+
+        // --- Handle terminal conditions ---
+        if (bStreamCancelled.Load())
+        {
+            DispatchErrorOnGameThread(TEXT("Cancelled by caller"));
+            return;
+        }
+
+        if (!StreamError.IsEmpty())
+        {
+            DispatchErrorOnGameThread(StreamError);
+            return;
+        }
+
+        // --- Handle the round's output ---
+        if (StreamPendingToolCalls.Num() > 0)
+        {
+            // The model asked to call tools. Execute each on the game
+            // thread (synchronously from this worker's perspective),
+            // broadcast OnToolCalled for visibility, and build a
+            // tool_result message to feed back into the conversation
+            // as round N+1.
+            //
+            // LiteRT-LM's Gemma 4 data processor accepts one
+            // tool_response per content entry, so we bundle every
+            // executed tool into a single {"role":"tool"} message.
+            FString ToolResultContentParts;
+            ToolResultContentParts.Reserve(256);
+
+            for (int32 CallIdx = 0; CallIdx < StreamPendingToolCalls.Num(); ++CallIdx)
+            {
+                const FPendingToolCall& Call = StreamPendingToolCalls[CallIdx];
+
+                const FString ResultJson = ExecuteToolSynchronously(Call);
+
+                DispatchToolCalledOnGameThread(
+                    Call.Name, Call.ArgumentsJson, ResultJson);
+
+                // Build one content entry per tool call. tool_response
+                // shape matches the Phase 1 ToolCallTest — see its
+                // comment for the details. ResultJson is the raw JSON
+                // literal (bare number, string, object) from the tool;
+                // it's embedded verbatim into the "value" field.
+                const FString EscapedToolNameQuoted =
+                    EscapeJsonString(Call.Name.ToString());
+                const FString OneEntry = FString::Printf(
+                    TEXT(R"({"type":"tool_response","tool_response":{"name":%s,"value":%s}})"),
+                    *EscapedToolNameQuoted,
+                    *ResultJson);
+
+                if (CallIdx > 0)
+                {
+                    ToolResultContentParts += TEXT(",");
+                }
+                ToolResultContentParts += OneEntry;
+            }
+
+            CurrentMessageJson = FString::Printf(
+                TEXT(R"({"role":"tool","content":[%s]})"),
+                *ToolResultContentParts);
+
+            // Drop the pending list — it was consumed. The next
+            // round's OnStreamChunk will start fresh.
+            StreamPendingToolCalls.Reset();
+
+            // Loop back to the top for round N+1.
+            continue;
+        }
+
+        // No tool calls this round — we have the final text answer.
+        if (StreamAccumulated.IsEmpty())
+        {
+            // Empty text with no tool calls is pathological. Match
+            // D.3 semantics: treat as error rather than OnComplete("").
+            DispatchErrorOnGameThread(
+                TEXT("Stream finished with no text content and no tool calls"));
+            return;
+        }
+
+        DispatchCompleteOnGameThread(StreamAccumulated);
+        return;
+    }
+
+    // Safety cap exceeded.
+    DispatchErrorOnGameThread(FString::Printf(
+        TEXT("Agent loop exceeded %d rounds without reaching a final answer"),
+        kMaxAgentLoopRounds));
+}
+
+bool FLiteRtLmConversationWorker::RunOneStreamRound(const FString& MessageJson)
+{
+    // Reset per-round state BEFORE calling into LiteRT-LM. StreamEvent
     // is manual-reset, so we must clear any leftover signal from the
-    // previous send. bStreamCancelled is cleared here so that a cancel
-    // flag left over from a previous send doesn't poison a new one —
-    // the only way a new send starts in the cancelled state is if the
-    // destructor has set it AND bStopRequested, in which case we'll
-    // short-circuit via the bStopRequested check in Run() anyway.
+    // previous round. StreamAccumulated and StreamPendingToolCalls are
+    // cleared so only THIS round's output is visible to the caller.
+    // bStreamCancelled is intentionally NOT cleared — if the caller
+    // cancelled between rounds, we want to honour it immediately at
+    // the top of the next round.
     StreamAccumulated.Reset();
     StreamError.Reset();
-    bStreamCancelled = false;
+    StreamPendingToolCalls.Reset();
     if (StreamEvent)
     {
         StreamEvent->Reset();
     }
 
-    // Build the user message JSON. Same shape as the Phase 1
-    // ConversationTest smoke test: role=user, content is an array with
-    // one text part. EscapeJsonString includes the surrounding quotes
-    // (UE convention) so the format string must NOT re-wrap %s in "".
-    const FString EscapedPromptQuoted = EscapeJsonString(UserText);
-    const FString MessageJson = FString::Printf(
-        TEXT(R"({"role":"user","content":[{"type":"text","text":%s}]})"),
-        *EscapedPromptQuoted);
     const FTCHARToUTF8 MessageJsonUtf8(*MessageJson);
 
-    // Kick off the non-blocking stream. LiteRT-LM returns immediately;
-    // the callback fires on its internal thread for each chunk.
-    //
-    // We set bStreamInFlight BEFORE the call so that if Cancel races
-    // in between the flag set and send_message_stream, the worst case
-    // is that Cancel calls cancel_process on a conversation that
-    // hasn't actually started streaming yet — the C API handles that
-    // gracefully.
     bStreamInFlight = true;
 
     const int StartRc = litert_lm_conversation_send_message_stream(
@@ -257,52 +382,99 @@ void FLiteRtLmConversationWorker::ProcessMessage(const FString& UserText)
     if (StartRc != 0)
     {
         bStreamInFlight = false;
-        DispatchErrorOnGameThread(FString::Printf(
+        StreamError = FString::Printf(
             TEXT("litert_lm_conversation_send_message_stream returned non-zero (%d) — stream did not start"),
-            StartRc));
-        return;
+            StartRc);
+        return false;
     }
 
-    // Block until the stream's final callback signals StreamEvent.
-    // This is the whole reason our worker thread exists: we need a
-    // thread that can block on the stream without stalling the game
-    // thread. The callback runs on LiteRT-LM's internal thread, not
-    // ours, so this Wait doesn't deadlock.
     if (StreamEvent)
     {
         StreamEvent->Wait();
     }
 
-    // Stream is now complete (one way or another). LiteRT-LM will not
-    // call OnStreamChunk again for this send — safe to read the
-    // accumulated state from the worker thread.
     bStreamInFlight = false;
+    return true;
+}
 
-    // Decide which terminal broadcast to dispatch. Priority: cancel
-    // > error > empty text > success.
-    if (bStreamCancelled.Load())
+FString FLiteRtLmConversationWorker::ExecuteToolSynchronously(
+    const FPendingToolCall& Call)
+{
+    // Queue an AsyncTask to the game thread that looks up the tool
+    // in the subsystem's registry, invokes Execute, and fulfils the
+    // result into ToolResult. Block on DoneEvent until the task
+    // completes. Reference capture of ToolResult is safe because
+    // this stack frame is still alive throughout the Wait.
+    FString ToolResult;
+    FEvent* DoneEvent = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
+
+    TWeakObjectPtr<ULiteRtLmSubsystem> WeakSubs = WeakSubsystem;
+    const FName    ToolName = Call.Name;
+    const FString  ArgsJson = Call.ArgumentsJson;
+
+    AsyncTask(ENamedThreads::GameThread,
+        [WeakSubs, ToolName, ArgsJson, &ToolResult, DoneEvent]()
     {
-        DispatchErrorOnGameThread(TEXT("Cancelled by caller"));
-        return;
-    }
+        // Runs on the game thread. Safe to dereference weak pointers
+        // and touch UObjects.
+        if (ULiteRtLmSubsystem* Subs = WeakSubs.Get())
+        {
+            TScriptInterface<ILiteRtLmTool> Tool = Subs->FindTool(ToolName);
+            if (UObject* ToolObj = Tool.GetObject())
+            {
+                // ILiteRtLmTool is a BlueprintNativeEvent interface —
+                // MUST go through the Execute_Execute wrapper so
+                // Blueprint implementors work too. Wrap in try/catch
+                // so a misbehaving tool that throws can't kill the
+                // game thread.
+                FString LocalResult;
+                #if PLATFORM_EXCEPTIONS_DISABLED
+                    LocalResult = ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson);
+                #else
+                    try
+                    {
+                        LocalResult = ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson);
+                    }
+                    catch (...)
+                    {
+                        LocalResult = FString(TEXT("\"ERROR: uncaught exception in tool Execute\""));
+                    }
+                #endif
 
-    if (!StreamError.IsEmpty())
-    {
-        DispatchErrorOnGameThread(StreamError);
-        return;
-    }
+                if (LocalResult.IsEmpty())
+                {
+                    // An empty return is not a valid JSON value.
+                    // Coerce to a JSON string literal so the model
+                    // sees SOMETHING in the tool_response.value
+                    // field rather than a syntax error.
+                    LocalResult = FString(TEXT("\"\""));
+                }
+                ToolResult = LocalResult;
+            }
+            else
+            {
+                ToolResult = FString::Printf(
+                    TEXT("\"ERROR: tool '%s' is not registered\""),
+                    *ToolName.ToString());
+            }
+        }
+        else
+        {
+            ToolResult = FString(TEXT("\"ERROR: subsystem has been destroyed\""));
+        }
 
-    if (StreamAccumulated.IsEmpty())
-    {
-        // Empty text on the happy path is almost always a template /
-        // tool-call edge case. Match D.2 semantics: treat as error
-        // rather than broadcasting OnComplete("").
-        DispatchErrorOnGameThread(
-            TEXT("Stream finished with no text content"));
-        return;
-    }
+        DoneEvent->Trigger();
+    });
 
-    DispatchCompleteOnGameThread(StreamAccumulated);
+    // Block here on the worker thread until the game thread finishes
+    // Execute. The game thread is NOT blocked on us — the AsyncTask
+    // is a normal game-thread task that runs during the next tick /
+    // TaskGraph pass. The worker thread stays asleep until Trigger.
+    DoneEvent->Wait();
+
+    FPlatformProcess::ReturnSynchEventToPool(DoneEvent);
+
+    return ToolResult;
 }
 
 void FLiteRtLmConversationWorker::OnStreamChunkStatic(
@@ -342,18 +514,20 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
         StreamError = FString(UTF8_TO_TCHAR(error_msg));
     }
 
-    // Parse the chunk JSON and extract text parts, then accumulate +
-    // dispatch. LiteRT-LM's conversation_send_message_stream delivers
-    // each chunk as a FULL assistant message JSON wrapping one token
-    // delta, not plain text:
+    // Parse the chunk JSON and extract parts, then accumulate +
+    // dispatch as appropriate. LiteRT-LM's conversation_send_message_stream
+    // delivers each chunk as a FULL assistant message JSON wrapping
+    // one token delta (or one tool call), not plain text:
     //     {"role":"assistant","content":[{"type":"text","text":"delta"}, ...]}
-    // We unwrap the JSON here so that OnToken callers see only the
-    // assistant text delta. Tool-call parts (D.4) will be handled in
-    // a separate branch here and routed through OnToolCalled.
+    //     {"role":"assistant","content":[{"type":"tool_call","tool_call":{"name":"...","arguments":{...}}}]}
+    // We unwrap the JSON here so OnToken callers see only assistant
+    // text deltas, and tool_call parts are queued for the worker
+    // thread to execute after the round's is_final callback.
     //
     // Suppressed entirely if the stream is cancelled — the final
     // terminal broadcast will be OnError("Cancelled by caller") and
-    // leaking tokens through after cancel would confuse observers.
+    // leaking tokens or tool calls through after cancel would
+    // confuse observers and round ordering.
     if (chunk != nullptr && *chunk != '\0' && !bCancelledNow)
     {
         const FString ChunkJson(UTF8_TO_TCHAR(chunk));
@@ -377,17 +551,62 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
 
                     FString PartType;
                     PartObj->TryGetStringField(TEXT("type"), PartType);
-                    if (PartType != TEXT("text"))
-                    {
-                        // D.4: handle type=="tool_call" here.
-                        continue;
-                    }
 
-                    FString PartText;
-                    if (PartObj->TryGetStringField(TEXT("text"), PartText))
+                    if (PartType == TEXT("text"))
                     {
-                        ChunkText += PartText;
+                        FString PartText;
+                        if (PartObj->TryGetStringField(TEXT("text"), PartText))
+                        {
+                            ChunkText += PartText;
+                        }
                     }
+                    else if (PartType == TEXT("tool_call"))
+                    {
+                        // Pull out the embedded tool_call object and
+                        // collect (name, arguments) into the pending
+                        // list. The arguments sub-object is re-serialised
+                        // to a compact string here so the worker thread
+                        // can hand it directly to ILiteRtLmTool::Execute
+                        // without needing to re-serialise.
+                        const TSharedPtr<FJsonObject>* ToolCallObjPtr = nullptr;
+                        if (PartObj->TryGetObjectField(TEXT("tool_call"), ToolCallObjPtr)
+                            && ToolCallObjPtr != nullptr
+                            && ToolCallObjPtr->IsValid())
+                        {
+                            const TSharedPtr<FJsonObject>& ToolCallObj = *ToolCallObjPtr;
+
+                            FString ToolNameStr;
+                            ToolCallObj->TryGetStringField(TEXT("name"), ToolNameStr);
+
+                            const TSharedPtr<FJsonObject>* ArgsObjPtr = nullptr;
+                            FString ArgsJsonStr = TEXT("{}");
+                            if (ToolCallObj->TryGetObjectField(TEXT("arguments"), ArgsObjPtr)
+                                && ArgsObjPtr != nullptr
+                                && ArgsObjPtr->IsValid())
+                            {
+                                TSharedRef<TJsonWriter<>> ArgsWriter =
+                                    TJsonWriterFactory<>::Create(&ArgsJsonStr);
+                                FJsonSerializer::Serialize(ArgsObjPtr->ToSharedRef(), ArgsWriter);
+                            }
+
+                            if (!ToolNameStr.IsEmpty())
+                            {
+                                FPendingToolCall NewCall;
+                                NewCall.Name          = FName(*ToolNameStr);
+                                NewCall.ArgumentsJson = MoveTemp(ArgsJsonStr);
+                                StreamPendingToolCalls.Add(MoveTemp(NewCall));
+                            }
+                            else
+                            {
+                                UE_LOG(LogInoAgents, Warning,
+                                       TEXT("FLiteRtLmConversationWorker: tool_call chunk has no name field, dropping: %s"),
+                                       *ChunkJson);
+                            }
+                        }
+                    }
+                    // Any other part type is currently ignored. A
+                    // future iteration may handle audio / image
+                    // response parts here.
                 }
             }
 
@@ -473,6 +692,29 @@ void FLiteRtLmConversationWorker::DispatchErrorOnGameThread(FString ErrorMessage
         if (ULiteRtLmConversation* Conv = WeakOwnerCopy.Get())
         {
             Conv->OnError.Broadcast(ErrorMessage);
+        }
+    });
+}
+
+void FLiteRtLmConversationWorker::DispatchToolCalledOnGameThread(
+    FName ToolName, FString ArgumentsJson, FString ResultJson)
+{
+    // Dispatched from the worker thread AFTER ExecuteToolSynchronously
+    // has already run the tool on the game thread and returned with
+    // a result. This broadcast is purely observational — it tells
+    // listeners "this tool ran with these arguments and returned
+    // this JSON". Listeners who want to block / filter / modify
+    // tool behaviour are not supported in D.4; they would need the
+    // deferred-result API that is stubbed for future work.
+    TWeakObjectPtr<ULiteRtLmConversation> WeakOwnerCopy = WeakOwner;
+    AsyncTask(ENamedThreads::GameThread,
+        [WeakOwnerCopy, ToolName,
+         ArgumentsJson = MoveTemp(ArgumentsJson),
+         ResultJson = MoveTemp(ResultJson)]()
+    {
+        if (ULiteRtLmConversation* Conv = WeakOwnerCopy.Get())
+        {
+            Conv->OnToolCalled.Broadcast(ToolName, ArgumentsJson, ResultJson);
         }
     });
 }

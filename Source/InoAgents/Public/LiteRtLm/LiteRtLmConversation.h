@@ -42,18 +42,24 @@ extern "C" {
  * delegate broadcasts. Blueprint code only ever sees delegates firing on
  * the game thread — there is no thread-safety burden on callers.
  *
- * Milestone D.3 surface: SendMessageAsync (streaming via
+ * Milestone D.4 surface: SendMessageAsync (streaming via
  * litert_lm_conversation_send_message_stream on the worker), OnToken
- * (per-chunk), OnComplete (once at end with full accumulated text),
- * OnError (once on failure), Cancel. D.4 will add OnToolCalled and
- * SubmitDeferredToolResult.
+ * (per-chunk text delta), OnComplete (once at end with full
+ * accumulated text from the final round), OnError (once on failure),
+ * OnToolCalled (diagnostic, fires after each tool round-trip),
+ * Cancel, Shutdown, SubmitDeferredToolResult (stubbed for future).
  *
  * Per-send ordering guarantee: OnToken fires zero or more times on
- * the game thread, in order, followed by exactly one of OnComplete
- * (if the stream finished cleanly) or OnError (if it failed or was
- * cancelled). A caller that only wants the final string can ignore
- * OnToken and read the text passed to OnComplete — the worker
- * accumulates chunks itself.
+ * the game thread, in order, for text chunks from the FINAL round
+ * of the agent loop only (tokens emitted during intermediate
+ * tool-call rounds are suppressed — the caller never sees the
+ * model's tool-call JSON as OnToken). OnToolCalled fires zero or
+ * more times on the game thread for each executed tool call, in
+ * order. After all rounds complete, exactly one of OnComplete or
+ * OnError fires, always strictly AFTER every OnToken / OnToolCalled
+ * broadcast for the same send. A caller that only wants the final
+ * answer can ignore OnToken and OnToolCalled and read the text
+ * passed to OnComplete.
  */
 UCLASS(BlueprintType)
 class INOAGENTS_API ULiteRtLmConversation : public UObject
@@ -156,6 +162,27 @@ public:
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void Shutdown();
 
+    /**
+     * Advanced: submit a tool result asynchronously, after the
+     * conversation worker has already returned control to the game
+     * thread waiting for it. Reserved for a future iteration where
+     * tool implementations need to do their own async work (network
+     * calls, disk I/O, user confirmation dialogs) before answering.
+     *
+     * STUBBED in Milestone D.4 — all tool calls are executed
+     * synchronously on the game thread inside the conversation's
+     * agent loop, which blocks the worker thread until Execute
+     * returns. Calling this method in D.4 logs a warning and is
+     * otherwise a no-op.
+     *
+     * The method exists in the header now so that consumers of the
+     * plugin can already wire it up in Blueprint — a future commit
+     * will add the worker-side state machine that actually consumes
+     * the deferred result.
+     */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    void SubmitDeferredToolResult(FName ToolCallId, const FString& ResultJson);
+
     // ------------------------------------------------------------------
     // Delegates (multicast, Blueprint-bindable)
     // ------------------------------------------------------------------
@@ -189,6 +216,27 @@ public:
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
     FOnLiteRtLmError OnError;
+
+    /**
+     * Diagnostic event: fires AFTER a tool has been executed and its
+     * result has been fed back into the conversation. Broadcast on
+     * the game thread with the tool name, the arguments JSON the
+     * model supplied, and the result JSON the tool returned.
+     *
+     * This is purely observational, for debug UI, logs, and
+     * validation assertions in smoke tests. The tool call itself is
+     * handled transparently inside the conversation worker — you do
+     * NOT need to bind OnToolCalled to make tool calls work. You
+     * only bind it if you want visibility into which tools ran.
+     *
+     * Fires once per tool call executed during a single
+     * SendMessageAsync (so zero or more times per send, depending on
+     * whether the model decided to use a tool and how many rounds
+     * the agent loop ran). All broadcasts fire strictly before the
+     * terminal OnComplete / OnError broadcast for the same send.
+     */
+    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
+    FOnLiteRtLmToolCalled OnToolCalled;
 
     // ------------------------------------------------------------------
     // Internal — called by ULiteRtLmSubsystem::CreateConversation only

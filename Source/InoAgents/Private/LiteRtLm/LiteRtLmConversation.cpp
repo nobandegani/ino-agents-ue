@@ -71,16 +71,68 @@ void ULiteRtLmConversation::Initialize(
     const char* const SystemMessageJsonCStr =
         SystemMessageJson.IsEmpty() ? nullptr : SystemMessageJsonUtf8.Get();
 
-    // Create the native conversation config. D.2 leaves tools_json and
-    // messages_json null and constrained decoding off — those are the
-    // tool-calling bits that D.4 will wire up.
+    // Snapshot the subsystem's tool registry into a tools_json array
+    // for this conversation. Tools registered AFTER this call do not
+    // retroactively apply — the LiteRT-LM C API consumes tools_json
+    // during conversation_config_create and does not expose a way
+    // to mutate it afterward. Tool calls from the model are routed
+    // back to the subsystem's registry via TWeakObjectPtr in the
+    // worker, not via a per-conversation tool list, so runtime tool
+    // dispatch still uses the current registry state — the snapshot
+    // only determines what the MODEL is TOLD about.
+    //
+    // Constrained decoding is enabled whenever at least one tool is
+    // registered. It routes sampling through
+    // libGemmaModelConstraintProvider.dll, which forces the model to
+    // emit syntactically-valid function-call JSON when a tool call
+    // is expected. With no tools, constrained decoding is disabled
+    // (saves overhead) and the conversation behaves exactly as D.3.
+    FString        ToolsJson;
+    const char*    ToolsJsonCStr               = nullptr;
+    bool           bEnableConstrainedDecoding  = false;
+    FTCHARToUTF8*  ToolsJsonUtf8Ptr            = nullptr;
+
+    if (InSubsystem != nullptr)
+    {
+        ToolsJson = InSubsystem->BuildToolsJsonForConversation();
+        if (!ToolsJson.IsEmpty())
+        {
+            // Heap-allocate the UTF-8 converter so its storage outlives
+            // this stack frame through the C API call below — the call
+            // reads tools_json synchronously during config creation so
+            // this is actually overcautious (the stack frame is still
+            // alive), but doing it this way matches the pattern used
+            // for the system message and is easy to reason about.
+            ToolsJsonUtf8Ptr = new FTCHARToUTF8(*ToolsJson);
+            ToolsJsonCStr = ToolsJsonUtf8Ptr->Get();
+            bEnableConstrainedDecoding = true;
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("ULiteRtLmConversation::Initialize: tools registered, "
+                        "constrained decoding ENABLED (%d bytes of tools_json)"),
+                   ToolsJson.Len());
+        }
+    }
+
+    // Create the native conversation config. D.4 passes tools_json
+    // and enable_constrained_decoding when the subsystem has
+    // registered tools; otherwise both stay in their D.3 defaults
+    // (null / false) and the conversation behaves as a plain chat.
     LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create(
         InEngine,
         /*session_config=*/              nullptr,
         /*system_message_json=*/         SystemMessageJsonCStr,
-        /*tools_json=*/                  nullptr,
+        /*tools_json=*/                  ToolsJsonCStr,
         /*messages_json=*/               nullptr,
-        /*enable_constrained_decoding=*/ false);
+        /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
+
+    // Free the heap UTF-8 converter — the C API has already read
+    // the string by the time conversation_config_create returns.
+    if (ToolsJsonUtf8Ptr != nullptr)
+    {
+        delete ToolsJsonUtf8Ptr;
+        ToolsJsonUtf8Ptr = nullptr;
+    }
 
     if (NativeConvConfig == nullptr)
     {
@@ -104,9 +156,13 @@ void ULiteRtLmConversation::Initialize(
 
     // Hand the native resources to a new worker. From this point on, the
     // worker owns them — it will destroy them in its destructor when
-    // BeginDestroy → Worker.Reset() runs.
+    // BeginDestroy → Worker.Reset() runs. The subsystem weak pointer
+    // lets the worker's agent loop look up tools on the game thread
+    // without routing through this UObject (the delegates live here
+    // but the tool registry lives on the subsystem).
     Worker = MakeUnique<FLiteRtLmConversationWorker>(
         TWeakObjectPtr<ULiteRtLmConversation>(this),
+        TWeakObjectPtr<ULiteRtLmSubsystem>(InSubsystem),
         NativeConv,
         NativeConvConfig);
 
@@ -158,6 +214,23 @@ void ULiteRtLmConversation::Shutdown()
     // null pointer does nothing. BeginDestroy calls the same
     // Worker.Reset() again, which also becomes a no-op after Shutdown.
     Worker.Reset();
+}
+
+void ULiteRtLmConversation::SubmitDeferredToolResult(
+    FName ToolCallId, const FString& ResultJson)
+{
+    // Stubbed for Milestone D.4 — see the header doc-comment. All
+    // D.4 tool calls are resolved synchronously inside the worker's
+    // agent loop via a game-thread FEvent round-trip, so there is
+    // nothing for this method to unblock. The future implementation
+    // will use ToolCallId to look up a pending TPromise stored on
+    // the worker and fulfil it with ResultJson.
+    UE_LOG(LogInoAgents, Warning,
+           TEXT("SubmitDeferredToolResult(%s): ignored — deferred tool "
+                "results are not wired through in Milestone D.4. All "
+                "tools execute synchronously on the game thread from "
+                "inside the worker's agent loop. (ResultJson length: %d)"),
+           *ToolCallId.ToString(), ResultJson.Len());
 }
 
 void ULiteRtLmConversation::BeginDestroy()

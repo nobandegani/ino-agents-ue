@@ -16,6 +16,7 @@ extern "C" {
 }
 
 class ULiteRtLmConversation;
+class ULiteRtLmSubsystem;
 class FRunnableThread;
 class FEvent;
 
@@ -33,14 +34,22 @@ class FEvent;
  *     native conversation + config pointers passed in. Creates the
  *     queue and stream FEvents, constructs the FRunnableThread, and
  *     begins Run().
- *   - Run() executes on the worker thread. It consumes from MessageQueue,
- *     calls litert_lm_conversation_send_message_stream, and blocks on
- *     StreamEvent until the native stream callback reports is_final or
- *     an error. The static C callback runs on LiteRT-LM's internal
- *     thread (NOT our worker thread); it copies each chunk, dispatches
- *     an OnToken broadcast to the game thread via AsyncTask, and on
- *     the final chunk signals StreamEvent so our worker thread wakes
- *     up and dispatches OnComplete (or OnError).
+ *   - Run() executes on the worker thread. It consumes from MessageQueue
+ *     and calls ProcessMessage for each entry.
+ *   - ProcessMessage runs a multi-round agent loop on the worker thread:
+ *       round 0:   send the user message
+ *       round N+1: if round N produced tool calls, execute them on the
+ *                  game thread, build a tool_result message, and send
+ *                  that via a fresh send_message_stream call on the
+ *                  same native conversation (same KV cache)
+ *       terminate: when a round produces no tool calls, its accumulated
+ *                  text is the final answer and dispatches OnComplete
+ *     Each round reuses the same static stream callback
+ *     (OnStreamChunkStatic). The callback runs on LiteRT-LM's internal
+ *     thread — not our worker thread — and dispatches per-chunk text
+ *     via OnToken to the game thread via AsyncTask, while quietly
+ *     collecting tool_call parts into StreamPendingToolCalls for the
+ *     worker thread to pick up after StreamEvent unblocks.
  *   - EnqueueMessage is called on the game thread to add work.
  *   - Cancel is called on the game thread to abort the in-flight stream.
  *     It sets an atomic flag and calls litert_lm_conversation_cancel_process,
@@ -76,6 +85,7 @@ public:
      */
     FLiteRtLmConversationWorker(
         TWeakObjectPtr<ULiteRtLmConversation> InOwner,
+        TWeakObjectPtr<ULiteRtLmSubsystem>    InSubsystem,
         LiteRtLmConversation* InConversation,
         LiteRtLmConversationConfig* InConversationConfig);
 
@@ -116,13 +126,52 @@ public:
 
 private:
     /**
-     * Process one user message from start to finish: build the JSON
-     * message, kick off litert_lm_conversation_send_message_stream,
-     * block on StreamEvent until the native stream callback reports
-     * is_final or an error, then dispatch OnComplete or OnError back
-     * to the game thread. Runs on the worker thread.
+     * One pending tool call collected from the current round's stream.
+     * Built by OnStreamChunk on the LiteRT-LM callback thread,
+     * consumed by ProcessMessage on the worker thread after
+     * StreamEvent unblocks.
+     */
+    struct FPendingToolCall
+    {
+        FName   Name;
+        FString ArgumentsJson;  // object, serialised
+    };
+
+    /**
+     * Process one user message from start to finish: runs the
+     * multi-round agent loop described in the class header. Each
+     * round issues a fresh litert_lm_conversation_send_message_stream
+     * call on the same native conversation, blocks on StreamEvent
+     * until is_final/error, and then either executes collected tool
+     * calls and loops to the next round, or dispatches OnComplete
+     * with the final text. Runs on the worker thread.
      */
     void ProcessMessage(const FString& UserText);
+
+    /**
+     * Run ONE round of the agent loop: reset per-round state, call
+     * send_message_stream with the given pre-built JSON message,
+     * wait for the stream to finish, and return. The caller (the
+     * outer ProcessMessage loop) inspects StreamPendingToolCalls,
+     * StreamError, StreamAccumulated, and bStreamCancelled after
+     * this returns to decide what to do next. Returns true if the
+     * round ran the stream successfully (regardless of whether it
+     * produced tool calls or terminal text); returns false if the
+     * stream failed to start (in which case StreamError is
+     * populated and the caller should dispatch OnError).
+     */
+    bool RunOneStreamRound(const FString& MessageJson);
+
+    /**
+     * Execute a single tool call on the game thread and return the
+     * tool's result JSON. Runs on the worker thread; internally
+     * queues an AsyncTask to the game thread, blocks on an FEvent
+     * until the task fulfils the result, and returns. If the
+     * subsystem has been GC'd or the tool is not registered, returns
+     * a JSON-formatted error string that the caller forwards to
+     * the model verbatim.
+     */
+    FString ExecuteToolSynchronously(const FPendingToolCall& Call);
 
     /**
      * Static C-callable trampoline passed to LiteRT-LM as the stream
@@ -140,9 +189,10 @@ private:
      * Instance method invoked by OnStreamChunkStatic. Runs on
      * LiteRT-LM's internal thread. Copies chunk/error strings (they
      * are valid only for the duration of this call), dispatches
-     * OnToken broadcasts to the game thread via AsyncTask, and on
-     * the final chunk populates StreamError / StreamAccumulated and
-     * signals StreamEvent so the worker thread wakes up. Never
+     * OnToken broadcasts to the game thread via AsyncTask for text
+     * parts, collects tool_call parts into StreamPendingToolCalls,
+     * and on the final chunk populates StreamError / StreamAccumulated
+     * and signals StreamEvent so the worker thread wakes up. Never
      * touches UObject state directly.
      */
     void OnStreamChunk(const char* chunk, bool is_final, const char* error_msg);
@@ -156,10 +206,25 @@ private:
     /** Dispatch an OnError(ErrorMessage) broadcast to the game thread. */
     void DispatchErrorOnGameThread(FString ErrorMessage);
 
+    /**
+     * Dispatch an OnToolCalled(ToolName, ArgumentsJson, ResultJson)
+     * broadcast to the game thread. Called once per tool executed in
+     * ExecuteToolSynchronously, strictly before OnComplete for the
+     * overall send.
+     */
+    void DispatchToolCalledOnGameThread(
+        FName ToolName, FString ArgumentsJson, FString ResultJson);
+
     // Weak reference to the UObject that owns this worker. Captured by
     // value into game-thread lambdas. Do NOT .Get() from the worker
     // thread; dereferencing is only valid on the game thread.
     TWeakObjectPtr<ULiteRtLmConversation> WeakOwner;
+
+    // Weak reference to the subsystem, used by the agent loop's
+    // game-thread tool execution task to look up tools in the
+    // registry. Same rules as WeakOwner — dereference only from
+    // game-thread lambdas, never from the worker thread directly.
+    TWeakObjectPtr<ULiteRtLmSubsystem> WeakSubsystem;
 
     // Native LiteRT-LM resources. Owned by this worker from construction
     // to destructor. Destroyed in reverse order of creation (conversation
@@ -203,11 +268,22 @@ private:
     // Cleared by the worker thread at the start of each ProcessMessage.
     TAtomic<bool> bStreamCancelled{false};
 
-    // Accumulated assistant text, written only by OnStreamChunk on
-    // LiteRT-LM's internal thread; read only by the worker thread
-    // after StreamEvent unblocks. The stream-event synchronization
-    // provides the happens-before edge — no separate lock needed.
+    // Accumulated assistant text for the CURRENT round, written only
+    // by OnStreamChunk on LiteRT-LM's internal thread; read only by
+    // the worker thread after StreamEvent unblocks. The stream-event
+    // synchronization provides the happens-before edge — no separate
+    // lock needed. Cleared at the top of every round by
+    // RunOneStreamRound so only the final round's text reaches
+    // OnComplete; tool-call rounds don't leak their text through.
     FString StreamAccumulated;
+
+    // Collected tool_call parts for the CURRENT round, written only
+    // by OnStreamChunk on the LiteRT-LM callback thread, read only
+    // by the worker thread after StreamEvent unblocks. Empty means
+    // the round was terminal (final text). Non-empty means the
+    // agent loop should execute these and send a tool_result to
+    // start the next round. Cleared at the top of every round.
+    TArray<FPendingToolCall> StreamPendingToolCalls;
 
     // Error message captured by OnStreamChunk if LiteRT-LM reports
     // error_msg != nullptr. Empty on success. Read by the worker
