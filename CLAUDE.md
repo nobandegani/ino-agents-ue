@@ -78,6 +78,19 @@ Plugins/InoAgents/
 │   └── README.md
 ├── Source/
 │   ├── InoAgents/                                 ← runtime module (UE-facing, wraps the C API)
+│   │   ├── InoAgents.Build.cs
+│   │   ├── Public/
+│   │   │   └── InoAgents.h                        ← module interface (FInoAgentsModule)
+│   │   └── Private/
+│   │       ├── InoAgents.cpp                      ← module lifecycle + DLL loading only (~140 lines)
+│   │       ├── InoAgentsLog.h                     ← shared LogInoAgents category declaration
+│   │       └── SmokeTests/                        ← phase-1 dev-time console commands
+│   │           ├── InoAgentsSmokeTestCommon.{h,cpp} ← shared helpers (model path, JSON parsing)
+│   │           ├── InoAgentsLoadEngineTest.cpp    ← InoAgents.LoadEngineTest
+│   │           ├── InoAgentsGenerateTest.cpp      ← InoAgents.GenerateTest
+│   │           ├── InoAgentsConversationTest.cpp  ← InoAgents.ConversationTest (milestone A)
+│   │           ├── InoAgentsToolCallTest.cpp      ← InoAgents.ToolCallTest (milestone B)
+│   │           └── InoAgentsStreamTest.cpp        ← InoAgents.StreamTest (milestone C)
 │   └── ThirdParty/InoAgentsLibrary/               ← External module consuming the built artifacts
 │       ├── Public/litert/lm/engine.h              ← staged header (copy of vendor/LiteRT-LM/c/engine.h)
 │       └── Win64/LiteRtLm.lib                     ← staged import library (~108 KB)
@@ -204,6 +217,28 @@ Blueprint ─┬─ UInoAgentsSubsystem    (UGameInstanceSubsystem)
 Sync tools run on the game thread. Async tools that need to do their own async work block the worker's future until the game-thread work completes. The game thread itself never blocks.
 
 **Deadlock guard:** a tool that tries to call `Generate` on the same session from within its `Execute` implementation will deadlock on the worker queue. `UInoAgentsSession::Generate` must raise an error if called during tool execution.
+
+## Phase 1 smoke tests
+
+Development-time console commands that exercise each layer of the native integration before the real UE-facing API (subsystem, session, tools) exists. They live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
+
+Invoke from the editor's Output Log command input:
+
+| Command | What it proves |
+|---|---|
+| `InoAgents.LoadEngineTest` | LiteRT-LM engine can be constructed and destroyed without crashing. |
+| `InoAgents.GenerateTest [prompt]` | Raw text generation via `session_generate_content` (no chat template). |
+| `InoAgents.ConversationTest [prompt]` | Chat-template API via `conversation_send_message` actually follows instructions. |
+| `InoAgents.ToolCallTest [prompt]` | Full tool-calling agent loop: user prompt → model emits tool call → we execute → tool result → final answer. Uses a local `add_numbers(a,b)` tool. |
+| `InoAgents.StreamTest [prompt]` | Non-blocking streaming via `generate_content_stream` with worker→game thread marshaling through `AsyncTask`. First non-blocking smoke test. |
+
+All smoke tests resolve the same default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoAgentsSmokeTest::ResolveDefaultModelPath()`. The first four are synchronous (freeze the editor for 2–15 s); only `InoAgents.StreamTest` is non-blocking and demonstrates the async-lifetime pattern the real `UInoAgentsSession` will reuse.
+
+Shared helpers (model path resolution, JSON parsing, tool-call extraction, assistant text extraction) live in `InoAgentsSmokeTestCommon.{h,cpp}` under the `InoAgentsSmokeTest` namespace. Test-specific helpers (e.g. `ExecuteAddNumbersTool`, the streaming state struct) live in the test file's anonymous namespace.
+
+To add a new smoke test, drop a new `.cpp` into `Private/SmokeTests/`. UBT auto-picks up `.cpp` files under `Private/`; no `Build.cs` changes needed. `Private/SmokeTests/` is already on the include path via `PrivateIncludePaths`.
+
+Smoke tests are compiled into every build configuration. For phase 1 that's fine — they're gated behind console commands and never run unless explicitly invoked. If any individual test grows shipping-sensitive logic, wrap that file in `#if !UE_BUILD_SHIPPING` as a follow-up change.
 
 ## Phase plan
 

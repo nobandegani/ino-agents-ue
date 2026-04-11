@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class InoAgents : ModuleRules
@@ -7,17 +8,22 @@ public class InoAgents : ModuleRules
 	public InoAgents(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		
+
 		PublicIncludePaths.AddRange(
 			new string[] {
 				// ... add public include paths required here ...
 			}
 			);
-				
-		
+
+
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				// ... add other private include paths required here ...
+				// Subdirectory of Private/ that holds the phase-1 smoke test
+				// source files and their shared helpers. Adding it here lets
+				// the test .cpp files #include "InoAgentsSmokeTestCommon.h"
+				// and #include "InoAgentsLog.h" (the latter resolves via
+				// Private/ which UBT already adds automatically).
+				Path.Combine(ModuleDirectory, "Private", "SmokeTests"),
 			}
 			);
 			
