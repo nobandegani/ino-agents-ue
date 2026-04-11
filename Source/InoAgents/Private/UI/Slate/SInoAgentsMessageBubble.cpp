@@ -6,7 +6,6 @@
 
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -66,22 +65,20 @@ void SInoAgentsMessageBubble::RebuildContent()
     .HAlign(HAlign)
     .Padding(FMargin(0.f, 4.f))
     [
-        // Cap the bubble width at ~80% of typical panel width so very
-        // long replies wrap rather than ballooning the panel. Short
-        // replies remain content-sized.
-        SNew(SBox)
-        .MaxDesiredWidth(416.f)
+        // WrapTextAt (hard pixel cap) rather than AutoWrapText (needs the
+        // parent to push a width) — our ChildSlot uses HAlign_Left/Right
+        // which shrinks to the child's desired size, and an AutoWrap text
+        // block reports its desired width as the LONGEST WORD. Result
+        // was 5-char-wide bubbles. 392 = 416 outer cap − 2*12 padding.
+        SNew(SBorder)
+        .BorderImage(BubbleBg)
+        .Padding(FMargin(12.f, 9.f))
         [
-            SNew(SBorder)
-            .BorderImage(BubbleBg)
-            .Padding(FMargin(12.f, 9.f))
-            [
-                SAssignNew(TextBlock, STextBlock)
-                .Text(CurrentText)
-                .Font(Style->BodyFont)
-                .ColorAndOpacity(FSlateColor(TextColour))
-                .AutoWrapText(true)
-            ]
+            SAssignNew(TextBlock, STextBlock)
+            .Text(CurrentText)
+            .Font(Style->BodyFont)
+            .ColorAndOpacity(FSlateColor(TextColour))
+            .WrapTextAt(392.f)
         ]
     ];
 }
