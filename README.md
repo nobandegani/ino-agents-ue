@@ -1,10 +1,13 @@
 # InoAgents
 
-Unreal Engine 5.7 runtime plugin that embeds **Google Gemma 4** on-device for tool-calling LLM agents running directly inside the game process. No network. No cloud. No subscription. No Python runtime. No second binary to ship.
+Unreal Engine 5.7 runtime plugin with two independent integrations:
 
-The plugin is designed Blueprint-first: every surface a gameplay programmer or designer needs is callable or bindable from Blueprint without writing C++.
+1. **LiteRT-LM / Google Gemma 4** — on-device tool-calling LLM agents running directly inside the game process. No network. No cloud. No subscription. No Python runtime. No second binary to ship.
+2. **ElevenLabs cloud voice API** — standalone HTTP client for ElevenLabs' audio endpoints, exposed as native Blueprint latent nodes and C++ async actions. Phase 1 ships Text-to-Dialogue streaming; TTS and STT are on the roadmap.
 
-**Status:** Milestone D is complete. The UE-facing API (subsystem, conversation, tool interface, model-config data asset, reference tool) is shipped, documented, and validated by five PIE smoke tests. See `CLAUDE.md` for architecture details and `docs/superpowers/specs/2026-04-11-milestone-d-litert-lm-ue-api-design.md` for the design record.
+The two integrations are fully decoupled — use either, both, or neither. The plugin is designed Blueprint-first: every surface a gameplay programmer or designer needs is callable or bindable from Blueprint without writing C++.
+
+**Status:** Milestone D (LiteRT-LM UE API) is complete. ElevenLabs phase 1 (Text-to-Dialogue stream) is complete. See `CLAUDE.md` for architecture details and `docs/superpowers/specs/2026-04-11-milestone-d-litert-lm-ue-api-design.md` for the LiteRT-LM design record.
 
 ---
 
@@ -13,7 +16,7 @@ The plugin is designed Blueprint-first: every surface a gameplay programmer or d
 - [What you can do with it](#what-you-can-do-with-it)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [API surface](#api-surface)
+- [LiteRT-LM API surface](#litert-lm-api-surface)
   - [`ULiteRtLmSubsystem`](#ulitertlmsubsystem--game-instance-subsystem)
   - [`ULiteRtLmConversation`](#ulitertlmconversation)
   - [`ULiteRtLmModelConfig`](#ulitertlmmodelconfig--designer-asset)
@@ -23,12 +26,22 @@ The plugin is designed Blueprint-first: every surface a gameplay programmer or d
   - [In Blueprint](#in-blueprint)
   - [In C++](#in-c)
 - [Smoke tests](#smoke-tests)
+- [ElevenLabs integration (phase 1)](#elevenlabs-integration-phase-1)
+  - [Configure the API key](#configure-the-api-key)
+  - [`UElevenLabsSettings`](#uelevenlabssettings--project-settings)
+  - [`UElevenLabsSubsystem`](#uelevenlabssubsystem--game-instance-subsystem)
+  - [`UElevenLabsTextToDialogueStream`](#uelevenlabstexttodialoguestream--latent-async-action)
+  - [Blueprint usage](#blueprint-usage-elevenlabs)
+  - [C++ usage](#c-usage-elevenlabs)
+  - [Smoke test](#elevenlabs-smoke-test)
 - [Known limitations](#known-limitations)
 - [Further reading](#further-reading)
 
 ---
 
 ## What you can do with it
+
+**On-device LLM (LiteRT-LM / Gemma 4):**
 
 - **Load a Gemma 4 `.litertlm` model asynchronously** without freezing the editor or the game thread.
 - **Stream assistant responses token-by-token** into UMG widgets, with `OnToken`, `OnComplete`, and `OnError` multicast delegates.
@@ -37,6 +50,13 @@ The plugin is designed Blueprint-first: every surface a gameplay programmer or d
 - **Register tools globally on the subsystem.** Every conversation created after registration automatically advertises them to the model via constrained decoding.
 - **Let the model call your tools.** When the model emits a tool call, the plugin executes your tool's `Execute` method on the game thread (so you can freely touch actors, components, and world state), feeds the result back into the conversation, and streams the final answer the model produces using your tool's result.
 - **Observe the full agent loop** via an `OnToolCalled` diagnostic delegate if you want a debug UI or validation assertions.
+
+**Cloud voice (ElevenLabs):**
+
+- **Synthesise multi-speaker dialogue** via a single Blueprint latent node. Pass an array of `{voice_id, text}` pairs; receive audio bytes back as they stream in from ElevenLabs.
+- **Stream audio chunks in real time** via an `OnAudioChunk` delegate that fires as each HTTP progress tick lands — useful for low-latency playback, progress bars, or piping into your own audio buffer.
+- **Cancel in-flight requests** individually or all-at-once via a single subsystem call. PIE-end teardown is automatic.
+- **Store the API key in Project Settings** with a `PasswordField`-masked developer setting. Per-call override parameter lets you fetch keys from your own secret store at runtime.
 
 All of this is reachable from Blueprint. The only native code you ever need to write is the `Execute` body of a C++ tool — and you can skip even that by implementing tools entirely in Blueprint.
 
@@ -136,7 +156,7 @@ Typical Blueprint flow (describing nodes, not screenshots):
 
 ---
 
-## API surface
+## LiteRT-LM API surface
 
 Every class and function listed here is exposed to Blueprint unless explicitly marked `(C++ only)`. Categories are `InoAgents|LiteRT-LM` and `InoAgents|LiteRT-LM|Tools` in the Blueprint context menu.
 
@@ -279,6 +299,166 @@ The plugin also ships the **Phase 1 smoke tests** under the `InoAgents.*` (no `L
 
 ---
 
+## ElevenLabs integration (phase 1)
+
+A standalone HTTP client for ElevenLabs' cloud audio API, completely independent of the LiteRT-LM subsystem. Phase 1 ships one endpoint:
+
+- **Text-to-Dialogue streaming** — `POST /v1/text-to-dialogue/stream`. Synthesises multi-speaker dialogue from an array of `{voice_id, text}` inputs and streams the resulting audio back chunk by chunk.
+
+Phases 2 (single-voice Text-to-Speech) and 3 (Speech-to-Text) are on the roadmap and will reuse the same settings / subsystem scaffolding.
+
+Blueprint category: **`InoAgents|ElevenLabs`**. Native classes live under `Source/InoAgents/{Public,Private}/ElevenLabs/`. Nothing in this section depends on LiteRT-LM — you can use ElevenLabs without ever loading a `.litertlm` model, and vice versa.
+
+### Configure the API key
+
+1. Get a key at **https://elevenlabs.io/app/settings/api-keys**.
+2. In the Unreal Editor, open **Edit → Project Settings → Plugins → InoAgents ElevenLabs**.
+3. Paste the key into the **API Key** field (it's masked as a password) and close the dialog. The value is persisted to `Config/DefaultGame.ini` under `[/Script/InoAgents.ElevenLabsSettings]`.
+4. If you edit the key mid-PIE-session, either restart PIE or run `InoAgents.ElevenLabs.ReloadSettings` in the console to re-cache it into the subsystem.
+
+**Security note.** The key is stored **plaintext** in the ini. Do not commit `DefaultGame.ini` to a public repo once a real key is pasted in — treat it like any other dev secret. For shipping builds, pass a runtime-fetched key to the async action's `ApiKeyOverride` parameter instead of baking it into the ini.
+
+### `UElevenLabsSettings` — Project Settings
+
+A `UDeveloperSettings` subclass. Fields:
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `ApiKey` | `FString` (password-masked) | *(empty)* | xi-api-key for ElevenLabs. |
+| `BaseUrl` | `FString` | *(empty → `https://api.elevenlabs.io`)* | Override for regional routing (`api.us.elevenlabs.io`, `api.eu.residency.elevenlabs.io`, `api.in.residency.elevenlabs.io`). |
+| `DefaultModelId` | `FString` | `eleven_v3` | Used when a per-call request leaves `ModelId` empty. |
+| `DefaultOutputFormat` | enum | `Mp3_44100_128` | Used when no explicit format is passed. |
+
+### `UElevenLabsSubsystem` — game instance subsystem
+
+Shared state and lifecycle anchor. One instance per game instance; access via `Get Game Instance Subsystem (ULevenLabsSubsystem)` in Blueprint or `GetGameInstance()->GetSubsystem<UElevenLabsSubsystem>()` in C++.
+
+The subsystem caches settings at `Initialize()`, holds a UPROPERTY `TSet` of every in-flight async action (so GC can't eat them mid-request), and calls `CancelAll()` from `Deinitialize()` so HTTP responses arriving after PIE end can't land on freed UObjects. You rarely need to touch it directly — the async actions below wire themselves up automatically — but it's useful for global cancellation and for reloading settings.
+
+| Function | Kind | Purpose |
+|---|---|---|
+| `ReloadSettings()` | `BlueprintCallable` | Re-reads `UElevenLabsSettings` into the cached fields without restarting PIE. Also available as the `InoAgents.ElevenLabs.ReloadSettings` console command. |
+| `CancelAll()` | `BlueprintCallable` | Aborts every in-flight ElevenLabs request tracked by the subsystem. Each action receives `OnError("cancelled")` before being released. Called automatically at PIE end. |
+| `GetApiKey()` / `GetBaseUrl()` / `GetDefaultModelId()` / `GetDefaultOutputFormat()` | `(C++ only)` | Cached accessors used internally by the async actions. You usually don't need to call these — bind them via the async action's per-call override parameter instead. |
+
+### `UElevenLabsTextToDialogueStream` — latent async action
+
+A `UBlueprintAsyncActionBase` subclass. This is the Blueprint-friendly front door for the dialogue endpoint: drag it as a single latent node with three output exec pins.
+
+Static factory:
+
+```cpp
+UElevenLabsTextToDialogueStream::StreamTextToDialogue(
+    UObject*                          WorldContextObject,
+    const FElevenLabsDialogueRequest& Request,
+    FString                           ApiKeyOverride);
+```
+
+Multicast delegates (all `BlueprintAssignable`, all fire on the game thread):
+
+| Delegate | Params | Fires |
+|---|---|---|
+| `OnAudioChunk` | `(TArray<uint8> AudioBytes, int64 TotalBytesReceived)` | Zero or more times per request, as HTTP progress ticks land. `AudioBytes` is the **new bytes only** (not the full accumulated buffer), ready to append to your own playback buffer. |
+| `OnComplete` | `(TArray<uint8> FullAudioBytes, EElevenLabsOutputFormat OutputFormat)` | Exactly once on success (2xx). `FullAudioBytes` is the complete response, byte-equal to concatenating every `OnAudioChunk` payload. |
+| `OnError` | `(FString ErrorMessage)` | Exactly once on any failure path: missing API key, validation error, HTTP non-2xx, network failure, or explicit `CancelStream()`. Message is human-readable and safe to surface in UI. |
+
+Additional method:
+
+| Function | Kind | Purpose |
+|---|---|---|
+| `CancelStream()` | `BlueprintCallable` | Aborts the in-flight request. Fires `OnError("cancelled")` then destroys the action. Safe to call from any handler. No-op if the action has already finished. |
+
+### Request types
+
+`FElevenLabsDialogueRequest`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `Inputs` | `TArray<FElevenLabsDialogueInput>` | *(empty)* | 1–10 unique voice IDs. Each input is a `{Text, VoiceId}` pair. |
+| `ModelId` | `FString` | *(empty → subsystem default)* | e.g. `"eleven_v3"`. |
+| `OutputFormat` | `EElevenLabsOutputFormat` | `Mp3_44100_128` | MP3 / PCM / u-law codec + sample rate. |
+| `LanguageCode` | `FString` | *(empty → auto-detect)* | ISO 639-1 code. |
+| `Stability` | `float` | `0.5` | Voice settings stability, clamped 0..1. |
+| `Seed` | `int64` | `-1` (omit) | Deterministic sampling seed, 0..4294967295. Negative values omit the field. |
+| `ApplyTextNormalization` | enum | `Auto` | `Auto` / `On` / `Off`. |
+
+### <a id="blueprint-usage-elevenlabs"></a>Blueprint usage
+
+Typical flow (describing nodes, not screenshots):
+
+1. On **BeginPlay** (or button click) build an `FElevenLabsDialogueRequest`: drag off a Make struct node, populate the `Inputs` array with two-or-more `{Text, VoiceId}` entries via Make `FElevenLabsDialogueInput` nodes.
+2. Drag out the **`ElevenLabs Stream Text-to-Dialogue`** node (search for "eleven" in the context menu). Hook the `WorldContextObject` pin to `self`, feed your request struct into `Request`, leave `ApiKeyOverride` empty to use the Project Settings key.
+3. The node has three output exec pins that fire as events occur:
+   - **`On Audio Chunk`** — fires many times. Use `Append Bytes` into a local `TArray<byte>` variable if you want to buffer, or pipe the bytes directly into your own decoder.
+   - **`On Complete`** — fires once with the full buffer. Save to disk, pipe into `USoundWaveProcedural`, or hand to your own audio pipeline.
+   - **`On Error`** — fires once on failure. Display the message in UI or log it.
+4. Do NOT bind the output pins and then assume the node returns immediately — it IS a latent node, so execution flows out of the event pins as they fire, not the "finished" pin (there is no finished pin; each pin is terminal for its event type).
+
+### <a id="c-usage-elevenlabs"></a>C++ usage
+
+```cpp
+#include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
+#include "ElevenLabs/ElevenLabsTypes.h"
+
+FElevenLabsDialogueRequest Req;
+Req.Inputs.Add({ TEXT("Knock knock."),         TEXT("JBFqnCBsd6RMkjVDRZzb") });
+Req.Inputs.Add({ TEXT("Who's there?"),         TEXT("Aw4FAjKCGjjNkVhN1Xmq") });
+Req.Inputs.Add({ TEXT("A plugin, streaming."), TEXT("JBFqnCBsd6RMkjVDRZzb") });
+Req.OutputFormat = EElevenLabsOutputFormat::Mp3_44100_128;
+
+UElevenLabsTextToDialogueStream* Action =
+    UElevenLabsTextToDialogueStream::StreamTextToDialogue(
+        /*WorldContextObject=*/ this,
+        /*Request=*/            Req,
+        /*ApiKeyOverride=*/     FString());  // empty = use Project Settings key
+
+Action->OnAudioChunk.AddDynamic(this, &UMyClass::HandleChunk);
+Action->OnComplete  .AddDynamic(this, &UMyClass::HandleComplete);
+Action->OnError     .AddDynamic(this, &UMyClass::HandleError);
+Action->Activate();   // in Blueprint this fires automatically; from C++ we call it
+```
+
+Handler signatures **must take parameters by value** (not `const&`) — UE's `AddDynamic` does strict method-pointer matching against the delegate's declared signature, and a `const TArray<uint8>&` handler will fail to bind at compile time with a cryptic error. This matches the plugin's existing LiteRT-LM convention:
+
+```cpp
+UFUNCTION() void HandleChunk   (TArray<uint8> AudioBytes, int64 TotalBytesReceived);
+UFUNCTION() void HandleComplete(TArray<uint8> FullAudioBytes, EElevenLabsOutputFormat Format);
+UFUNCTION() void HandleError   (FString ErrorMessage);
+```
+
+The `Action` object's lifetime is owned by `UElevenLabsSubsystem` — you do NOT need to `AddToRoot` it or store it in a `UPROPERTY` on the caller. The subsystem drops its reference once a terminal delegate fires, and GC collects the action on the next pass.
+
+### <a id="elevenlabs-smoke-test"></a>Smoke test
+
+Two PIE-only console commands under the `InoAgents.ElevenLabs.*` namespace:
+
+| Command | What it does |
+|---|---|
+| `InoAgents.ElevenLabs.DialogueStreamTest` | Dispatches a fixed 3-line dialogue using two ElevenLabs sample voices, logs each chunk's size as it arrives, and saves the resulting audio to `Saved/InoAgents/ElevenLabs/test.mp3` (or `.pcm` / `.ulaw` depending on the default output format). Logs **PASS** and the absolute output path on success. |
+| `InoAgents.ElevenLabs.ReloadSettings` | Re-reads `UElevenLabsSettings` into the subsystem's cached fields. Run this after editing the API key in Project Settings if you want to pick up the change without restarting PIE. |
+
+Expected log output for a successful run:
+
+```
+LogInoAgents: UElevenLabsTextToDialogueStream: POST https://api.elevenlabs.io/v1/text-to-dialogue/stream?output_format=mp3_44100_128 (3 inputs, N-byte body)
+LogInoAgents: DialogueStreamTest: chunk   1 (+0.412 s) — 8192 bytes (total 8192)
+LogInoAgents: DialogueStreamTest: chunk   2 (+0.503 s) — 16384 bytes (total 24576)
+...
+LogInoAgents: DialogueStreamTest: COMPLETE — N chunks, M bytes, X.XX s
+LogInoAgents: DialogueStreamTest: PASS — saved to <abs path>\Saved\InoAgents\ElevenLabs\test.mp3
+```
+
+Open the saved file in VLC / Windows Media Player — you should hear the three-line dialogue spoken by two different voices.
+
+Failure modes:
+
+- **`API key is empty; set it in Project Settings -> Plugins -> InoAgents ElevenLabs`** → Either you haven't set the key, or you set it mid-PIE-session but didn't run `InoAgents.ElevenLabs.ReloadSettings`.
+- **`HTTP 401: ...`** → Key is invalid or expired.
+- **`HTTP 402: ...`** → Key is valid but your account doesn't have access to the requested voices. The smoke test uses the two sample voices from the ElevenLabs docs (`JBFqnCBsd6RMkjVDRZzb` and `Aw4FAjKCGjjNkVhN1Xmq`); swap them out for voices from your own library if you hit this.
+- **`HTTP 422: ...`** → Validation error. The message usually identifies the field; check it against `FElevenLabsDialogueRequest`.
+
+---
+
 ## Known limitations
 
 - **Windows Win64 only.** Android, iOS, Linux, and macOS phases are planned — the Bazel build already has configs for all four, only the `InoAgentsLibrary.Build.cs` branches need porting.
@@ -287,6 +467,10 @@ The plugin also ships the **Phase 1 smoke tests** under the `InoAgents.*` (no `L
 - **Deferred tool results are stubbed.** `SubmitDeferredToolResult` exists in the header so Blueprint code can wire it up, but the worker-side state machine that would consume async tool results is not implemented yet. All current tools must be synchronous (game-thread `Execute` returns a result immediately).
 - **Tool calling is reliable on Gemma family models only.** The `libGemmaModelConstraintProvider.dll` that makes constrained decoding work is Gemma-specific. Non-Gemma models load and chat fine but tool calls may produce unreliable JSON.
 - **Gemma 4 E2B sometimes ignores tools and computes inline.** Small models are small. Steering the model with a very direct system message (`"You MUST call the add_numbers tool ..."`) and tool descriptions (`"Always use this tool when ..."`) moves the needle significantly, but don't expect 100% tool-use rates on the smallest variant.
+- **ElevenLabs integration is phase 1 only.** Only `/v1/text-to-dialogue/stream` is wired up today. Single-voice Text-to-Speech (`/v1/text-to-speech/{voice_id}/stream`) and Speech-to-Text (`/v1/speech-to-text`) are planned for phases 2 and 3 respectively.
+- **ElevenLabs delivers raw audio bytes, not a `USoundWave`.** The plugin hands you the full `TArray<uint8>` in `OnComplete` (and incrementally in `OnAudioChunk`). Decoding MP3 / PCM / u-law into something UE's audio engine can play is the caller's responsibility — a future phase may add a built-in helper that constructs a `USoundWaveProcedural` from the buffer.
+- **ElevenLabs API key is stored plaintext in `DefaultGame.ini`.** Do not commit the ini with a real key. For shipping builds, pass a runtime-fetched key via the async action's `ApiKeyOverride` parameter instead.
+- **ElevenLabs rate-limit / retry handling is not built in.** 4xx / 5xx responses fire `OnError` with the server's message; the caller decides whether to retry and when. No exponential backoff, no queueing.
 
 ---
 
