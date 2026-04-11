@@ -629,7 +629,13 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
                     }
 
                     // Serialise the arguments sub-object (or default
-                    // to "{}" for zero-arg tools).
+                    // to "{}" for zero-arg tools). Use a condensed
+                    // writer so the result is a single-line JSON
+                    // string — the default TJsonWriter emits
+                    // pretty-printed JSON with newlines between
+                    // fields, which makes log lines look truncated
+                    // and confuses the tool Execute wrapper if it
+                    // naively splits on whitespace.
                     FString ArgsJsonStr = TEXT("{}");
                     const TSharedPtr<FJsonObject>* ArgsObjPtr = nullptr;
                     if (FunctionObj->TryGetObjectField(TEXT("arguments"), ArgsObjPtr)
@@ -637,8 +643,8 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
                         && ArgsObjPtr->IsValid())
                     {
                         ArgsJsonStr.Reset();
-                        TSharedRef<TJsonWriter<>> ArgsWriter =
-                            TJsonWriterFactory<>::Create(&ArgsJsonStr);
+                        TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> ArgsWriter =
+                            TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&ArgsJsonStr);
                         FJsonSerializer::Serialize(ArgsObjPtr->ToSharedRef(), ArgsWriter);
                     }
 

@@ -447,8 +447,11 @@ FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
         return FString();
     }
 
+    // Condensed writer keeps the output a single compact line —
+    // smaller payload to pass through the C API and cleaner to log.
     FString OutJson;
-    const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+    const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutJson);
     FJsonSerializer::Serialize(SchemaArray, Writer);
 
     return OutJson;
