@@ -233,14 +233,43 @@ No backend abstraction layer. LiteRT-LM is the one backend, and its public C API
 
 ## Model file distribution
 
-Gemma 4 E2B `.litertlm` model is ~3.2 GB at Q4_0. **Never commit to the repo.** Never ship via `RuntimeDependencies`. Options:
+Gemma 4 `.litertlm` model files are 2.5–5 GB and **must never be committed**. They are also not redistributed with the plugin — developers download the model files they need manually.
 
-- **Dev / editor:** sideload from a configured path (`UInoAgentsModelConfig` data asset pointing at a local `.litertlm` file)
-- **Shipping builds:** download on first run to `FPaths::ProjectPersistentDownloadDir()`, verify SHA-256 against a manifest baked into the game, show a progress UI
+### Dev-time location (inside the plugin)
 
-Model sources are Hugging Face: `litert-community/gemma-4-E2B-it-litert-lm`, `litert-community/gemma-4-E4B-it-litert-lm`.
+```
+Plugins/InoAgents/
+└── Models/
+    └── gemma-4-E2B-it.litertlm          ← 2.58 GB, developer-downloaded, gitignored
+```
 
-Model configuration lives in a `UDataAsset` subclass so designers can swap models per level / difficulty / demo without code changes.
+**Why inside the plugin and not in the host project:** the plugin is the primary artifact; the demo project exists only to exercise the plugin. Models travel with the plugin so that the plugin is self-contained when someone consumes it. The plugin's `.gitignore` excludes `Models/` so the 2.5 GB file can never land in git.
+
+**How the plugin resolves the model path at runtime:**
+
+```cpp
+const FString BaseDir = IPluginManager::Get().FindPlugin(TEXT("InoAgents"))->GetBaseDir();
+const FString ModelPath = FPaths::Combine(BaseDir, TEXT("Models"), TEXT("gemma-4-E2B-it.litertlm"));
+```
+
+This is the same `IPluginManager` pattern used in `FInoAgentsModule::StartupModule` for locating the native DLLs. One consistent convention: *anything the plugin needs to find at runtime lives under the plugin's base directory and is located via `IPluginManager::FindPlugin`*.
+
+### Phase 1 smoke test
+
+Hardcoded path (`Models/gemma-4-E2B-it.litertlm`) is acceptable for the phase-1 bring-up milestone. A later milestone replaces the hardcode with a `UInoAgentsModelConfig` data asset so designers can swap models per demo / difficulty / level without code changes.
+
+### Shipping builds (not phase 1)
+
+For shipping, the model can't live inside the plugin tree — it would bloat the packaged build. The plan for shipping, which we will implement in a later phase:
+- **Download on first run** to `FPaths::ProjectPersistentDownloadDir()` (canonical UE location for runtime-acquired user content)
+- Verify SHA-256 against a manifest baked into the game
+- Show a progress UI (the download is 2.5–5 GB)
+
+### Model sources
+
+Hugging Face, Apache 2.0, public (no gating, no auth):
+- `litert-community/gemma-4-E2B-it-litert-lm` — 2.58 GB, Text + Image
+- `litert-community/gemma-4-E4B-it-litert-lm` — ~5 GB, Text + Image + Audio
 
 ## How to update LiteRT-LM
 
