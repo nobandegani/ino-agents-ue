@@ -9,6 +9,7 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "Serialization/JsonWriter.h"  // EscapeJsonString() used by ConversationTest
 
 // LiteRT-LM C API. Staged into Source/ThirdParty/InoAgentsLibrary/Public/ by
 // LiteRtLm/scripts/build-win64.ps1. The include path is added via
@@ -465,38 +466,6 @@ static FAutoConsoleCommand GGenerateTestCommand(
 //     InoAgents.ConversationTest
 //     InoAgents.ConversationTest Write a haiku about Unreal Engine
 // ============================================================================
-
-namespace
-{
-    /**
-     * Minimal JSON string escape for embedding a user prompt inside a
-     * { "text": "..." } field. Handles the characters that would otherwise
-     * break the JSON: backslash, double quote, newline, carriage return, tab.
-     *
-     * This is not a full JSON escaper — it does not handle control characters
-     * below 0x20 (which rarely appear in prompts) or Unicode escapes (\uXXXX).
-     * A production implementation would go through UE's Json module. For a
-     * phase-1 smoke test, this is sufficient and dependency-free.
-     */
-    FString EscapeJsonString(const FString& In)
-    {
-        FString Out;
-        Out.Reserve(In.Len() + 8);
-        for (const TCHAR Ch : In)
-        {
-            switch (Ch)
-            {
-                case TEXT('\\'): Out += TEXT("\\\\"); break;
-                case TEXT('"'):  Out += TEXT("\\\""); break;
-                case TEXT('\n'): Out += TEXT("\\n");  break;
-                case TEXT('\r'): Out += TEXT("\\r");  break;
-                case TEXT('\t'): Out += TEXT("\\t");  break;
-                default:         Out += Ch;            break;
-            }
-        }
-        return Out;
-    }
-}
 
 static void RunConversationSmokeTest(const TArray<FString>& Args)
 {
