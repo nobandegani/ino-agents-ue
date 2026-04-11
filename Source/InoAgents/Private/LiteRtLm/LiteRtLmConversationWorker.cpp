@@ -6,9 +6,13 @@
 #include "LiteRtLm/LiteRtLmConversation.h"
 
 #include "Async/Async.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"  // EscapeJsonString
 
 #include "litert/lm/engine.h"
@@ -338,16 +342,72 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
         StreamError = FString(UTF8_TO_TCHAR(error_msg));
     }
 
-    // Accumulate text chunks and dispatch OnToken broadcasts to the
-    // game thread — unless the caller has cancelled, in which case
-    // we suppress further token dispatches (the final OnError will
-    // be "Cancelled by caller", and leaking token broadcasts through
-    // after cancel would confuse observers).
+    // Parse the chunk JSON and extract text parts, then accumulate +
+    // dispatch. LiteRT-LM's conversation_send_message_stream delivers
+    // each chunk as a FULL assistant message JSON wrapping one token
+    // delta, not plain text:
+    //     {"role":"assistant","content":[{"type":"text","text":"delta"}, ...]}
+    // We unwrap the JSON here so that OnToken callers see only the
+    // assistant text delta. Tool-call parts (D.4) will be handled in
+    // a separate branch here and routed through OnToolCalled.
+    //
+    // Suppressed entirely if the stream is cancelled — the final
+    // terminal broadcast will be OnError("Cancelled by caller") and
+    // leaking tokens through after cancel would confuse observers.
     if (chunk != nullptr && *chunk != '\0' && !bCancelledNow)
     {
-        const FString ChunkStr(UTF8_TO_TCHAR(chunk));
-        StreamAccumulated += ChunkStr;
-        DispatchTokenOnGameThread(ChunkStr);
+        const FString ChunkJson(UTF8_TO_TCHAR(chunk));
+
+        TSharedPtr<FJsonObject> RootObj;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ChunkJson);
+        if (FJsonSerializer::Deserialize(Reader, RootObj) && RootObj.IsValid())
+        {
+            FString ChunkText;
+            const TArray<TSharedPtr<FJsonValue>>* ContentArrayPtr = nullptr;
+            if (RootObj->TryGetArrayField(TEXT("content"), ContentArrayPtr)
+                && ContentArrayPtr != nullptr)
+            {
+                for (const TSharedPtr<FJsonValue>& PartValue : *ContentArrayPtr)
+                {
+                    if (!PartValue.IsValid() || PartValue->Type != EJson::Object)
+                    {
+                        continue;
+                    }
+                    const TSharedPtr<FJsonObject>& PartObj = PartValue->AsObject();
+
+                    FString PartType;
+                    PartObj->TryGetStringField(TEXT("type"), PartType);
+                    if (PartType != TEXT("text"))
+                    {
+                        // D.4: handle type=="tool_call" here.
+                        continue;
+                    }
+
+                    FString PartText;
+                    if (PartObj->TryGetStringField(TEXT("text"), PartText))
+                    {
+                        ChunkText += PartText;
+                    }
+                }
+            }
+
+            if (!ChunkText.IsEmpty())
+            {
+                StreamAccumulated += ChunkText;
+                DispatchTokenOnGameThread(ChunkText);
+            }
+        }
+        else
+        {
+            // Parse failure on a chunk is unexpected — LiteRT-LM
+            // should always emit well-formed JSON. Log a warning and
+            // keep going; accumulated text will just be incomplete
+            // for this send. Don't abort the stream — we still want
+            // the final callback to fire so the worker unblocks.
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("FLiteRtLmConversationWorker: failed to parse stream chunk JSON, dropping: %s"),
+                   *ChunkJson);
+        }
     }
 
     // On the final callback (or on error), signal the worker thread

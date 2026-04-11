@@ -39,6 +39,7 @@
 #include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "UObject/GarbageCollection.h"
 
 namespace
 {
@@ -159,6 +160,22 @@ void UInoAgentsLiteRtLmConversationSendTestObserver::Finish()
     Subsystem    = nullptr;
 
     RemoveFromRoot();
+
+    // Force an immediate, blocking garbage collection so the
+    // ULiteRtLmConversation UObject we just released is actually
+    // destroyed RIGHT NOW — not on the next natural GC cycle. This
+    // gives deterministic teardown of the worker thread and native
+    // LiteRT-LM resources, which matters because running two
+    // conversation smoke tests back-to-back in the same PIE session
+    // otherwise fails: LiteRT-LM's engine rejects the second
+    // conversation_create call while the first native conversation
+    // is still alive.
+    //
+    // This is appropriate test-only hygiene, not a workaround for a
+    // production bug — in real gameplay, natural GC timing is fine
+    // because users aren't spinning up multiple conversations in the
+    // same tick.
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge=*/ true);
 
     UE_LOG(LogInoAgents, Log, TEXT("ConversationSendTest: DONE"));
 }
