@@ -218,6 +218,18 @@ void ULiteRtLmSubsystem::UnloadModel()
 {
     check(IsInGameThread());
 
+    // Tear down the active conversation (if any) BEFORE the engine. LiteRT-LM
+    // sessions hold raw pointers into the engine's LlmExecutor; deleting the
+    // engine first and the conversation later causes ~SessionBasic to AV when
+    // GC eventually runs BeginDestroy on the conversation UObject.
+    if (ULiteRtLmConversation* Conv = ActiveConversation.Get())
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("UnloadModel: shutting down active conversation before engine teardown"));
+        Conv->Shutdown();
+    }
+    ActiveConversation.Reset();
+
     if (Engine != nullptr)
     {
         litert_lm_engine_delete(Engine);
@@ -255,8 +267,25 @@ ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
         return nullptr;
     }
 
+    // Enforce single-conversation invariant. LiteRT-LM sessions on one engine
+    // share a single LlmExecutor + KV cache, so a second live conversation
+    // would corrupt the first. Shutdown() is synchronous: it cancels any
+    // in-flight stream, joins the worker thread, and destroys the native
+    // conversation.
+    if (ULiteRtLmConversation* Prior = ActiveConversation.Get())
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("CreateConversation: a prior conversation is still active; "
+                    "shutting it down to honour the single-conversation-per-engine "
+                    "invariant. Callers holding a reference to it will see "
+                    "SendMessageAsync error out."));
+        Prior->Shutdown();
+    }
+    ActiveConversation.Reset();
+
     ULiteRtLmConversation* Conv = NewObject<ULiteRtLmConversation>();
     Conv->Initialize(this, Engine, LoadedConfig);
+    ActiveConversation = Conv;
     return Conv;
 }
 

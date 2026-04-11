@@ -37,10 +37,17 @@ extern "C" {
  * Owns:
  *   - The loaded LiteRtLmEngine* (expensive, shared across conversations)
  *   - [D.4] A map of registered ILiteRtLmTool implementations
+ *   - A weak reference to the single currently-active ULiteRtLmConversation,
+ *     used to enforce "one conversation per engine" and to tear it down
+ *     before the engine at shutdown time.
  *
- * Does NOT own:
- *   - ULiteRtLmConversation instances — those are owned by their callers.
- *     The subsystem is a factory, not a registry.
+ * Single-conversation invariant:
+ *   LiteRT-LM sessions on the same engine share a single LlmExecutor (and
+ *   thus a single KV cache) — see runtime/core/engine_impl.cc:157. Upstream
+ *   tests serialise session use with an explicit `session->reset()` before
+ *   each new `CreateSession()` call, and the plugin enforces the same
+ *   invariant: CreateConversation auto-shuts-down any prior active
+ *   conversation before returning a new one.
  *
  * Lifecycle:
  *   Initialize()   : called by UE at game start; zero-inits members.
@@ -48,8 +55,9 @@ extern "C" {
  *   LoadModelAsync(): called by game code to load a model. Async. Fires the
  *                    OnLoaded delegate on the game thread when done.
  *   UnloadModel()  : called to destroy the engine. Safe to call with no
- *                    model loaded. Does NOT automatically tear down active
- *                    conversations — the caller is responsible for that.
+ *                    model loaded. Shuts down the active conversation (if
+ *                    any) before destroying the engine, so native resources
+ *                    are always torn down in a safe order.
  *   Deinitialize() : called by UE at game shutdown; calls UnloadModel and
  *                    [D.4] clears the tool registry.
  */
@@ -102,12 +110,12 @@ public:
     /**
      * Destroy the loaded engine. Safe to call with no model loaded (no-op).
      *
-     * IMPORTANT: if any ULiteRtLmConversation instances are still alive,
-     * their worker threads are still holding native LiteRtLmConversation
-     * pointers that reference the engine. Calling UnloadModel while those
-     * are active results in undefined behavior. The caller is responsible
-     * for destroying all conversations before unloading. The subsystem
-     * does NOT track outstanding conversations.
+     * If an active conversation exists (the one returned by the most recent
+     * CreateConversation call and still alive), UnloadModel calls Shutdown()
+     * on it first so its native LiteRtLmConversation is destroyed before
+     * the engine it references. Without this ordering, the conversation's
+     * ~SessionBasic destructor would dereference freed engine memory when
+     * GC eventually reclaims the conversation UObject.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void UnloadModel();
@@ -120,11 +128,20 @@ public:
      * Create and return a new ULiteRtLmConversation bound to the currently
      * loaded engine. Returns nullptr if no model is loaded.
      *
+     * Single-conversation enforcement: LiteRT-LM does not support two live
+     * sessions on the same engine (they share one LlmExecutor and KV cache).
+     * If a prior conversation created by this subsystem is still alive,
+     * CreateConversation calls Shutdown() on it first and logs a warning.
+     * Any in-flight stream on the prior conversation is cancelled. After
+     * Shutdown() the prior conversation is a zombie — SendMessageAsync will
+     * error — but its UObject remains valid until the caller drops their
+     * reference and GC collects it.
+     *
      * The subsystem does NOT own the returned conversation — the caller
      * must hold a reference (UPROPERTY on an actor, widget, or other
-     * UObject) to keep it alive. When no references remain, UE garbage
-     * collection destroys the conversation, which joins its worker thread
-     * and releases native resources.
+     * UObject) to keep it alive. The subsystem only keeps a TWeakObjectPtr
+     * so it can enforce the single-conversation invariant and perform
+     * ordered teardown at UnloadModel / Deinitialize time.
      *
      * Uses the currently-loaded config (LoadedConfig) for system message
      * and backend. A future iteration may add an OverrideConfig parameter
@@ -211,6 +228,14 @@ private:
     // True from the moment LoadModelAsync dispatches to the ThreadPool
     // until the OnLoaded callback fires back on the game thread.
     bool bLoadInFlight = false;
+
+    // Weak ref to the most recently created conversation. Used to enforce
+    // the single-conversation invariant and to tear the conversation down
+    // in the correct order at UnloadModel/Deinitialize time (before the
+    // engine is destroyed). Weak so the subsystem does not keep the
+    // conversation alive — callers own that decision via their own UPROPERTY
+    // references.
+    TWeakObjectPtr<ULiteRtLmConversation> ActiveConversation;
 
     // Tool registry. Keyed by the tool's GetToolName() result. Values
     // are TScriptInterface<ILiteRtLmTool>, which keeps a UPROPERTY
