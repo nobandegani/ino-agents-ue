@@ -32,7 +32,10 @@ UInoAgentsStreamingAudioComponent::UInoAgentsStreamingAudioComponent(
         this, TEXT("ProceduralWave"));
     if (ProceduralWave != nullptr)
     {
-        ProceduralWave->SampleRate  = PcmSampleRate;
+        // UE 5.7 made USoundWave::SampleRate protected — use the public
+        // SetSampleRate setter instead of direct assignment. NumChannels,
+        // Duration, SoundGroup, and bLooping are still public.
+        ProceduralWave->SetSampleRate(static_cast<uint32>(PcmSampleRate));
         ProceduralWave->NumChannels = PcmNumChannels;
         ProceduralWave->Duration    = INDEFINITELY_LOOPING_DURATION;
         ProceduralWave->SoundGroup  = SOUNDGROUP_Default;
@@ -260,7 +263,7 @@ void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, i
            SampleRate, NumChannels);
 
     ProceduralWave = NewObject<USoundWaveProcedural>(this);
-    ProceduralWave->SampleRate  = SampleRate;
+    ProceduralWave->SetSampleRate(static_cast<uint32>(SampleRate));
     ProceduralWave->NumChannels = NumChannels;
     ProceduralWave->Duration    = INDEFINITELY_LOOPING_DURATION;
     ProceduralWave->SoundGroup  = SOUNDGROUP_Default;
