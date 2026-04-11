@@ -42,10 +42,10 @@ public:
     EElevenLabsOutputFormat OutputFormat = EElevenLabsOutputFormat::Mp3_44100_128;
 
     UFUNCTION()
-    void HandleAudioChunk(TArray<uint8> AudioBytes, int64 TotalBytesReceived);
+    void HandleAudioChunk(const TArray<uint8>& AudioBytes, int64 TotalBytesReceived);
 
     UFUNCTION()
-    void HandleComplete(TArray<uint8> FullAudioBytes, EElevenLabsOutputFormat Format);
+    void HandleComplete(const TArray<uint8>& FullAudioBytes, EElevenLabsOutputFormat Format);
 
     UFUNCTION()
     void HandleError(FString ErrorMessage);

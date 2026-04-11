@@ -106,7 +106,7 @@ namespace
 }
 
 void UInoAgentsElevenLabsDialogueStreamTestObserver::HandleAudioChunk(
-    TArray<uint8> AudioBytes, int64 TotalBytesReceived)
+    const TArray<uint8>& AudioBytes, int64 TotalBytesReceived)
 {
     NumChunks += 1;
     TotalBytes = TotalBytesReceived;
@@ -118,7 +118,7 @@ void UInoAgentsElevenLabsDialogueStreamTestObserver::HandleAudioChunk(
 }
 
 void UInoAgentsElevenLabsDialogueStreamTestObserver::HandleComplete(
-    TArray<uint8> FullAudioBytes, EElevenLabsOutputFormat Format)
+    const TArray<uint8>& FullAudioBytes, EElevenLabsOutputFormat Format)
 {
     const double Total = FPlatformTime::Seconds() - StartTime;
 

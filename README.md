@@ -418,11 +418,14 @@ Action->OnError     .AddDynamic(this, &UMyClass::HandleError);
 Action->Activate();   // in Blueprint this fires automatically; from C++ we call it
 ```
 
-Handler signatures **must take parameters by value** (not `const&`) — UE's `AddDynamic` does strict method-pointer matching against the delegate's declared signature, and a `const TArray<uint8>&` handler will fail to bind at compile time with a cryptic error. This matches the plugin's existing LiteRT-LM convention:
+Handler signatures must match the delegate's declared parameter-passing convention exactly. In this plugin:
+
+- **`FString`, enums, and POD/primitive types** → pass **by value**. This matches the LiteRT-LM plugin convention.
+- **`TArray<T>` and other containers** → pass **`const TArray<T>&`** (by const reference). Declaring a container-returning delegate with by-value `TArray<uint8>` compiles fine but fails at Blueprint-time with "function/event does not match the necessary signature" when a user drags the latent node into a graph, because the Blueprint event-handler generator emits `const&` for containers unconditionally.
 
 ```cpp
-UFUNCTION() void HandleChunk   (TArray<uint8> AudioBytes, int64 TotalBytesReceived);
-UFUNCTION() void HandleComplete(TArray<uint8> FullAudioBytes, EElevenLabsOutputFormat Format);
+UFUNCTION() void HandleChunk   (const TArray<uint8>& AudioBytes, int64 TotalBytesReceived);
+UFUNCTION() void HandleComplete(const TArray<uint8>& FullAudioBytes, EElevenLabsOutputFormat Format);
 UFUNCTION() void HandleError   (FString ErrorMessage);
 ```
 

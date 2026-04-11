@@ -104,21 +104,30 @@ struct FElevenLabsDialogueRequest
 
 // ---------------------------------------------------------------------------
 // Delegates - dynamic multicast so UBlueprintAsyncActionBase can expose them
-// as output exec pins. All params are passed BY VALUE (not const ref) to
-// match the plugin's existing convention; AddDynamic does strict method-
-// pointer matching and a const-ref handler fails to bind with a cryptic UHT
-// error. See Source/InoAgents/Private/SmokeTests/
-// InoAgentsLiteRtLmConversationToolTest.cpp:126, 146, 166, 206 for the rule.
+// as output exec pins.
+//
+// Parameter-passing convention:
+//   - FString / enum / int64 / float / POD structs -> BY VALUE, matching
+//     the LiteRtLm plugin convention (see InoAgentsLiteRtLmConversation
+//     ToolTest.cpp:126, 146, 166, 206).
+//   - TArray<T> and other containers -> `const TArray<T>&` (by const ref).
+//     Passing TArray<uint8> by value here produces a cryptic Blueprint-time
+//     "function/event does not match the necessary signature" error when
+//     a user drags the latent node into a graph, because UHT generates
+//     the Blueprint-side event handler with const& for containers but
+//     tries to match it against a by-value declared delegate. The error
+//     surfaces only at Blueprint compile, not at C++ compile - so it was
+//     missed until the first in-editor test.
 // ---------------------------------------------------------------------------
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
     FOnElevenLabsDialogueChunk,
-    TArray<uint8>, AudioBytes,
-    int64,         TotalBytesReceived);
+    const TArray<uint8>&, AudioBytes,
+    int64,                TotalBytesReceived);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
     FOnElevenLabsDialogueComplete,
-    TArray<uint8>,           FullAudioBytes,
+    const TArray<uint8>&,    FullAudioBytes,
     EElevenLabsOutputFormat, OutputFormat);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
