@@ -352,12 +352,26 @@ void UElevenLabsTextToDialogueStream::HandleRequestComplete(
     const int32 Code = Response->GetResponseCode();
     if (Code < 200 || Code >= 300)
     {
-        // Try to extract a human-readable message from the JSON error body.
-        const FString BodyStr   = Response->GetContentAsString();
+        // Always dump the full response body and the Content-Type header
+        // at Warning level so we can diagnose unexpected server replies
+        // (CDN HTML pages, SSE frames, JSON errors, etc.). The body is
+        // usually under a few hundred bytes on errors so the log noise is
+        // acceptable; the signal value is worth it.
+        const FString BodyStr     = Response->GetContentAsString();
+        const FString ContentType = Response->GetContentType();
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("UElevenLabsTextToDialogueStream: HTTP %d response — "
+                    "Content-Type=\"%s\", %d-byte body:\n%s"),
+               Code, *ContentType, BodyStr.Len(), *BodyStr);
+
+        // Try to extract a human-readable message from the JSON error body
+        // for the OnError delegate. Fall back to the first chunk of the
+        // raw body if JSON parsing fails (bumped the truncation threshold
+        // from 200 to 500 so typical CDN HTML pages still fit).
         const FString FirstMsg  = ExtractFirstErrorMessage(BodyStr);
         const FString Formatted = FirstMsg.IsEmpty()
             ? FString::Printf(TEXT("HTTP %d: %s"), Code,
-                              BodyStr.Len() < 200 ? *BodyStr : TEXT("<truncated>"))
+                              BodyStr.Len() < 500 ? *BodyStr : TEXT("<truncated>"))
             : FString::Printf(TEXT("HTTP %d: %s"), Code, *FirstMsg);
         EmitErrorAndFinish(Formatted);
         return;
