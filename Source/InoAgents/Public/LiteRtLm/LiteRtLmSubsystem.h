@@ -4,7 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "UObject/ScriptInterface.h"
 
+#include "LiteRtLm/LiteRtLmTool.h"    // TScriptInterface<ILiteRtLmTool> needs full type
 #include "LiteRtLm/LiteRtLmTypes.h"
 
 #include "LiteRtLmSubsystem.generated.h"
@@ -127,9 +129,72 @@ public:
      * Uses the currently-loaded config (LoadedConfig) for system message
      * and backend. A future iteration may add an OverrideConfig parameter
      * for per-conversation customization.
+     *
+     * The conversation is created with a snapshot of the currently
+     * registered tools (see RegisterTool below). Tools registered AFTER
+     * the conversation is created do not retroactively apply.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     ULiteRtLmConversation* CreateConversation();
+
+    // ------------------------------------------------------------------
+    // Tool registry (D.4)
+    // ------------------------------------------------------------------
+
+    /**
+     * Register a tool implementation so it becomes available to every
+     * conversation created AFTER this call. Registering the same tool
+     * name again overwrites the previous registration and logs a
+     * warning.
+     *
+     * The subsystem parses the tool's schema JSON once at registration
+     * time and verifies that its "function.name" field matches the
+     * tool's GetToolName(). Tools with mismatched or unparseable
+     * schemas are rejected and logged, not silently accepted.
+     *
+     * Conversations that were created before RegisterTool ran do NOT
+     * see the new tool — tool_json is snapshotted at conversation
+     * creation time because LiteRT-LM's tools_json is passed to
+     * conversation_config_create and not mutable afterward.
+     *
+     * Called on the game thread.
+     */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Tools")
+    void RegisterTool(TScriptInterface<ILiteRtLmTool> Tool);
+
+    /**
+     * Remove a tool from the registry by name. If no tool is registered
+     * under that name this is a no-op and logs at Verbose level.
+     * Conversations already created continue to see the tool they were
+     * constructed with — removing a tool does not retroactively affect
+     * live conversations.
+     *
+     * Called on the game thread.
+     */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Tools")
+    void UnregisterTool(FName ToolName);
+
+    /**
+     * Look up a tool by name. Returns nullptr if no tool is registered
+     * under that name. Called by ULiteRtLmConversation's worker agent
+     * loop on the game thread when the model emits a tool call.
+     */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category="InoAgents|LiteRT-LM|Tools")
+    TScriptInterface<ILiteRtLmTool> FindTool(FName ToolName) const;
+
+    /**
+     * Serialise every registered tool's schema into a single JSON
+     * array, ready to be passed as the `tools_json` argument to
+     * litert_lm_conversation_config_create. Returns an empty string
+     * if no tools are registered (which causes CreateConversation to
+     * skip the tools_json arg entirely, disabling tool calling for
+     * that conversation).
+     *
+     * Called once per CreateConversation call, on the game thread.
+     * Schemas are re-serialised each time rather than cached because
+     * RegisterTool is rare and the O(Tools.Num()) cost is trivial.
+     */
+    FString BuildToolsJsonForConversation() const;
 
 private:
     // Opaque native handles. Never exposed to Blueprint. The extern "C"
@@ -146,4 +211,12 @@ private:
     // True from the moment LoadModelAsync dispatches to the ThreadPool
     // until the OnLoaded callback fires back on the game thread.
     bool bLoadInFlight = false;
+
+    // Tool registry. Keyed by the tool's GetToolName() result. Values
+    // are TScriptInterface<ILiteRtLmTool>, which keeps a UPROPERTY
+    // reference to the implementing UObject so the tool is not
+    // garbage-collected while registered. UnregisterTool drops the
+    // reference; Deinitialize clears the whole map.
+    UPROPERTY()
+    TMap<FName, TScriptInterface<ILiteRtLmTool>> Tools;
 };
