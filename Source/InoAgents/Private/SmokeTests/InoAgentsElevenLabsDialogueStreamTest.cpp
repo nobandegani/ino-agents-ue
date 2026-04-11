@@ -46,8 +46,22 @@
 
 namespace
 {
-    constexpr const TCHAR* kVoiceA = TEXT("JBFqnCBsd6RMkjVDRZzb");
-    constexpr const TCHAR* kVoiceB = TEXT("Aw4FAjKCGjjNkVhN1Xmq");
+    // Defaults used when the console command is invoked with no args.
+    //
+    // Voice IDs in ElevenLabs are account-specific: public-library voices
+    // you haven't imported into your own library return 404. These two
+    // are the ones most likely to exist in a fresh account:
+    //
+    //   JBFqnCBsd6RMkjVDRZzb — "George"  (docs example, widely available)
+    //   21m00Tcm4TlvDq8ikWAM — "Rachel"  (one of the original premade
+    //                                     voices, present since day one)
+    //
+    // If you still hit voice_not_found, pass your own voice IDs as args:
+    //   InoAgents.ElevenLabs.DialogueStreamTest <voiceA> <voiceB>
+    // Find yours at https://elevenlabs.io/app/voice-lab or by calling
+    // GET /v1/voices with your API key.
+    constexpr const TCHAR* kDefaultVoiceA = TEXT("JBFqnCBsd6RMkjVDRZzb");
+    constexpr const TCHAR* kDefaultVoiceB = TEXT("21m00Tcm4TlvDq8ikWAM");
 
     UElevenLabsSubsystem* FindSubsystem()
     {
@@ -190,7 +204,7 @@ void UInoAgentsElevenLabsDialogueStreamTestObserver::Finish()
     UE_LOG(LogInoAgents, Log, TEXT("DialogueStreamTest: DONE"));
 }
 
-static void RunElevenLabsDialogueStreamTest(const TArray<FString>& /*Args*/)
+static void RunElevenLabsDialogueStreamTest(const TArray<FString>& Args)
 {
     UElevenLabsSubsystem* Subsys = FindSubsystem();
     if (Subsys == nullptr)
@@ -217,12 +231,23 @@ static void RunElevenLabsDialogueStreamTest(const TArray<FString>& /*Args*/)
         return;
     }
 
-    // Build a fixed two-line dialogue using the voice IDs from the
-    // ElevenLabs docs example.
+    // Optional voice ID overrides from console args:
+    //   InoAgents.ElevenLabs.DialogueStreamTest            -> defaults for both
+    //   InoAgents.ElevenLabs.DialogueStreamTest VA         -> VA for A, default for B
+    //   InoAgents.ElevenLabs.DialogueStreamTest VA VB      -> custom for both
+    const FString VoiceA = (Args.Num() >= 1) ? Args[0] : FString(kDefaultVoiceA);
+    const FString VoiceB = (Args.Num() >= 2) ? Args[1] : FString(kDefaultVoiceB);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("DialogueStreamTest: voiceA=%s, voiceB=%s "
+                "(override with: InoAgents.ElevenLabs.DialogueStreamTest <voiceA> <voiceB>)"),
+           *VoiceA, *VoiceB);
+
+    // Build a three-line dialogue that alternates between the two voices.
     FElevenLabsDialogueRequest Req;
-    Req.Inputs.Add({ TEXT("Knock knock."),          FString(kVoiceA) });
-    Req.Inputs.Add({ TEXT("Who's there?"),          FString(kVoiceB) });
-    Req.Inputs.Add({ TEXT("A plugin, streaming."),  FString(kVoiceA) });
+    Req.Inputs.Add({ TEXT("Knock knock."),          VoiceA });
+    Req.Inputs.Add({ TEXT("Who's there?"),          VoiceB });
+    Req.Inputs.Add({ TEXT("A plugin, streaming."),  VoiceA });
     Req.OutputFormat = Subsys->GetDefaultOutputFormat();
 
     UInoAgentsElevenLabsDialogueStreamTestObserver* Observer =
@@ -261,11 +286,14 @@ static void RunElevenLabsDialogueStreamTest(const TArray<FString>& /*Args*/)
 
 static FAutoConsoleCommand GElevenLabsDialogueStreamTestCommand(
     TEXT("InoAgents.ElevenLabs.DialogueStreamTest"),
-    TEXT("Phase 1 ElevenLabs smoke test: POSTs a fixed 3-line dialogue to "
+    TEXT("Phase 1 ElevenLabs smoke test: POSTs a 3-line dialogue to "
          "/v1/text-to-dialogue/stream, logs chunk sizes as they arrive, "
          "saves the result to Saved/InoAgents/ElevenLabs/test.<ext>, and "
          "logs PASS/FAIL. Requires a valid API key in Project Settings -> "
-         "Plugins -> InoAgents ElevenLabs."),
+         "Plugins -> InoAgents ElevenLabs. Optional voice IDs from your "
+         "own library: InoAgents.ElevenLabs.DialogueStreamTest <voiceA> <voiceB>. "
+         "Get your voice IDs at https://elevenlabs.io/app/voice-lab or "
+         "via GET /v1/voices."),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunElevenLabsDialogueStreamTest));
 
 static void RunElevenLabsReloadSettings(const TArray<FString>& /*Args*/)
