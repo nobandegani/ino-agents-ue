@@ -444,6 +444,229 @@ static FAutoConsoleCommand GGenerateTestCommand(
          "in a future milestone for instruction following."),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunGenerateSmokeTest));
 
+
+// ============================================================================
+// Phase-1 conversation smoke test (milestone A)
+// ============================================================================
+//
+// Console command: InoAgents.ConversationTest [optional prompt words...]
+//
+// Purpose: prove that the conversation API with chat template works. Unlike
+// InoAgents.GenerateTest (which does raw next-token continuation), this
+// wraps the user prompt in the model's instruction-following format via
+// litert_lm_conversation_* APIs, so an instruction like
+// "What is 2 plus 2?" should actually get an answer instead of being
+// continued as text.
+//
+// Still synchronous, no streaming, no tools. Tool calling is the next
+// milestone (B).
+//
+// Invoke:
+//     InoAgents.ConversationTest
+//     InoAgents.ConversationTest Write a haiku about Unreal Engine
+// ============================================================================
+
+namespace
+{
+    /**
+     * Minimal JSON string escape for embedding a user prompt inside a
+     * { "text": "..." } field. Handles the characters that would otherwise
+     * break the JSON: backslash, double quote, newline, carriage return, tab.
+     *
+     * This is not a full JSON escaper — it does not handle control characters
+     * below 0x20 (which rarely appear in prompts) or Unicode escapes (\uXXXX).
+     * A production implementation would go through UE's Json module. For a
+     * phase-1 smoke test, this is sufficient and dependency-free.
+     */
+    FString EscapeJsonString(const FString& In)
+    {
+        FString Out;
+        Out.Reserve(In.Len() + 8);
+        for (const TCHAR Ch : In)
+        {
+            switch (Ch)
+            {
+                case TEXT('\\'): Out += TEXT("\\\\"); break;
+                case TEXT('"'):  Out += TEXT("\\\""); break;
+                case TEXT('\n'): Out += TEXT("\\n");  break;
+                case TEXT('\r'): Out += TEXT("\\r");  break;
+                case TEXT('\t'): Out += TEXT("\\t");  break;
+                default:         Out += Ch;            break;
+            }
+        }
+        return Out;
+    }
+}
+
+static void RunConversationSmokeTest(const TArray<FString>& Args)
+{
+    // --- Prompt (default is a classic instruction) ---
+    const FString Prompt = (Args.Num() > 0)
+        ? FString::Join(Args, TEXT(" "))
+        : FString(TEXT("What is 2 plus 2? Answer in one sentence."));
+
+    // --- Resolve model path ---
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
+    if (!Plugin.IsValid())
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ConversationTest: plugin not found"));
+        return;
+    }
+    const FString BaseDir = Plugin->GetBaseDir();
+    const FString ModelPath = FPaths::Combine(
+        BaseDir, TEXT("Models"), TEXT("gemma-4-E2B-it.litertlm"));
+
+    if (!IFileManager::Get().FileExists(*ModelPath))
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ConversationTest: model file not found at %s"), *ModelPath);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: starting"));
+    UE_LOG(LogInoAgents, Log, TEXT("  Prompt: \"%s\""), *Prompt);
+    UE_LOG(LogInoAgents, Warning,
+           TEXT("ConversationTest: the editor will freeze for several seconds."));
+    GLog->Flush();
+
+    // --- UTF-8 buffers (must stay alive through the entire call chain) ---
+    const FTCHARToUTF8 ModelPathUtf8(*ModelPath);
+
+    // Build the message JSON. The user prompt is embedded as the text of
+    // a single content part. Escape for JSON safety.
+    const FString EscapedPrompt = EscapeJsonString(Prompt);
+    const FString MessageJson = FString::Printf(
+        TEXT(R"({"role":"user","content":[{"type":"text","text":"%s"}]})"),
+        *EscapedPrompt);
+    const FTCHARToUTF8 MessageJsonUtf8(*MessageJson);
+
+    UE_LOG(LogInoAgents, Verbose, TEXT("  message_json: %s"), *MessageJson);
+
+    // Canonical system message from LiteRT-LM's own tests.
+    const char* const SystemMessageJsonCStr =
+        R"({"type":"text","text":"You are a helpful assistant. Answer concisely."})";
+
+    // --- Load engine ---
+    const double T0 = FPlatformTime::Seconds();
+
+    LiteRtLmEngineSettings* Settings = litert_lm_engine_settings_create(
+        ModelPathUtf8.Get(), "cpu", nullptr, nullptr);
+    if (Settings == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ConversationTest: engine_settings_create returned NULL"));
+        return;
+    }
+
+    LiteRtLmEngine* Engine = litert_lm_engine_create(Settings);
+    const double TEngineLoaded = FPlatformTime::Seconds();
+    if (Engine == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ConversationTest: engine_create returned NULL after %.2f s"),
+               TEngineLoaded - T0);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+    UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: engine loaded in %.2f s"), TEngineLoaded - T0);
+
+    // --- Create conversation config ---
+    //
+    // Parameters:
+    //   session_config = nullptr (use defaults)
+    //   system_message_json = "You are a helpful assistant..."
+    //   tools_json = nullptr (milestone B will add tools)
+    //   messages_json = nullptr (no prior conversation history)
+    //   enable_constrained_decoding = false (only needed with tools)
+    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create(
+        Engine,
+        /* session_config              = */ nullptr,
+        /* system_message_json         = */ SystemMessageJsonCStr,
+        /* tools_json                  = */ nullptr,
+        /* messages_json               = */ nullptr,
+        /* enable_constrained_decoding = */ false);
+    if (ConvConfig == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ConversationTest: conversation_config_create returned NULL"));
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    // --- Create the conversation ---
+    LiteRtLmConversation* Conversation = litert_lm_conversation_create(Engine, ConvConfig);
+    if (Conversation == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ConversationTest: conversation_create returned NULL"));
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+    UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: conversation created"));
+
+    // --- Send the message (blocking) ---
+    UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: sending message..."));
+    GLog->Flush();
+
+    const double TSendStart = FPlatformTime::Seconds();
+    LiteRtLmJsonResponse* Response = litert_lm_conversation_send_message(
+        Conversation, MessageJsonUtf8.Get(), /* extra_context = */ nullptr);
+    const double TSendEnd = FPlatformTime::Seconds();
+
+    if (Response == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ConversationTest: conversation_send_message returned NULL after %.2f s"),
+               TSendEnd - TSendStart);
+        litert_lm_conversation_delete(Conversation);
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("ConversationTest: response received in %.2f s"),
+           TSendEnd - TSendStart);
+
+    // --- Read response (owned by Response, copy immediately) ---
+    const char* const ResponseJsonCStr = litert_lm_json_response_get_string(Response);
+    if (ResponseJsonCStr == nullptr)
+    {
+        UE_LOG(LogInoAgents, Warning, TEXT("ConversationTest: response string is NULL"));
+    }
+    else
+    {
+        // Raw JSON for diagnosis — we'll parse it properly in the UE API layer.
+        const FString ResponseJson = UTF8_TO_TCHAR(ResponseJsonCStr);
+        UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: response JSON ="));
+        UE_LOG(LogInoAgents, Log, TEXT("  %s"), *ResponseJson);
+    }
+
+    // --- Cleanup (reverse order of creation, matching upstream tests) ---
+    litert_lm_json_response_delete(Response);
+    litert_lm_conversation_delete(Conversation);
+    litert_lm_conversation_config_delete(ConvConfig);
+    litert_lm_engine_delete(Engine);
+    litert_lm_engine_settings_delete(Settings);
+
+    const double TEnd = FPlatformTime::Seconds();
+    UE_LOG(LogInoAgents, Log,
+           TEXT("ConversationTest: DONE — total elapsed %.2f s"),
+           TEnd - T0);
+}
+
+static FAutoConsoleCommand GConversationTestCommand(
+    TEXT("InoAgents.ConversationTest"),
+    TEXT("Phase-1 smoke test (milestone A): load engine, create a conversation "
+         "with a system message, send one user message using the chat-template "
+         "API, log the response JSON, and clean up. Synchronous. No tools, no "
+         "streaming. Optionally takes a custom prompt as arguments: "
+         "'InoAgents.ConversationTest Write a haiku about Unreal Engine'. "
+         "Unlike InoAgents.GenerateTest, this applies the model's chat "
+         "template internally — instruction prompts actually get answered."),
+    FConsoleCommandWithArgsDelegate::CreateStatic(&RunConversationSmokeTest));
+
 void FInoAgentsModule::ShutdownModule()
 {
     // Unload in reverse order of dependency: the main DLL first, then the
