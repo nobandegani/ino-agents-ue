@@ -41,7 +41,6 @@
 #include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-#include "UObject/GarbageCollection.h"
 
 namespace
 {
@@ -200,25 +199,26 @@ void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleConversationError(
 
 void UInoAgentsLiteRtLmConversationStreamTestObserver::Finish()
 {
-    // Same cleanup rationale as the D.2 observer: release references
-    // and let GC destroy the conversation. Do NOT UnloadModel here —
-    // that would race with in-flight workers and break subsequent
-    // test runs. Leaving the model loaded is the right default.
+    // Explicitly shut down the conversation to deterministically
+    // release the worker thread and native LiteRT-LM resources.
+    // Same rationale as the D.2 test's Finish: LiteRT-LM's engine
+    // rejects creating a second native conversation while the first
+    // is still alive, and we want back-to-back smoke tests in the
+    // same PIE session to work. Shutdown is safe to call from inside
+    // the OnComplete broadcast because it only resets the Worker
+    // TUniquePtr — it does not touch the delegate invocation list
+    // that the broadcast is still walking, and it does not invoke
+    // parallel GC (unlike CollectGarbage, which races with the
+    // still-in-flight delegate write access).
+    if (Conversation)
+    {
+        Conversation->Shutdown();
+    }
     Conversation = nullptr;
     Config       = nullptr;
     Subsystem    = nullptr;
 
     RemoveFromRoot();
-
-    // Force an immediate blocking GC. Same rationale as the D.2
-    // test's Finish(): LiteRT-LM's engine rejects creating a second
-    // conversation while a prior native LiteRtLmConversation is
-    // still alive. Running two smoke tests back-to-back in the same
-    // PIE session would otherwise fail because the first test's
-    // ULiteRtLmConversation UObject waits for the next natural GC
-    // cycle before its worker tears down the native conversation.
-    // Test-only hygiene; production code does not need this.
-    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge=*/ true);
 
     UE_LOG(LogInoAgents, Log, TEXT("ConversationStreamTest: DONE"));
 }

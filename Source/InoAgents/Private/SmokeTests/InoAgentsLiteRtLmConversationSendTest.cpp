@@ -39,7 +39,6 @@
 #include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-#include "UObject/GarbageCollection.h"
 
 namespace
 {
@@ -144,38 +143,33 @@ void UInoAgentsLiteRtLmConversationSendTestObserver::HandleConversationError(
 
 void UInoAgentsLiteRtLmConversationSendTestObserver::Finish()
 {
-    // Release the conversation reference. UE garbage collection will
-    // eventually destroy the UObject, which triggers BeginDestroy →
-    // Worker.Reset() → FLiteRtLmConversationWorker destructor → worker
-    // thread join + native resource destruction.
+    // Explicitly shut down the conversation to deterministically
+    // release the worker thread and native LiteRT-LM resources. This
+    // matters because LiteRT-LM's engine rejects creating a second
+    // native conversation while the first is still alive, and we
+    // want running two smoke tests back-to-back in the same PIE
+    // session to work.
     //
-    // We intentionally do NOT call Subsystem->UnloadModel() here. If we
-    // did, the subsystem's engine would be destroyed while the
-    // conversation's worker might still be running (until GC catches
-    // up), leaving the worker with a dangling engine pointer. Leaving
-    // the model loaded means subsequent test runs reuse it — the load
-    // is cheap from the OS page cache anyway (see Phase 1 numbers).
+    // Calling Shutdown from inside the OnComplete broadcast (which
+    // is how we got here) is safe — Shutdown only resets the worker
+    // TUniquePtr, which does not touch the delegate invocation list.
+    // CollectGarbage in this same context would be unsafe because
+    // parallel GC marks UObject delegates from worker threads while
+    // the game thread still holds write access via the in-flight
+    // broadcast.
+    //
+    // We intentionally do NOT call Subsystem->UnloadModel() — leaving
+    // the model loaded lets subsequent test runs reuse it (the load
+    // is cheap from the OS page cache anyway).
+    if (Conversation)
+    {
+        Conversation->Shutdown();
+    }
     Conversation = nullptr;
     Config       = nullptr;
     Subsystem    = nullptr;
 
     RemoveFromRoot();
-
-    // Force an immediate, blocking garbage collection so the
-    // ULiteRtLmConversation UObject we just released is actually
-    // destroyed RIGHT NOW — not on the next natural GC cycle. This
-    // gives deterministic teardown of the worker thread and native
-    // LiteRT-LM resources, which matters because running two
-    // conversation smoke tests back-to-back in the same PIE session
-    // otherwise fails: LiteRT-LM's engine rejects the second
-    // conversation_create call while the first native conversation
-    // is still alive.
-    //
-    // This is appropriate test-only hygiene, not a workaround for a
-    // production bug — in real gameplay, natural GC timing is fine
-    // because users aren't spinning up multiple conversations in the
-    // same tick.
-    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge=*/ true);
 
     UE_LOG(LogInoAgents, Log, TEXT("ConversationSendTest: DONE"));
 }

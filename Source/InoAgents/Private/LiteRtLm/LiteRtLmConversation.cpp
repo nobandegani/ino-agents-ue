@@ -144,6 +144,22 @@ void ULiteRtLmConversation::Cancel()
     Worker->Cancel();
 }
 
+void ULiteRtLmConversation::Shutdown()
+{
+    check(IsInGameThread());
+
+    // Resetting the TUniquePtr invokes ~FLiteRtLmConversationWorker,
+    // which cancels any in-flight stream, joins the worker thread,
+    // and destroys the native LiteRT-LM resources. No delegate
+    // invocation list is touched — safe to call from inside one of
+    // this conversation's own delegate handlers.
+    //
+    // Second call is a no-op because TUniquePtr::Reset on an already-
+    // null pointer does nothing. BeginDestroy calls the same
+    // Worker.Reset() again, which also becomes a no-op after Shutdown.
+    Worker.Reset();
+}
+
 void ULiteRtLmConversation::BeginDestroy()
 {
     // Resetting the TUniquePtr invokes ~FLiteRtLmConversationWorker,

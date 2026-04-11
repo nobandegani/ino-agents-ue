@@ -111,11 +111,50 @@ public:
      * within a few hundred milliseconds).
      *
      * Cancel does NOT drain the queue — any messages that have been
-     * enqueued but not yet started will still run. To abort everything,
-     * destroy the conversation (release the last reference so it GCs).
+     * enqueued but not yet started will still run. To abort everything
+     * AND release resources, call Shutdown instead.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void Cancel();
+
+    /**
+     * Immediately release the worker thread and native LiteRT-LM
+     * resources. After calling Shutdown the conversation is a
+     * "zombie": SendMessageAsync will log an error and fail, Cancel
+     * becomes a no-op, and no further delegate broadcasts will fire.
+     * The UObject itself remains alive until natural garbage
+     * collection reclaims it.
+     *
+     * Intended for callers that need DETERMINISTIC teardown without
+     * waiting for GC — for example:
+     *   - Tests that want native resources released before the next
+     *     assertion / test run.
+     *   - Scene transitions that need the LiteRT-LM engine available
+     *     for a new conversation on the next frame.
+     *   - Manual lifetime control in C++ code that can't tolerate
+     *     GC latency.
+     *
+     * In normal Blueprint gameplay you usually do NOT need to call
+     * this — just drop the last reference to the conversation and
+     * let GC handle it. The worker + native teardown happens during
+     * BeginDestroy, which is safe in gameplay because the last
+     * reference drop typically happens outside of any delegate
+     * broadcast.
+     *
+     * Safe to call multiple times (second call is a no-op). Safe to
+     * call while a stream is in flight — the destructor cancels the
+     * stream and joins the worker thread before returning, same as
+     * BeginDestroy.
+     *
+     * IMPORTANT: calling Shutdown from inside one of the
+     * conversation's own delegate handlers (OnComplete, OnError,
+     * OnToken) is supported — the internal Worker.Reset() does not
+     * touch the delegate invocation list and is immune to the
+     * reentrancy issues that make CollectGarbage() unsafe in the
+     * same context.
+     */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    void Shutdown();
 
     // ------------------------------------------------------------------
     // Delegates (multicast, Blueprint-bindable)
