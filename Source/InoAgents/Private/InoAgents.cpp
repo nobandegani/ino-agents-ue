@@ -798,14 +798,24 @@ namespace
     /**
      * The one local tool this smoke test exposes to the model. Takes no
      * arguments; returns the current wall-clock time as a human-readable
-     * string.
+     * ISO-like string.
+     *
+     * IMPORTANT: UE's FDateTime::ToString format specifiers are NOT the
+     * same as C strftime. Supported characters are only:
+     *   %Y (year 4d) %y (year 2d) %m (month 2d) %d (day 2d)
+     *   %H (hour 24) %h (hour 12) %M (minute)   %S (second)
+     *   %s (ms)      %A (AM/PM)   %D (day of year)
+     * There is NO %A=weekday-name, NO %B=month-name, NO %w. Any other
+     * characters after % are passed through literally.
+     *
+     * Using strftime-style specifiers like %B produced garbage output
+     * ("PM, B 11 2026 at 14:00:16") which confused the model into denying
+     * it had time data. Use ISO format for unambiguous round-tripping.
      */
     FString ExecuteGetCurrentTimeTool()
     {
         const FDateTime Now = FDateTime::Now();
-        // Canonical UE FDateTime::ToString() format: yyyy.mm.dd-hh.mm.ss
-        // Reformat to something more LLM-friendly:
-        return Now.ToString(TEXT("%A, %B %d %Y at %H:%M:%S"));
+        return Now.ToString(TEXT("%Y-%m-%d %H:%M:%S"));
     }
 }
 
