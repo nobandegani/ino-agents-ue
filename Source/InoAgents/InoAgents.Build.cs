@@ -27,6 +27,7 @@ public class InoAgents : ModuleRules
 			{
 				"Core",
 				"InoAgentsLibrary",
+				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				"Projects"
 				// ... add other public dependencies that you statically link with here ...
 			}
