@@ -9,7 +9,9 @@
       "Read(//e/Epic Games/UE_5.7/Engine/Source/**)",
       "Bash(find . -name \"BlueprintAsyncActionBase.h\")",
       "Read(//e//**)",
-      "Read(//c/Program Files/Epic Games/**)"
+      "Read(//c/Program Files/Epic Games/**)",
+      "Bash(curl -sL -o E:/Projects/InoAgentDemo/Plugins/InoAgents/Source/InoAgents/Private/Audio/ThirdParty/minimp3.h \"https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h\")",
+      "Bash(curl -sL \"https://api.github.com/repos/lieff/minimp3/commits/master\")"
     ]
   }
 }
