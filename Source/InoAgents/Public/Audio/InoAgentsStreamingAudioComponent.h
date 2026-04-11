@@ -181,13 +181,38 @@ private:
 
     bool bStreamActive     = false;
     bool bStreamFinalized  = false;
-    bool bReadyToPlayFired = false;
+    bool bPlaybackStarted  = false;
+
+    /**
+     * Pre-buffer target in bytes. Computed from
+     * ActiveSampleRate * ActiveNumChannels * 2 (int16) * kPreBufferSeconds
+     * whenever EnsureProceduralWave (re)builds the procedural wave.
+     *
+     * Play() is not called until the procedural wave's queue has at
+     * least this many bytes, so the audio engine always has a cushion
+     * to draw from as network chunks arrive unevenly. Prevents the
+     * "gap between chunks" symptom that starves USoundWaveProcedural.
+     */
+    int32 PreBufferTargetBytes = 0;
+
+    /**
+     * Trailing bytes from a PCM chunk that didn't align to a whole
+     * sample boundary (e.g. 2-byte boundary for int16, 4-byte for
+     * float32). Prepended to the next chunk so sample parity stays
+     * correct across HTTP chunk boundaries. Without this, an odd-byte
+     * chunk would drop its last byte and every subsequent sample
+     * would interpret wrong bytes → noise.
+     */
+    TArray<uint8> PcmPendingBytes;
 
     // Internal helpers.
     void BeginStreamIfNeeded(EInoAgentsAudioFormat Format);
     void EnsureProceduralWave(int32 SampleRate, int32 NumChannels);
     void QueuePcmInt16(const int16* Samples, int32 NumSamples);
     void DecodeAndQueueMp3(const TArray<uint8>& Mp3Bytes);
-    void FireReadyToPlayIfFirstBytes();
+    /** Starts playback once enough audio is buffered. Pass bForce=true
+     *  to bypass the threshold check (used by FinalizeStream for short
+     *  streams that never cross the pre-buffer target). */
+    void TryStartPlayback(bool bForce);
     void ResetInternalState();
 };

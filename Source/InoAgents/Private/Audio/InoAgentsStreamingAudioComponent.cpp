@@ -7,6 +7,15 @@
 
 #include "Sound/SoundWaveProcedural.h"
 
+namespace
+{
+    /** How much audio (in seconds) must be queued before Play() is
+     *  called. Lets ElevenLabs' jittery HTTP delivery catch up so the
+     *  queue doesn't underrun mid-stream. 250 ms is low enough that the
+     *  latency is imperceptible for conversational TTS. */
+    constexpr float kPreBufferSeconds = 0.25f;
+}
+
 UInoAgentsStreamingAudioComponent::UInoAgentsStreamingAudioComponent(
     const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
@@ -111,17 +120,21 @@ void UInoAgentsStreamingAudioComponent::FeedAudioBytes(
         {
             // int16 little-endian is USoundWaveProcedural's native
             // input format — bytes queue straight through with no
-            // conversion. An odd byte count is truncated to the
-            // nearest sample boundary; in practice callers always
-            // feed whole samples.
+            // conversion. HTTP chunks can end on any byte so we
+            // accumulate the tail in PcmPendingBytes and only emit
+            // whole int16 samples (2-byte aligned). The leftover
+            // byte (if any) waits for the next feed so sample parity
+            // stays correct across chunk boundaries.
             EnsureProceduralWave(PcmSampleRate, PcmNumChannels);
             if (ProceduralWave != nullptr)
             {
-                const int32 ByteCount = AudioBytes.Num() & ~1;  // round down to 2-byte boundary
-                if (ByteCount > 0)
+                PcmPendingBytes.Append(AudioBytes);
+                const int32 WholeSampleBytes = PcmPendingBytes.Num() & ~1;
+                if (WholeSampleBytes > 0)
                 {
-                    ProceduralWave->QueueAudio(AudioBytes.GetData(), ByteCount);
-                    FireReadyToPlayIfFirstBytes();
+                    ProceduralWave->QueueAudio(PcmPendingBytes.GetData(), WholeSampleBytes);
+                    PcmPendingBytes.RemoveAt(0, WholeSampleBytes);
+                    TryStartPlayback(/*bForce=*/false);
                 }
             }
             break;
@@ -129,17 +142,22 @@ void UInoAgentsStreamingAudioComponent::FeedAudioBytes(
 
         case EInoAgentsAudioFormat::PcmFloat32:
         {
-            // Convert float32 samples (assumed in [-1.0, +1.0]) into
-            // int16 before queueing. Out-of-range samples are clamped.
-            // An odd byte count is truncated to the nearest 4-byte
-            // sample boundary.
+            // Float32 samples are 4 bytes each — same alignment
+            // strategy, different boundary. Convert whole floats
+            // to int16 with clamping before queueing.
             EnsureProceduralWave(PcmSampleRate, PcmNumChannels);
             if (ProceduralWave != nullptr)
             {
-                const int32 NumFloats = AudioBytes.Num() / static_cast<int32>(sizeof(float));
-                if (NumFloats > 0)
+                PcmPendingBytes.Append(AudioBytes);
+                const int32 WholeFloatBytes =
+                    (PcmPendingBytes.Num() / static_cast<int32>(sizeof(float)))
+                    * static_cast<int32>(sizeof(float));
+                if (WholeFloatBytes > 0)
                 {
-                    const float* Floats = reinterpret_cast<const float*>(AudioBytes.GetData());
+                    const int32 NumFloats =
+                        WholeFloatBytes / static_cast<int32>(sizeof(float));
+                    const float* Floats =
+                        reinterpret_cast<const float*>(PcmPendingBytes.GetData());
                     TArray<int16> Int16Samples;
                     Int16Samples.SetNumUninitialized(NumFloats);
                     for (int32 i = 0; i < NumFloats; ++i)
@@ -148,7 +166,8 @@ void UInoAgentsStreamingAudioComponent::FeedAudioBytes(
                         Int16Samples[i] = static_cast<int16>(Clamped * 32767.0f);
                     }
                     QueuePcmInt16(Int16Samples.GetData(), NumFloats);
-                    FireReadyToPlayIfFirstBytes();
+                    PcmPendingBytes.RemoveAt(0, WholeFloatBytes);
+                    TryStartPlayback(/*bForce=*/false);
                 }
             }
             break;
@@ -194,6 +213,15 @@ void UInoAgentsStreamingAudioComponent::FinalizeStream()
     }
 
     bStreamFinalized = true;
+
+    // Short-stream case: the pre-buffer threshold was never crossed,
+    // so Play() was never called, so the audio is just sitting in the
+    // queue. Force-start now so the user hears what we have. This is
+    // why PlayAudio(small_buffer) also works — one-shot playback goes
+    // through Feed + Finalize, and Finalize unblocks the playback if
+    // FeedAudioBytes couldn't.
+    TryStartPlayback(/*bForce=*/true);
+
     UE_LOG(LogInoAgents, Verbose,
            TEXT("UInoAgentsStreamingAudioComponent: stream finalized; waiting for drain"));
 }
@@ -256,10 +284,11 @@ void UInoAgentsStreamingAudioComponent::BeginStreamIfNeeded(EInoAgentsAudioForma
         return;
     }
 
-    CurrentFormat       = Format;
-    bStreamActive       = true;
-    bStreamFinalized    = false;
-    bReadyToPlayFired   = false;
+    CurrentFormat     = Format;
+    bStreamActive     = true;
+    bStreamFinalized  = false;
+    bPlaybackStarted  = false;
+    PcmPendingBytes.Reset();
 
     if (Format == EInoAgentsAudioFormat::Mp3 && !Mp3State.IsValid())
     {
@@ -273,21 +302,16 @@ void UInoAgentsStreamingAudioComponent::BeginStreamIfNeeded(EInoAgentsAudioForma
 
 void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, int32 NumChannels)
 {
-    // If the bound procedural wave already matches the target
-    // (sample rate + channels), we're done — just call Play so the
-    // audio engine starts pulling samples as soon as there are any.
+    // Match: nothing to do. Playback is gated by TryStartPlayback,
+    // not by EnsureProceduralWave — we do NOT call Play() here.
     if (ProceduralWave != nullptr &&
         ActiveSampleRate  == SampleRate &&
         ActiveNumChannels == NumChannels)
     {
-        if (!IsPlaying())
-        {
-            Play();
-        }
         return;
     }
 
-    // Mismatch (or first configuration) -> allocate a fresh
+    // Mismatch (or first configuration): allocate a fresh
     // USoundWaveProcedural. USoundWaveProcedural does NOT accept
     // post-init rate changes; rebuilding from scratch is the
     // supported pattern. The old one is dropped and GC will
@@ -307,9 +331,17 @@ void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, i
     ActiveSampleRate  = SampleRate;
     ActiveNumChannels = NumChannels;
 
-    Stop();                    // release any prior wave binding
+    // Pre-buffer target: kPreBufferSeconds worth of int16 samples at
+    // the stream's rate and channel count. int16 = 2 bytes per sample
+    // per channel.
+    PreBufferTargetBytes = static_cast<int32>(
+        static_cast<float>(SampleRate * NumChannels * 2) * kPreBufferSeconds);
+
+    // Drop any prior binding and bind the new wave. Play() is NOT
+    // called here — TryStartPlayback handles it after enough audio
+    // is buffered.
+    Stop();
     SetSound(ProceduralWave);
-    Play();
 }
 
 void UInoAgentsStreamingAudioComponent::QueuePcmInt16(const int16* Samples, int32 NumSamples)
@@ -355,30 +387,43 @@ void UInoAgentsStreamingAudioComponent::DecodeAndQueueMp3(const TArray<uint8>& M
     if (Result.Pcm.Num() > 0)
     {
         QueuePcmInt16(Result.Pcm.GetData(), Result.Pcm.Num());
-        FireReadyToPlayIfFirstBytes();
+        TryStartPlayback(/*bForce=*/false);
     }
 }
 
-void UInoAgentsStreamingAudioComponent::FireReadyToPlayIfFirstBytes()
+void UInoAgentsStreamingAudioComponent::TryStartPlayback(bool bForce)
 {
-    if (bReadyToPlayFired)
+    if (bPlaybackStarted || ProceduralWave == nullptr)
     {
         return;
     }
-    if (ProceduralWave == nullptr || ProceduralWave->GetAvailableAudioByteCount() == 0)
+
+    const int32 Available = ProceduralWave->GetAvailableAudioByteCount();
+    if (!bForce && Available < PreBufferTargetBytes)
     {
+        // Not enough pre-buffer yet — keep accumulating. The next
+        // FeedAudioBytes (or FinalizeStream) will try again.
         return;
     }
-    bReadyToPlayFired = true;
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("UInoAgentsStreamingAudioComponent: starting playback "
+                "(%d bytes buffered, %d-byte target, forced=%d)"),
+           Available, PreBufferTargetBytes, bForce ? 1 : 0);
+
+    bPlaybackStarted = true;
+    Play();
     OnReadyToPlay.Broadcast();
 }
 
 void UInoAgentsStreamingAudioComponent::ResetInternalState()
 {
-    bStreamActive       = false;
-    bStreamFinalized    = false;
-    bReadyToPlayFired   = false;
-    CurrentFormat       = EInoAgentsAudioFormat::PcmInt16;
+    bStreamActive        = false;
+    bStreamFinalized     = false;
+    bPlaybackStarted     = false;
+    PreBufferTargetBytes = 0;
+    PcmPendingBytes.Reset();
+    CurrentFormat        = EInoAgentsAudioFormat::PcmInt16;
 
     // Drop the decoder state so the next stream starts fresh. A
     // brand-new mp3dec_t is cheap (just a zero-init of a small
