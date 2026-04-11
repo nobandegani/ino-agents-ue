@@ -131,6 +131,19 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
     Worker->EnqueueMessage(UserText);
 }
 
+void ULiteRtLmConversation::Cancel()
+{
+    check(IsInGameThread());
+
+    if (!Worker.IsValid())
+    {
+        // No worker, no stream in flight, nothing to cancel. Not an error.
+        return;
+    }
+
+    Worker->Cancel();
+}
+
 void ULiteRtLmConversation::BeginDestroy()
 {
     // Resetting the TUniquePtr invokes ~FLiteRtLmConversationWorker,

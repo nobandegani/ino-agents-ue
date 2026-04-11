@@ -31,17 +31,30 @@ class FEvent;
  * Threading contract:
  *   - Construction happens on the game thread. Takes ownership of the
  *     native conversation + config pointers passed in. Creates the
- *     FEvent, constructs the FRunnableThread, and begins Run().
+ *     queue and stream FEvents, constructs the FRunnableThread, and
+ *     begins Run().
  *   - Run() executes on the worker thread. It consumes from MessageQueue,
- *     calls blocking litert_lm_conversation_send_message, and dispatches
- *     results back to the game thread via AsyncTask. It never touches
- *     UObjects directly.
+ *     calls litert_lm_conversation_send_message_stream, and blocks on
+ *     StreamEvent until the native stream callback reports is_final or
+ *     an error. The static C callback runs on LiteRT-LM's internal
+ *     thread (NOT our worker thread); it copies each chunk, dispatches
+ *     an OnToken broadcast to the game thread via AsyncTask, and on
+ *     the final chunk signals StreamEvent so our worker thread wakes
+ *     up and dispatches OnComplete (or OnError).
  *   - EnqueueMessage is called on the game thread to add work.
+ *   - Cancel is called on the game thread to abort the in-flight stream.
+ *     It sets an atomic flag and calls litert_lm_conversation_cancel_process,
+ *     which causes LiteRT-LM to fire a final callback shortly thereafter.
+ *     The worker thread then dispatches OnError("Cancelled by caller").
  *   - Stop() is called on the game thread to signal the worker to exit.
  *   - Destruction happens on the game thread. ~FLiteRtLmConversationWorker
- *     sets the stop flag, triggers the queue event to wake the worker,
- *     calls Thread->WaitForCompletion to join, then destroys the native
- *     conversation and config in that order.
+ *     sets the stop flag, cancels any in-flight stream, triggers the
+ *     queue event to wake the worker if idle, calls Thread->WaitForCompletion
+ *     to join, then destroys the native conversation and config in that
+ *     order. Waiting for the thread to finish also waits for LiteRT-LM's
+ *     final callback to fire (because the worker is blocked inside
+ *     ProcessMessage's StreamEvent->Wait) — by the time we touch native
+ *     pointers we are guaranteed the C API is done calling us back.
  *
  * The class holds a TWeakObjectPtr<ULiteRtLmConversation> for marshaling
  * results back to the owning UObject. The weak pointer is captured by
@@ -82,6 +95,20 @@ public:
      */
     void EnqueueMessage(FString UserText);
 
+    /**
+     * Cancel the in-flight stream, if any. Called on the game thread.
+     * Sets an atomic cancel flag and invokes
+     * litert_lm_conversation_cancel_process on the native conversation.
+     * LiteRT-LM will fire its final stream callback shortly thereafter,
+     * which unblocks the worker thread's StreamEvent wait and causes
+     * it to dispatch OnError("Cancelled by caller").
+     *
+     * Safe to call with no stream in flight (no-op). Safe to call from
+     * any thread, though the public API only ever calls it from the
+     * game thread.
+     */
+    void Cancel();
+
     //~ FRunnable interface
     virtual uint32 Run() override;
     virtual void Stop() override;
@@ -90,11 +117,38 @@ public:
 private:
     /**
      * Process one user message from start to finish: build the JSON
-     * message, call litert_lm_conversation_send_message, parse the
-     * response, dispatch OnComplete or OnError back to the game thread.
-     * Runs on the worker thread.
+     * message, kick off litert_lm_conversation_send_message_stream,
+     * block on StreamEvent until the native stream callback reports
+     * is_final or an error, then dispatch OnComplete or OnError back
+     * to the game thread. Runs on the worker thread.
      */
     void ProcessMessage(const FString& UserText);
+
+    /**
+     * Static C-callable trampoline passed to LiteRT-LM as the stream
+     * callback. Receives the worker instance via callback_data and
+     * forwards to OnStreamChunk. Runs on LiteRT-LM's internal thread,
+     * NOT on our worker thread.
+     */
+    static void OnStreamChunkStatic(
+        void* callback_data,
+        const char* chunk,
+        bool is_final,
+        const char* error_msg);
+
+    /**
+     * Instance method invoked by OnStreamChunkStatic. Runs on
+     * LiteRT-LM's internal thread. Copies chunk/error strings (they
+     * are valid only for the duration of this call), dispatches
+     * OnToken broadcasts to the game thread via AsyncTask, and on
+     * the final chunk populates StreamError / StreamAccumulated and
+     * signals StreamEvent so the worker thread wakes up. Never
+     * touches UObject state directly.
+     */
+    void OnStreamChunk(const char* chunk, bool is_final, const char* error_msg);
+
+    /** Dispatch an OnToken(Chunk) broadcast to the game thread. */
+    void DispatchTokenOnGameThread(FString Chunk);
 
     /** Dispatch an OnComplete(FullText) broadcast to the game thread. */
     void DispatchCompleteOnGameThread(FString FullText);
@@ -121,10 +175,44 @@ private:
     // to the pool in the destructor.
     FEvent* QueueEvent = nullptr;
 
+    // Event used by the static stream callback to signal the worker
+    // thread that the current stream has finished (is_final or error).
+    // Created manual-reset so we can safely reset it before each send
+    // and know subsequent Triggers won't be lost. Returned to the pool
+    // in the destructor after the worker thread has joined.
+    FEvent* StreamEvent = nullptr;
+
     // Set to true by Stop() or ~FLiteRtLmConversationWorker to signal
     // the worker's Run() loop to exit. Atomic because the game thread
     // writes and the worker thread reads.
     TAtomic<bool> bStopRequested{false};
+
+    // True from the moment the worker calls
+    // litert_lm_conversation_send_message_stream until StreamEvent is
+    // signaled by the final callback. Used by Cancel() and by the
+    // destructor to decide whether to call the native cancel API.
+    // Atomic because Cancel() runs on the game thread while the flag
+    // is written by the worker thread.
+    TAtomic<bool> bStreamInFlight{false};
+
+    // Set by Cancel() on the game thread; read by the worker thread
+    // after StreamEvent unblocks, and by OnStreamChunk on LiteRT-LM's
+    // internal thread (the callback still needs to deliver the final
+    // chunk and signal StreamEvent, but subsequent game-thread token
+    // dispatches are suppressed to keep the stream ordering clean).
+    // Cleared by the worker thread at the start of each ProcessMessage.
+    TAtomic<bool> bStreamCancelled{false};
+
+    // Accumulated assistant text, written only by OnStreamChunk on
+    // LiteRT-LM's internal thread; read only by the worker thread
+    // after StreamEvent unblocks. The stream-event synchronization
+    // provides the happens-before edge — no separate lock needed.
+    FString StreamAccumulated;
+
+    // Error message captured by OnStreamChunk if LiteRT-LM reports
+    // error_msg != nullptr. Empty on success. Read by the worker
+    // thread after StreamEvent unblocks.
+    FString StreamError;
 
     // The pinned worker thread. Created in the constructor; joined in
     // the destructor via WaitForCompletion.
