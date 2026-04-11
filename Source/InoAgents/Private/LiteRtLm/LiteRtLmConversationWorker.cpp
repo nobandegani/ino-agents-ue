@@ -517,12 +517,23 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
     // Parse the chunk JSON and extract parts, then accumulate +
     // dispatch as appropriate. LiteRT-LM's conversation_send_message_stream
     // delivers each chunk as a FULL assistant message JSON wrapping
-    // one token delta (or one tool call), not plain text:
-    //     {"role":"assistant","content":[{"type":"text","text":"delta"}, ...]}
-    //     {"role":"assistant","content":[{"type":"tool_call","tool_call":{"name":"...","arguments":{...}}}]}
-    // We unwrap the JSON here so OnToken callers see only assistant
-    // text deltas, and tool_call parts are queued for the worker
-    // thread to execute after the round's is_final callback.
+    // one token delta (for text responses) or a single tool call
+    // (for tool_call responses). The two shapes are quite different:
+    //
+    //   TEXT chunk (D.3-style, one per token):
+    //     {"role":"assistant","content":[{"type":"text","text":"delta"}]}
+    //
+    //   TOOL CALL chunk (OpenAI-compatible, per
+    //   runtime/conversation/model_data_processor/gemma4_data_processor_test.cc):
+    //     {"role":"assistant","tool_calls":[
+    //       {"type":"function",
+    //        "function":{"name":"<tool>","arguments":{...}}}
+    //     ]}
+    //
+    // We walk BOTH `content[*]` (for text parts) AND the top-level
+    // `tool_calls[*]` (for tool-call entries) so a single chunk can
+    // in principle carry both; in practice LiteRT-LM's constrained
+    // decoding emits one or the other per chunk.
     //
     // Suppressed entirely if the stream is cancelled — the final
     // terminal broadcast will be OnError("Cancelled by caller") and
@@ -536,6 +547,9 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
         const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ChunkJson);
         if (FJsonSerializer::Deserialize(Reader, RootObj) && RootObj.IsValid())
         {
+            bool bChunkHadAnyContent = false;
+
+            // ---- Walk content[*] for text parts --------------------
             FString ChunkText;
             const TArray<TSharedPtr<FJsonValue>>* ContentArrayPtr = nullptr;
             if (RootObj->TryGetArrayField(TEXT("content"), ContentArrayPtr)
@@ -560,53 +574,9 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
                             ChunkText += PartText;
                         }
                     }
-                    else if (PartType == TEXT("tool_call"))
-                    {
-                        // Pull out the embedded tool_call object and
-                        // collect (name, arguments) into the pending
-                        // list. The arguments sub-object is re-serialised
-                        // to a compact string here so the worker thread
-                        // can hand it directly to ILiteRtLmTool::Execute
-                        // without needing to re-serialise.
-                        const TSharedPtr<FJsonObject>* ToolCallObjPtr = nullptr;
-                        if (PartObj->TryGetObjectField(TEXT("tool_call"), ToolCallObjPtr)
-                            && ToolCallObjPtr != nullptr
-                            && ToolCallObjPtr->IsValid())
-                        {
-                            const TSharedPtr<FJsonObject>& ToolCallObj = *ToolCallObjPtr;
-
-                            FString ToolNameStr;
-                            ToolCallObj->TryGetStringField(TEXT("name"), ToolNameStr);
-
-                            const TSharedPtr<FJsonObject>* ArgsObjPtr = nullptr;
-                            FString ArgsJsonStr = TEXT("{}");
-                            if (ToolCallObj->TryGetObjectField(TEXT("arguments"), ArgsObjPtr)
-                                && ArgsObjPtr != nullptr
-                                && ArgsObjPtr->IsValid())
-                            {
-                                TSharedRef<TJsonWriter<>> ArgsWriter =
-                                    TJsonWriterFactory<>::Create(&ArgsJsonStr);
-                                FJsonSerializer::Serialize(ArgsObjPtr->ToSharedRef(), ArgsWriter);
-                            }
-
-                            if (!ToolNameStr.IsEmpty())
-                            {
-                                FPendingToolCall NewCall;
-                                NewCall.Name          = FName(*ToolNameStr);
-                                NewCall.ArgumentsJson = MoveTemp(ArgsJsonStr);
-                                StreamPendingToolCalls.Add(MoveTemp(NewCall));
-                            }
-                            else
-                            {
-                                UE_LOG(LogInoAgents, Warning,
-                                       TEXT("FLiteRtLmConversationWorker: tool_call chunk has no name field, dropping: %s"),
-                                       *ChunkJson);
-                            }
-                        }
-                    }
-                    // Any other part type is currently ignored. A
-                    // future iteration may handle audio / image
-                    // response parts here.
+                    // Any other content-part type is currently
+                    // ignored. A future iteration may handle audio /
+                    // image response parts here.
                 }
             }
 
@@ -614,6 +584,85 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
             {
                 StreamAccumulated += ChunkText;
                 DispatchTokenOnGameThread(ChunkText);
+                bChunkHadAnyContent = true;
+            }
+
+            // ---- Walk top-level tool_calls[*] -----------------------
+            //
+            // Each entry is an OpenAI-style function-call envelope:
+            //   { "type": "function",
+            //     "function": { "name": "...", "arguments": {...} } }
+            //
+            // We re-serialise the arguments sub-object to a compact
+            // JSON string here so the worker thread can hand it
+            // directly to ILiteRtLmTool::Execute without needing to
+            // re-serialise.
+            const TArray<TSharedPtr<FJsonValue>>* ToolCallsArrayPtr = nullptr;
+            if (RootObj->TryGetArrayField(TEXT("tool_calls"), ToolCallsArrayPtr)
+                && ToolCallsArrayPtr != nullptr)
+            {
+                for (const TSharedPtr<FJsonValue>& CallValue : *ToolCallsArrayPtr)
+                {
+                    if (!CallValue.IsValid() || CallValue->Type != EJson::Object)
+                    {
+                        continue;
+                    }
+                    const TSharedPtr<FJsonObject>& CallObj = CallValue->AsObject();
+
+                    const TSharedPtr<FJsonObject>* FunctionObjPtr = nullptr;
+                    if (!CallObj->TryGetObjectField(TEXT("function"), FunctionObjPtr)
+                        || FunctionObjPtr == nullptr
+                        || !FunctionObjPtr->IsValid())
+                    {
+                        continue;
+                    }
+                    const TSharedPtr<FJsonObject>& FunctionObj = *FunctionObjPtr;
+
+                    FString ToolNameStr;
+                    if (!FunctionObj->TryGetStringField(TEXT("name"), ToolNameStr)
+                        || ToolNameStr.IsEmpty())
+                    {
+                        UE_LOG(LogInoAgents, Warning,
+                               TEXT("FLiteRtLmConversationWorker: tool_call entry has no function.name field, dropping: %s"),
+                               *ChunkJson);
+                        continue;
+                    }
+
+                    // Serialise the arguments sub-object (or default
+                    // to "{}" for zero-arg tools).
+                    FString ArgsJsonStr = TEXT("{}");
+                    const TSharedPtr<FJsonObject>* ArgsObjPtr = nullptr;
+                    if (FunctionObj->TryGetObjectField(TEXT("arguments"), ArgsObjPtr)
+                        && ArgsObjPtr != nullptr
+                        && ArgsObjPtr->IsValid())
+                    {
+                        ArgsJsonStr.Reset();
+                        TSharedRef<TJsonWriter<>> ArgsWriter =
+                            TJsonWriterFactory<>::Create(&ArgsJsonStr);
+                        FJsonSerializer::Serialize(ArgsObjPtr->ToSharedRef(), ArgsWriter);
+                    }
+
+                    FPendingToolCall NewCall;
+                    NewCall.Name          = FName(*ToolNameStr);
+                    NewCall.ArgumentsJson = MoveTemp(ArgsJsonStr);
+                    StreamPendingToolCalls.Add(MoveTemp(NewCall));
+
+                    bChunkHadAnyContent = true;
+                }
+            }
+
+            // ---- Diagnostic for unrecognised chunks -----------------
+            // If we got a well-formed JSON object with neither text
+            // parts nor tool_calls entries, log it at Log level so
+            // future shape surprises are immediately visible without
+            // having to re-enable a debug build. Not a warning
+            // because some final/empty chunks are legitimate
+            // terminators.
+            if (!bChunkHadAnyContent && !is_final)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("FLiteRtLmConversationWorker: chunk had no recognised content (not text or tool_calls). Raw chunk: %s"),
+                       *ChunkJson);
             }
         }
         else
