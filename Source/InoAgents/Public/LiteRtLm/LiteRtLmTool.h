@@ -11,8 +11,14 @@
  * UInterface boilerplate. Never instantiate this — it exists only so
  * that UHT can generate reflection data for ILiteRtLmTool. Blueprint
  * and C++ classes implement ILiteRtLmTool, not ULiteRtLmTool.
+ *
+ * `Blueprintable` (top-level specifier, NOT a meta tag) is the magic
+ * that allows Blueprint classes to implement this interface. Without
+ * it, UHT rejects every BlueprintNativeEvent member below with
+ * "Interfaces that are not implementable in blueprints cannot have
+ *  Blueprint Event members."
  */
-UINTERFACE(MinimalAPI, BlueprintType, meta=(CannotImplementInterfaceInBlueprint=false))
+UINTERFACE(MinimalAPI, Blueprintable, BlueprintType)
 class ULiteRtLmTool : public UInterface
 {
     GENERATED_BODY()
