@@ -42,6 +42,20 @@ public class InoAgents : ModuleRules
 				// builders). Added so sibling .cpps can include each other's
 				// private headers directly.
 				Path.Combine(ModuleDirectory, "Private", "ElevenLabs"),
+
+				// Subdirectory of Private/ that holds the streaming audio
+				// component implementation plus its MP3 decoder wrapper.
+				// Added so InoAgentsStreamingAudioComponent.cpp can
+				// #include "InoAgentsAudioMp3Decoder.h" without a relative
+				// path, matching the convention used for every other
+				// private subtree.
+				Path.Combine(ModuleDirectory, "Private", "Audio"),
+
+				// Third-party single-header libraries (currently: minimp3).
+				// Included only by InoAgentsAudioMp3Decoder.cpp. Kept on its
+				// own include path so the vendored directory is explicit in
+				// the Build.cs file rather than buried under Private/Audio.
+				Path.Combine(ModuleDirectory, "Private", "Audio", "ThirdParty"),
 			}
 			);
 
