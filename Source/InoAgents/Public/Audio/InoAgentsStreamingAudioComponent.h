@@ -66,7 +66,7 @@ public:
     /**
      * Override the expected PCM sample rate / channel count for the NEXT
      * stream. Only meaningful when subsequent FeedAudioBytes calls use
-     * EInoAgentsAudioFormat::Pcm16 — MP3 overrides these from the frame
+     * EInoAgentsAudioFormat::PcmInt16 / PcmFloat32 — MP3 overrides these from the frame
      * header on the first decoded frame.
      *
      * Must be called BEFORE the first FeedAudioBytes of a stream.
@@ -165,7 +165,7 @@ private:
      */
     TPimplPtr<FInoAgentsMp3DecodeState> Mp3State;
 
-    EInoAgentsAudioFormat CurrentFormat = EInoAgentsAudioFormat::Pcm16;
+    EInoAgentsAudioFormat CurrentFormat = EInoAgentsAudioFormat::PcmInt16;
 
     /** PCM-stream format overrides. Ignored for MP3 streams because
      *  MP3 auto-detects. */

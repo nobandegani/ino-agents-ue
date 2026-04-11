@@ -7,25 +7,48 @@
 #include "InoAgentsAudioTypes.generated.h"
 
 /**
- * Audio encoding passed to UInoAgentsStreamingAudioComponent::FeedAudioBytes.
+ * Audio encoding (bit depth / compression) passed to
+ * UInoAgentsStreamingAudioComponent::FeedAudioBytes.
  *
- * PCM bytes do not carry sample-rate / channel-count metadata — callers
- * feeding PCM must configure those via SetPcmFormat BEFORE the first
- * FeedAudioBytes call. MP3 bytes carry the sample rate and channel count
- * in every frame header, so the component auto-detects them from the
- * first successfully-decoded frame.
+ * IMPORTANT: this enum only describes HOW each sample is encoded in the
+ * byte stream. It does NOT cover sample rate or channel count — those
+ * are separate concepts:
+ *
+ *   - Bit depth / encoding      -> this enum   (PcmInt16, PcmFloat32, Mp3)
+ *   - Sample rate (Hz)          -> SetPcmFormat(rate, channels)
+ *   - Channel count (mono / stereo) -> SetPcmFormat(rate, channels)
+ *
+ * For PCM streams the caller must configure the sample rate + channel
+ * count via SetPcmFormat BEFORE the first FeedAudioBytes because raw
+ * PCM bytes don't carry that metadata. For MP3 the component auto-
+ * detects both from the first decoded frame header and SetPcmFormat
+ * is ignored.
+ *
+ * Obsolete / pro-audio-only formats (int8, int24, int32) are
+ * deliberately NOT exposed. If you genuinely need them, convert to
+ * PcmInt16 or PcmFloat32 on your side before calling FeedAudioBytes.
  */
 UENUM(BlueprintType)
 enum class EInoAgentsAudioFormat : uint8
 {
-    /** Signed 16-bit little-endian PCM, interleaved for stereo. Default
-     *  sample rate 44100 Hz, default channel count 1; override via
-     *  UInoAgentsStreamingAudioComponent::SetPcmFormat. */
-    Pcm16           UMETA(DisplayName = "PCM int16 LE"),
+    /** Signed 16-bit integer PCM, little-endian, interleaved for stereo.
+     *  Two bytes per sample per channel. This is the universal standard
+     *  for runtime audio byte streams and the native input format for
+     *  USoundWaveProcedural — no conversion happens, the bytes queue
+     *  straight into the audio engine. */
+    PcmInt16            UMETA(DisplayName = "PCM 16-bit signed (int16 LE)"),
+
+    /** IEEE 754 single-precision float PCM, interleaved for stereo.
+     *  Four bytes per sample per channel. Samples are expected to be
+     *  in the [-1.0, +1.0] range; out-of-range samples are clamped.
+     *  Converted to int16 internally before being queued. Common
+     *  output format for DSP pipelines and some TTS libraries. */
+    PcmFloat32          UMETA(DisplayName = "PCM 32-bit float (-1.0 to +1.0)"),
 
     /** MPEG-1 / 2 / 2.5 Layer III. Sample rate and channel count are
-     *  auto-detected from the first MP3 frame header. */
-    Mp3             UMETA(DisplayName = "MP3"),
+     *  auto-detected from the first MP3 frame header — SetPcmFormat
+     *  is ignored for MP3 streams. */
+    Mp3                 UMETA(DisplayName = "MP3"),
 };
 
 /** Fires once per stream when enough decoded PCM is queued for playback

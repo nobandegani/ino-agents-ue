@@ -9,7 +9,7 @@
 //
 //   InoAgents.Audio.PlayPcmTest
 //     Generates a 1-second 440 Hz sine wave (44100 Hz int16 mono),
-//     feeds it in one shot via PlayAudio(bytes, Pcm16), and verifies
+//     feeds it in one shot via PlayAudio(bytes, PcmInt16), and verifies
 //     OnReadyToPlay + OnFinished fire in order. No decoder path
 //     involved — the PCM bytes go straight into USoundWaveProcedural.
 //
@@ -233,7 +233,7 @@ static void RunPlayPcmTest(const TArray<FString>& /*Args*/)
            kSineDurationMs, kSineFrequency, PcmBytes.Num());
 
     Observer->AudioComp->SetPcmFormat(kSineSampleRate, /*NumChannels=*/1);
-    Observer->AudioComp->PlayAudio(PcmBytes, EInoAgentsAudioFormat::Pcm16);
+    Observer->AudioComp->PlayAudio(PcmBytes, EInoAgentsAudioFormat::PcmInt16);
 }
 
 static FAutoConsoleCommand GPlayPcmTestCommand(

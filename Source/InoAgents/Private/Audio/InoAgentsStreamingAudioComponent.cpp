@@ -105,16 +105,49 @@ void UInoAgentsStreamingAudioComponent::FeedAudioBytes(
 
     switch (Format)
     {
-        case EInoAgentsAudioFormat::Pcm16:
+        case EInoAgentsAudioFormat::PcmInt16:
         {
-            // PCM bytes go straight into the procedural queue — int16
-            // little-endian is already USoundWaveProcedural's native
-            // input format, so no conversion is needed.
+            // int16 little-endian is USoundWaveProcedural's native
+            // input format — bytes queue straight through with no
+            // conversion. An odd byte count is truncated to the
+            // nearest sample boundary; in practice callers always
+            // feed whole samples.
             EnsureProceduralWave(PcmSampleRate, PcmNumChannels);
             if (ProceduralWave != nullptr)
             {
-                ProceduralWave->QueueAudio(AudioBytes.GetData(), AudioBytes.Num());
-                FireReadyToPlayIfFirstBytes();
+                const int32 ByteCount = AudioBytes.Num() & ~1;  // round down to 2-byte boundary
+                if (ByteCount > 0)
+                {
+                    ProceduralWave->QueueAudio(AudioBytes.GetData(), ByteCount);
+                    FireReadyToPlayIfFirstBytes();
+                }
+            }
+            break;
+        }
+
+        case EInoAgentsAudioFormat::PcmFloat32:
+        {
+            // Convert float32 samples (assumed in [-1.0, +1.0]) into
+            // int16 before queueing. Out-of-range samples are clamped.
+            // An odd byte count is truncated to the nearest 4-byte
+            // sample boundary.
+            EnsureProceduralWave(PcmSampleRate, PcmNumChannels);
+            if (ProceduralWave != nullptr)
+            {
+                const int32 NumFloats = AudioBytes.Num() / static_cast<int32>(sizeof(float));
+                if (NumFloats > 0)
+                {
+                    const float* Floats = reinterpret_cast<const float*>(AudioBytes.GetData());
+                    TArray<int16> Int16Samples;
+                    Int16Samples.SetNumUninitialized(NumFloats);
+                    for (int32 i = 0; i < NumFloats; ++i)
+                    {
+                        const float Clamped = FMath::Clamp(Floats[i], -1.0f, 1.0f);
+                        Int16Samples[i] = static_cast<int16>(Clamped * 32767.0f);
+                    }
+                    QueuePcmInt16(Int16Samples.GetData(), NumFloats);
+                    FireReadyToPlayIfFirstBytes();
+                }
             }
             break;
         }
@@ -343,7 +376,7 @@ void UInoAgentsStreamingAudioComponent::ResetInternalState()
     bStreamActive       = false;
     bStreamFinalized    = false;
     bReadyToPlayFired   = false;
-    CurrentFormat       = EInoAgentsAudioFormat::Pcm16;
+    CurrentFormat       = EInoAgentsAudioFormat::PcmInt16;
 
     // Drop the decoder state so the next stream starts fresh. A
     // brand-new mp3dec_t is cheap (just a zero-init of a small
