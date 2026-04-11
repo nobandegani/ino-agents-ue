@@ -648,6 +648,440 @@ static FAutoConsoleCommand GConversationTestCommand(
          "template internally — instruction prompts actually get answered."),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunConversationSmokeTest));
 
+
+// ============================================================================
+// Phase-1 tool-calling smoke test (milestone B)
+// ============================================================================
+//
+// Console command: InoAgents.ToolCallTest [optional prompt words...]
+//
+// Purpose: prove the agent loop — the model sees a prompt, decides to call a
+// tool, we execute the tool locally, send the result back, and the model
+// produces a final answer using that result. This is the headline feature
+// of the InoAgents plugin.
+//
+// The test defines ONE in-process tool: get_current_time, which takes no
+// arguments and returns FDateTime::Now() as a string. The default prompt is
+// "What time is it right now?" which should reliably trigger the tool on an
+// instruction-tuned Gemma 4 model.
+//
+// enable_constrained_decoding = true is required for reliable tool calling.
+// It routes the model's output through libGemmaModelConstraintProvider.dll
+// (which is exactly why that DLL is a required runtime sibling of LiteRtLm.dll)
+// so that when a tool call is expected, the sampler is constrained to emit
+// syntactically valid function call JSON.
+//
+// Still synchronous and still on the game thread. Editor will freeze for
+// ~5-15 seconds (engine load + two generation passes).
+//
+// Invoke:
+//     InoAgents.ToolCallTest
+//     InoAgents.ToolCallTest Please tell me the current time.
+// ============================================================================
+
+namespace
+{
+    /**
+     * Parse a JSON string into an FJsonObject. Logs and returns nullptr on
+     * failure.
+     */
+    TSharedPtr<FJsonObject> ParseJsonObjectOrLog(const FString& Json, const TCHAR* Context)
+    {
+        TSharedPtr<FJsonObject> Obj;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+        if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("%s: failed to parse JSON: %s"),
+                   Context, *Json);
+            return nullptr;
+        }
+        return Obj;
+    }
+
+    /**
+     * Extract the first tool call from an assistant response JSON object, if
+     * present. Returns false if the response has no tool_calls field (i.e.
+     * the model answered in plain text).
+     */
+    bool TryExtractFirstToolCall(const TSharedPtr<FJsonObject>& ResponseObj,
+                                 FString& OutToolName,
+                                 TSharedPtr<FJsonObject>& OutArgumentsObj)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* ToolCallsArrayPtr = nullptr;
+        if (!ResponseObj->TryGetArrayField(TEXT("tool_calls"), ToolCallsArrayPtr)
+            || ToolCallsArrayPtr == nullptr
+            || ToolCallsArrayPtr->Num() == 0)
+        {
+            return false;
+        }
+
+        const TSharedPtr<FJsonValue>& FirstToolCallValue = (*ToolCallsArrayPtr)[0];
+        if (!FirstToolCallValue.IsValid()
+            || FirstToolCallValue->Type != EJson::Object)
+        {
+            return false;
+        }
+        const TSharedPtr<FJsonObject>& FirstToolCallObj = FirstToolCallValue->AsObject();
+
+        const TSharedPtr<FJsonObject>* FunctionObjPtr = nullptr;
+        if (!FirstToolCallObj->TryGetObjectField(TEXT("function"), FunctionObjPtr)
+            || FunctionObjPtr == nullptr)
+        {
+            return false;
+        }
+        const TSharedPtr<FJsonObject>& FunctionObj = *FunctionObjPtr;
+
+        if (!FunctionObj->TryGetStringField(TEXT("name"), OutToolName))
+        {
+            return false;
+        }
+
+        // arguments may be either a JSON object or absent (for zero-arg tools)
+        const TSharedPtr<FJsonObject>* ArgumentsObjPtr = nullptr;
+        if (FunctionObj->TryGetObjectField(TEXT("arguments"), ArgumentsObjPtr)
+            && ArgumentsObjPtr != nullptr)
+        {
+            OutArgumentsObj = *ArgumentsObjPtr;
+        }
+        else
+        {
+            OutArgumentsObj = MakeShared<FJsonObject>();
+        }
+
+        return true;
+    }
+
+    /**
+     * Pretty-extract the concatenated plain-text content from an assistant
+     * response for logging purposes. Returns empty string if the response has
+     * no text content.
+     */
+    FString ExtractAssistantText(const TSharedPtr<FJsonObject>& ResponseObj)
+    {
+        const TArray<TSharedPtr<FJsonValue>>* ContentArrayPtr = nullptr;
+        if (!ResponseObj->TryGetArrayField(TEXT("content"), ContentArrayPtr)
+            || ContentArrayPtr == nullptr)
+        {
+            return FString();
+        }
+
+        FString Result;
+        for (const TSharedPtr<FJsonValue>& PartValue : *ContentArrayPtr)
+        {
+            if (!PartValue.IsValid() || PartValue->Type != EJson::Object)
+            {
+                continue;
+            }
+            const TSharedPtr<FJsonObject>& PartObj = PartValue->AsObject();
+
+            FString PartType;
+            PartObj->TryGetStringField(TEXT("type"), PartType);
+            if (PartType != TEXT("text"))
+            {
+                continue;
+            }
+
+            FString PartText;
+            if (PartObj->TryGetStringField(TEXT("text"), PartText))
+            {
+                if (!Result.IsEmpty())
+                {
+                    Result += TEXT(" ");
+                }
+                Result += PartText;
+            }
+        }
+        return Result;
+    }
+
+    /**
+     * The one local tool this smoke test exposes to the model. Takes no
+     * arguments; returns the current wall-clock time as a human-readable
+     * string.
+     */
+    FString ExecuteGetCurrentTimeTool()
+    {
+        const FDateTime Now = FDateTime::Now();
+        // Canonical UE FDateTime::ToString() format: yyyy.mm.dd-hh.mm.ss
+        // Reformat to something more LLM-friendly:
+        return Now.ToString(TEXT("%A, %B %d %Y at %H:%M:%S"));
+    }
+}
+
+static void RunToolCallSmokeTest(const TArray<FString>& Args)
+{
+    // --- Prompt ---
+    const FString Prompt = (Args.Num() > 0)
+        ? FString::Join(Args, TEXT(" "))
+        : FString(TEXT("What time is it right now?"));
+
+    // --- Resolve model path ---
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
+    if (!Plugin.IsValid())
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: plugin not found"));
+        return;
+    }
+    const FString BaseDir = Plugin->GetBaseDir();
+    const FString ModelPath = FPaths::Combine(
+        BaseDir, TEXT("Models"), TEXT("gemma-4-E2B-it.litertlm"));
+
+    if (!IFileManager::Get().FileExists(*ModelPath))
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ToolCallTest: model file not found at %s"), *ModelPath);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: starting"));
+    UE_LOG(LogInoAgents, Log, TEXT("  Prompt: \"%s\""), *Prompt);
+    UE_LOG(LogInoAgents, Warning,
+           TEXT("ToolCallTest: editor will freeze for ~5-15 seconds (engine + 2 generation passes)."));
+    GLog->Flush();
+
+    // --- Static JSON strings (owned here, lifetimes simple) ---
+    //
+    // A single tool: get_current_time. OpenAI-style function schema. Note
+    // the empty properties + empty required array — the model should
+    // understand that this tool takes no arguments.
+    const char* const ToolsJsonCStr = R"([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_time",
+                "description": "Returns the current local date and time of the machine the assistant is running on. Use this when the user asks what time it is or asks about the current date.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        }
+    ])";
+
+    const char* const SystemMessageJsonCStr =
+        R"({"type":"text","text":"You are a helpful assistant. When you need information you do not know, such as the current time, you MUST call the available tools rather than making up an answer."})";
+
+    // --- UTF-8 buffer for the model path ---
+    const FTCHARToUTF8 ModelPathUtf8(*ModelPath);
+
+    // --- Load engine ---
+    const double T0 = FPlatformTime::Seconds();
+
+    LiteRtLmEngineSettings* Settings = litert_lm_engine_settings_create(
+        ModelPathUtf8.Get(), "cpu", nullptr, nullptr);
+    if (Settings == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: engine_settings_create returned NULL"));
+        return;
+    }
+
+    LiteRtLmEngine* Engine = litert_lm_engine_create(Settings);
+    if (Engine == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: engine_create returned NULL"));
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+    const double TEngineLoaded = FPlatformTime::Seconds();
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: engine loaded in %.2f s"), TEngineLoaded - T0);
+
+    // --- Create conversation config with tools + constrained decoding ---
+    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create(
+        Engine,
+        /* session_config              = */ nullptr,
+        /* system_message_json         = */ SystemMessageJsonCStr,
+        /* tools_json                  = */ ToolsJsonCStr,
+        /* messages_json               = */ nullptr,
+        /* enable_constrained_decoding = */ true);
+    if (ConvConfig == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: conversation_config_create returned NULL"));
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    LiteRtLmConversation* Conversation = litert_lm_conversation_create(Engine, ConvConfig);
+    if (Conversation == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: conversation_create returned NULL"));
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: conversation created (with tools, constrained decoding ON)"));
+
+    // --- Build user message JSON ---
+    const FString EscapedPromptQuoted = EscapeJsonString(Prompt);
+    const FString UserMessageJson = FString::Printf(
+        TEXT(R"({"role":"user","content":[{"type":"text","text":%s}]})"),
+        *EscapedPromptQuoted);
+    const FTCHARToUTF8 UserMessageJsonUtf8(*UserMessageJson);
+
+    // --- Round 1: send user message, get response (text or tool call) ---
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: round 1 — sending user message..."));
+    GLog->Flush();
+
+    const double TR1Start = FPlatformTime::Seconds();
+    LiteRtLmJsonResponse* Response1 = litert_lm_conversation_send_message(
+        Conversation, UserMessageJsonUtf8.Get(), /*extra_context=*/ nullptr);
+    const double TR1End = FPlatformTime::Seconds();
+
+    if (Response1 == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ToolCallTest: round 1 send_message returned NULL after %.2f s"),
+               TR1End - TR1Start);
+        litert_lm_conversation_delete(Conversation);
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    const char* const Response1CStr = litert_lm_json_response_get_string(Response1);
+    const FString Response1Json = Response1CStr ? FString(UTF8_TO_TCHAR(Response1CStr)) : FString();
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: round 1 response in %.2f s"), TR1End - TR1Start);
+    UE_LOG(LogInoAgents, Log, TEXT("  %s"), *Response1Json);
+
+    const TSharedPtr<FJsonObject> Response1Obj = ParseJsonObjectOrLog(Response1Json, TEXT("ToolCallTest round 1"));
+    if (!Response1Obj.IsValid())
+    {
+        litert_lm_json_response_delete(Response1);
+        litert_lm_conversation_delete(Conversation);
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    // --- Check for a tool call ---
+    FString ToolName;
+    TSharedPtr<FJsonObject> ArgumentsObj;
+    const bool bHasToolCall = TryExtractFirstToolCall(Response1Obj, ToolName, ArgumentsObj);
+
+    if (!bHasToolCall)
+    {
+        // The model answered in plain text without calling a tool. This is
+        // a valid outcome for small models, worth logging clearly.
+        const FString AssistantText = ExtractAssistantText(Response1Obj);
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("ToolCallTest: model did NOT request a tool call. "
+                    "Plain-text reply: \"%s\""),
+               *AssistantText);
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("ToolCallTest: this is not a failure — just means Gemma 4 E2B "
+                    "chose not to use the tool for this prompt. Try a more direct "
+                    "instruction, e.g. 'Call the get_current_time tool.'"));
+
+        litert_lm_json_response_delete(Response1);
+        litert_lm_conversation_delete(Conversation);
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: model called tool \"%s\""), *ToolName);
+
+    // --- Execute the tool locally ---
+    FString ToolResultValue;
+    if (ToolName == TEXT("get_current_time"))
+    {
+        ToolResultValue = ExecuteGetCurrentTimeTool();
+    }
+    else
+    {
+        ToolResultValue = FString::Printf(TEXT("ERROR: unknown tool '%s'"), *ToolName);
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: local tool result: %s"), *ToolResultValue);
+
+    // --- Build tool result message ---
+    //
+    // Shape (from runtime/conversation/model_data_processor/gemma4_data_processor_test.cc):
+    //   {
+    //     "role": "tool",
+    //     "content": [{
+    //       "type": "tool_response",
+    //       "tool_response": {
+    //         "name": "<tool name>",
+    //         "value": { "result": "<the value>" }
+    //       }
+    //     }]
+    //   }
+    const FString EscapedToolNameQuoted = EscapeJsonString(ToolName);
+    const FString EscapedToolResultQuoted = EscapeJsonString(ToolResultValue);
+    const FString ToolResultMessageJson = FString::Printf(
+        TEXT(R"({"role":"tool","content":[{"type":"tool_response","tool_response":{"name":%s,"value":{"result":%s}}}]})"),
+        *EscapedToolNameQuoted,
+        *EscapedToolResultQuoted);
+    const FTCHARToUTF8 ToolResultMessageJsonUtf8(*ToolResultMessageJson);
+
+    // --- Round 2: send tool result, get final text answer ---
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: round 2 — sending tool result..."));
+    GLog->Flush();
+
+    const double TR2Start = FPlatformTime::Seconds();
+    LiteRtLmJsonResponse* Response2 = litert_lm_conversation_send_message(
+        Conversation, ToolResultMessageJsonUtf8.Get(), /*extra_context=*/ nullptr);
+    const double TR2End = FPlatformTime::Seconds();
+
+    if (Response2 == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ToolCallTest: round 2 send_message returned NULL after %.2f s"),
+               TR2End - TR2Start);
+        litert_lm_json_response_delete(Response1);
+        litert_lm_conversation_delete(Conversation);
+        litert_lm_conversation_config_delete(ConvConfig);
+        litert_lm_engine_delete(Engine);
+        litert_lm_engine_settings_delete(Settings);
+        return;
+    }
+
+    const char* const Response2CStr = litert_lm_json_response_get_string(Response2);
+    const FString Response2Json = Response2CStr ? FString(UTF8_TO_TCHAR(Response2CStr)) : FString();
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: round 2 response in %.2f s"), TR2End - TR2Start);
+    UE_LOG(LogInoAgents, Log, TEXT("  %s"), *Response2Json);
+
+    const TSharedPtr<FJsonObject> Response2Obj = ParseJsonObjectOrLog(Response2Json, TEXT("ToolCallTest round 2"));
+    if (Response2Obj.IsValid())
+    {
+        const FString FinalText = ExtractAssistantText(Response2Obj);
+        UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: final assistant text: \"%s\""), *FinalText);
+    }
+
+    // --- Cleanup ---
+    litert_lm_json_response_delete(Response2);
+    litert_lm_json_response_delete(Response1);
+    litert_lm_conversation_delete(Conversation);
+    litert_lm_conversation_config_delete(ConvConfig);
+    litert_lm_engine_delete(Engine);
+    litert_lm_engine_settings_delete(Settings);
+
+    const double TEnd = FPlatformTime::Seconds();
+    UE_LOG(LogInoAgents, Log,
+           TEXT("ToolCallTest: DONE — total elapsed %.2f s (round 1: %.2f s, round 2: %.2f s)"),
+           TEnd - T0, TR1End - TR1Start, TR2End - TR2Start);
+}
+
+static FAutoConsoleCommand GToolCallTestCommand(
+    TEXT("InoAgents.ToolCallTest"),
+    TEXT("Phase-1 smoke test (milestone B): full agent loop. Registers a "
+         "'get_current_time' tool with the conversation, sends a user prompt "
+         "that should trigger the tool, executes the tool locally, sends the "
+         "result back, and logs the model's final answer. Proves tool calling "
+         "works end-to-end. Synchronous, freezes the editor ~5-15 seconds. "
+         "Optionally takes a custom prompt: 'InoAgents.ToolCallTest Please "
+         "tell me the current date.'"),
+    FConsoleCommandWithArgsDelegate::CreateStatic(&RunToolCallSmokeTest));
+
 void FInoAgentsModule::ShutdownModule()
 {
     // Unload in reverse order of dependency: the main DLL first, then the
