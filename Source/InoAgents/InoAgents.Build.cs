@@ -24,6 +24,12 @@ public class InoAgents : ModuleRules
 				// and #include "InoAgentsLog.h" (the latter resolves via
 				// Private/ which UBT already adds automatically).
 				Path.Combine(ModuleDirectory, "Private", "SmokeTests"),
+
+				// Subdirectory of Private/ that holds the LiteRT-LM backend
+				// implementation (workers, tool impls, etc.). Added so that
+				// LiteRtLmSubsystem.cpp can #include "LiteRtLmConversationWorker.h"
+				// and similar private headers without relative paths.
+				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 			}
 			);
 			
