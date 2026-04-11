@@ -9,5 +9,16 @@ namespace
 
 FString UElevenLabsSettings::GetEffectiveBaseUrl() const
 {
-    return BaseUrl.IsEmpty() ? FString(kDefaultBaseUrl) : BaseUrl;
+    FString Result = BaseUrl.IsEmpty() ? FString(kDefaultBaseUrl) : BaseUrl;
+
+    // Strip any trailing slashes so callers can safely append "/v1/..."
+    // without producing "api.elevenlabs.io//v1/...", which ElevenLabs'
+    // edge routes 404. Users who paste the URL from the docs sometimes
+    // include the trailing slash.
+    while (Result.EndsWith(TEXT("/")))
+    {
+        Result.LeftChopInline(1);
+    }
+
+    return Result;
 }
