@@ -11,6 +11,23 @@
 
 #include "litert/lm/engine.h"
 
+// Out-of-line ctors/dtor. These MUST live in this translation unit (not
+// in the header) because the Worker TUniquePtr's deleter needs the full
+// definition of FLiteRtLmConversationWorker to `delete` it, and only
+// this TU includes LiteRtLmConversationWorker.h. Leaving any of them
+// implicit in the header lets UHT's generated .gen.cpp instantiate the
+// deleter against the forward-declared class, which fails with C4150.
+//
+// UHT generates TWO implicit ctors for every UCLASS: the default ctor
+// AND a hot-reload vtable helper ctor (DEFINE_VTABLE_PTR_HELPER_CTOR_NS).
+// Both must be supplied out-of-line.
+ULiteRtLmConversation::ULiteRtLmConversation() = default;
+ULiteRtLmConversation::ULiteRtLmConversation(FVTableHelper& Helper)
+    : Super(Helper)
+{
+}
+ULiteRtLmConversation::~ULiteRtLmConversation() = default;
+
 void ULiteRtLmConversation::Initialize(
     ULiteRtLmSubsystem* InSubsystem,
     LiteRtLmEngine* InEngine,

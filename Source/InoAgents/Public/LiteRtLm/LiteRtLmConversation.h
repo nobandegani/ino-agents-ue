@@ -53,6 +53,20 @@ class INOAGENTS_API ULiteRtLmConversation : public UObject
     GENERATED_BODY()
 
 public:
+    // Out-of-line constructors / destructor. Required because the private
+    // TUniquePtr<FLiteRtLmConversationWorker> member references a
+    // forward-declared type: if any compiler-synthesized constructor or
+    // destructor were emitted in the .gen.cpp (where only the forward
+    // decl is visible), TDefaultDelete<FLiteRtLmConversationWorker>::
+    // operator() would try to `delete` an incomplete type and fail with
+    // C4150. UHT emits TWO implicit ctors in .gen.cpp — the default one
+    // AND the FVTableHelper hot-reload helper — so BOTH must be declared
+    // here and defined in LiteRtLmConversation.cpp (which #includes the
+    // worker header), along with the destructor.
+    ULiteRtLmConversation();
+    ULiteRtLmConversation(FVTableHelper& Helper);
+    virtual ~ULiteRtLmConversation();
+
     //~ UObject interface
     virtual void BeginDestroy() override;
     //~ End UObject interface
