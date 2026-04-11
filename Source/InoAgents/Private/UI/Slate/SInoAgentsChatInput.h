@@ -11,6 +11,7 @@ struct FInoAgentsChatStyle;
 class SMultiLineEditableTextBox;
 class SButton;
 class STextBlock;
+class SBorder;
 
 DECLARE_DELEGATE_OneParam(FOnInoAgentsChatMessageSubmitted, const FString&);
 DECLARE_DELEGATE(FOnInoAgentsChatCancelRequested);
@@ -62,6 +63,7 @@ private:
     FOnInoAgentsChatCancelRequested  OnCancelRequested;
 
     TSharedPtr<SMultiLineEditableTextBox> TextBox;
+    TSharedPtr<SBorder>    InputBorder;  // outer rounded border, repointed on theme toggle
     TSharedPtr<SButton>    ActionButton;
     TSharedPtr<STextBlock> ActionLabel;
 

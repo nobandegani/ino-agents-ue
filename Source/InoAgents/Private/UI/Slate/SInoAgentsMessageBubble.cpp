@@ -66,10 +66,11 @@ void SInoAgentsMessageBubble::RebuildContent()
     .HAlign(HAlign)
     .Padding(FMargin(0.f, 4.f))
     [
-        // Cap the bubble width at ~78% of typical panel width so very
-        // long replies wrap rather than ballooning the panel.
+        // Cap the bubble width at ~80% of typical panel width so very
+        // long replies wrap rather than ballooning the panel. Short
+        // replies remain content-sized.
         SNew(SBox)
-        .MaxDesiredWidth(380.f)
+        .MaxDesiredWidth(416.f)
         [
             SNew(SBorder)
             .BorderImage(BubbleBg)

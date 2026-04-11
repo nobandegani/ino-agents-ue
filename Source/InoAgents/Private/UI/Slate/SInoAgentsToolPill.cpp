@@ -97,7 +97,7 @@ void SInoAgentsToolPill::Construct(const FArguments& InArgs)
     ChildSlot
     .Padding(FMargin(0.f))
     [
-        SNew(SBorder)
+        SAssignNew(PillBorder, SBorder)
         .BorderImage(PillBg)
         .Padding(FMargin(10.f, 6.f))
         .ToolTip(SNew(SToolTip)[ TooltipContent ])
@@ -109,7 +109,7 @@ void SInoAgentsToolPill::Construct(const FArguments& InArgs)
             .Padding(FMargin(0.f, 0.f, 6.f, 0.f))
             [
                 // Bullet glyph keeps the line readable when the model name is long.
-                SNew(STextBlock)
+                SAssignNew(GearGlyph, STextBlock)
                 .Text(FText::FromString(TEXT("⚙")))
                 .Font(MetaFont)
                 .ColorAndOpacity(FSlateColor(PillText))
@@ -118,7 +118,7 @@ void SInoAgentsToolPill::Construct(const FArguments& InArgs)
             .FillWidth(1.f)
             .VAlign(VAlign_Center)
             [
-                SNew(STextBlock)
+                SAssignNew(HeadlineText, STextBlock)
                 .Text(FText::FromString(BuildHeadlineText()))
                 .Font(BodyFont)
                 .ColorAndOpacity(FSlateColor(PillText))
@@ -131,6 +131,25 @@ void SInoAgentsToolPill::Construct(const FArguments& InArgs)
 void SInoAgentsToolPill::RefreshStyle(TSharedPtr<FInoAgentsChatStyle> InStyle)
 {
     Style = InStyle;
+    if (!Style.IsValid())
+    {
+        return;
+    }
+
+    if (PillBorder.IsValid() && Style->ToolPillBrush.IsValid())
+    {
+        PillBorder->SetBorderImage(Style->ToolPillBrush.Get());
+    }
+    if (HeadlineText.IsValid())
+    {
+        HeadlineText->SetColorAndOpacity(FSlateColor(Style->ToolPillText));
+        HeadlineText->SetFont(Style->BodyFont);
+    }
+    if (GearGlyph.IsValid())
+    {
+        GearGlyph->SetColorAndOpacity(FSlateColor(Style->ToolPillText));
+        GearGlyph->SetFont(Style->MetaFont);
+    }
     Invalidate(EInvalidateWidgetReason::Paint | EInvalidateWidgetReason::Layout);
 }
 

@@ -87,7 +87,7 @@ void SInoAgentsChatInput::Construct(const FArguments& InArgs)
         .FillWidth(1.f)
         .Padding(FMargin(0.f, 0.f, 8.f, 0.f))
         [
-            SNew(SBorder)
+            SAssignNew(InputBorder, SBorder)
             .BorderImage(InputBg)
             .Padding(FMargin(10.f, 6.f))
             [
@@ -165,6 +165,27 @@ void SInoAgentsChatInput::SetStreaming(bool bInStreaming)
 void SInoAgentsChatInput::RefreshStyle(TSharedPtr<FInoAgentsChatStyle> InStyle)
 {
     Style = InStyle;
+
+    // Rebind the input row's outer border to the new style's brush so
+    // it actually picks up the new theme's colours. The brush memory
+    // from the prior style is still valid because the panel pins both
+    // palettes for its lifetime, but we still need to repoint the
+    // SBorder to read from the new one.
+    if (InputBorder.IsValid() && Style.IsValid() && Style->InputBrush.IsValid())
+    {
+        InputBorder->SetBorderImage(Style->InputBrush.Get());
+    }
+
+    // Refresh the editable text-box style colours so foreground/font
+    // pick up the new theme. The pointer the SMultiLineEditableTextBox
+    // captured at Construct is to our member, so the in-place edit is
+    // visible to it.
+    if (Style.IsValid())
+    {
+        CustomTextBoxStyle.ForegroundColor = FSlateColor(Style->TextPrimary);
+        CustomTextBoxStyle.SetFont(Style->BodyFont);
+    }
+
     RebuildButton();
     Invalidate(EInvalidateWidgetReason::Paint | EInvalidateWidgetReason::Layout);
 }

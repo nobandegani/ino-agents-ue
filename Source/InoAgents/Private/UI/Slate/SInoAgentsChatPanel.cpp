@@ -24,7 +24,14 @@ namespace
 
 void SInoAgentsChatPanel::Construct(const FArguments& InArgs)
 {
-    Style              = FInoAgentsChatStyle::MakeDark();
+    // Both styles are pinned for the panel's whole lifetime — brushes
+    // handed to SBorder/SImage/etc. as raw pointers must outlive every
+    // widget that captured them, and theme toggle just re-aims the
+    // alias rather than freeing the previous palette.
+    DarkStyle  = FInoAgentsChatStyle::MakeDark();
+    LightStyle = FInoAgentsChatStyle::MakeLight();
+    Style      = DarkStyle;
+
     OnMessageSubmitted = InArgs._OnMessageSubmitted;
     OnDismissed        = InArgs._OnDismissed;
     OnCancelRequested  = InArgs._OnCancelRequested;
@@ -42,7 +49,7 @@ void SInoAgentsChatPanel::Construct(const FArguments& InArgs)
         .WidthOverride(kPanelWidth)
         .HeightOverride(kPanelHeight)
         [
-            SNew(SBorder)
+            SAssignNew(PanelBorder, SBorder)
             .BorderImage(Style->PanelBrush.Get())
             .Padding(FMargin(0.f))
             [
@@ -171,7 +178,19 @@ void SInoAgentsChatPanel::SetTheme(bool bDark)
     {
         return;
     }
-    Style = bDark ? FInoAgentsChatStyle::MakeDark() : FInoAgentsChatStyle::MakeLight();
+    // Just re-aim the alias — both palettes are already pinned, so any
+    // raw brush pointers held by SBorder/SImage from the prior theme
+    // remain valid until we explicitly repoint them below.
+    Style = bDark ? DarkStyle : LightStyle;
+
+    // Repoint our own outer border at the new panel brush. Children
+    // (header, input, bubbles, pills) get RefreshStyle and rebuild
+    // their own borders against the new style.
+    if (PanelBorder.IsValid() && Style.IsValid() && Style->PanelBrush.IsValid())
+    {
+        PanelBorder->SetBorderImage(Style->PanelBrush.Get());
+    }
+
     RefreshAllChildStyles();
 }
 

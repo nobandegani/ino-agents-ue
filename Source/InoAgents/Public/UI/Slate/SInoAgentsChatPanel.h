@@ -14,6 +14,7 @@ class SInoAgentsMessageBubble;
 class SInoAgentsToolPill;
 class SVerticalBox;
 class SScrollBox;
+class SBorder;
 
 // Forward-declared so the panel's public header doesn't need to include
 // the private SInoAgentsMessageBubble.h. C++11 enum-class forward decls
@@ -111,7 +112,11 @@ private:
     void RefreshAllChildStyles();
     void MaybeAutoScrollToBottom();
 
-    TSharedPtr<FInoAgentsChatStyle> Style;
+    // Both palettes are pinned for the panel's whole lifetime so brush
+    // pointers handed to SBorder etc. never dangle on theme toggle.
+    TSharedPtr<FInoAgentsChatStyle> DarkStyle;
+    TSharedPtr<FInoAgentsChatStyle> LightStyle;
+    TSharedPtr<FInoAgentsChatStyle> Style;  // alias to one of the two above
 
     FOnInoAgentsChatPanelMessageSubmitted OnMessageSubmitted;
     FOnInoAgentsChatPanelDismissed        OnDismissed;
@@ -121,6 +126,7 @@ private:
     TSharedPtr<SInoAgentsChatInput>  Input;
     TSharedPtr<SScrollBox>           MessageScrollBox;
     TSharedPtr<SVerticalBox>         MessageList;
+    TSharedPtr<SBorder>              PanelBorder;  // outer rounded border, repointed on theme toggle
 
     // Parallel arrays for in-place style refresh.
     TArray<TSharedPtr<SInoAgentsMessageBubble>> BubbleWidgets;

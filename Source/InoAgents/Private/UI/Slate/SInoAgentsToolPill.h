@@ -8,6 +8,8 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 
 struct FInoAgentsChatStyle;
+class SBorder;
+class STextBlock;
 
 /**
  * Compact display of one tool call inside the message stream.
@@ -55,6 +57,10 @@ private:
     FName ToolName;
     FString ArgumentsJson;
     FString ResultJson;
+
+    TSharedPtr<SBorder>    PillBorder;
+    TSharedPtr<STextBlock> HeadlineText;
+    TSharedPtr<STextBlock> GearGlyph;
 
     FCurveSequence EnterSequence;
 };
