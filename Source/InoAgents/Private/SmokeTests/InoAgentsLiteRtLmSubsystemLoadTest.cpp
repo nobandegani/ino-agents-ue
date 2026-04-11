@@ -61,7 +61,7 @@ namespace
 }
 
 void UInoAgentsLiteRtLmSubsystemLoadTestObserver::HandleLoaded(
-    bool bSuccess, const FString& ErrorMessage)
+    bool bSuccess, FString ErrorMessage)
 {
     const double Elapsed = FPlatformTime::Seconds() - StartTime;
 

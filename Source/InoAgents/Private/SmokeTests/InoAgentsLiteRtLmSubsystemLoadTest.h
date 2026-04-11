@@ -36,6 +36,12 @@ public:
     UPROPERTY()
     TObjectPtr<ULiteRtLmModelConfig> Config = nullptr;
 
+    // NOTE: parameter types MUST exactly match the delegate's declaration
+    // in LiteRtLmTypes.h (`bool, FString`). Dynamic delegate BindDynamic
+    // does strict method-pointer matching — `const FString&` would fail to
+    // compile even though it is the idiomatic way to pass read-only strings
+    // elsewhere in C++. Use `FString` by value in every dynamic delegate
+    // handler throughout the plugin.
     UFUNCTION()
-    void HandleLoaded(bool bSuccess, const FString& ErrorMessage);
+    void HandleLoaded(bool bSuccess, FString ErrorMessage);
 };
