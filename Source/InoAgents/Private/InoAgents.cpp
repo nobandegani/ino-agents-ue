@@ -7,6 +7,11 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 
+// LiteRT-LM C API. Staged into Source/ThirdParty/InoAgentsLibrary/Public/ by
+// LiteRtLm/scripts/build-win64.ps1. The include path is added via
+// PublicSystemIncludePaths in InoAgentsLibrary.Build.cs.
+#include "litert/lm/engine.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogInoAgents, Log, All);
 
 namespace
@@ -80,6 +85,27 @@ void FInoAgentsModule::StartupModule()
     // when Windows processes LiteRtLm.dll's import table.
     GemmaConstraintProviderHandle = LoadStagedDll(TEXT("libGemmaModelConstraintProvider.dll"));
     LiteRtLmHandle = LoadStagedDll(TEXT("LiteRtLm.dll"));
+
+    // --------------------------------------------------------------
+    // Smoke test: call one trivial C API function so we know that
+    //   (a) InoAgentsLibrary.Build.cs's import lib is wired correctly,
+    //   (b) the /EXPORT: workaround actually produces a callable symbol,
+    //   (c) delay-load trampolines resolve on first call without crashing,
+    //   (d) UE -> LiteRT-LM calling convention works end-to-end.
+    //
+    // litert_lm_set_min_log_level is the cheapest function in the public
+    // API: no state, no allocation, no model file required. It just forwards
+    // to absl::SetMinLogLevel. Arg 0 = INFO (no change in log verbosity).
+    //
+    // If this crashes, stop here and debug — everything downstream depends
+    // on DLL calls working.
+    // --------------------------------------------------------------
+    if (LiteRtLmHandle)
+    {
+        litert_lm_set_min_log_level(0);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("InoAgents: smoke test passed — litert_lm_set_min_log_level(0) returned cleanly."));
+    }
 }
 
 void FInoAgentsModule::ShutdownModule()
