@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\"/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex -FromMsBuild)"
+      "Bash(\"/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(git -C E:/Projects/InoAgentDemo/Plugins/InoAgents status)",
+      "Bash(git -C E:/Projects/InoAgentDemo/Plugins/InoAgents diff --stat)"
     ]
   }
 }
