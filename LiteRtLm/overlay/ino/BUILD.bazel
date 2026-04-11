@@ -1,0 +1,71 @@
+# Copyright 2026 Inoland. Licensed under the Apache License 2.0.
+#
+# InoAgents custom Bazel target: produces LiteRtLm.dll for consumption by the
+# InoAgents Unreal Engine plugin.
+#
+# This file is staged into LiteRT-LM's source tree by
+#   Plugins/InoAgents/LiteRtLm/scripts/setup.ps1
+# from its canonical location at
+#   Plugins/InoAgents/LiteRtLm/overlay/ino/BUILD.bazel
+#
+# Do not edit the copy inside the submodule — edit the overlay source instead.
+#
+# Export mechanism (Windows):
+#   The C API in //c:engine_cpu's engine.h already annotates every public
+#   function with __declspec(dllexport) via the LITERT_LM_C_API_EXPORT macro
+#   (enabled on _WIN32). Because we do NOT pass a /DEF: file to the linker,
+#   MSVC's linker uses these annotations as the authoritative export list and
+#   /OPT:REF dead-stripping preserves every symbol transitively reachable from
+#   them.
+#
+#   Note: runtime/engine:litert_lm_main uses a /DEF:windows_exported_symbols.def
+#   linkopt to export the internal LiteRt* accelerator ABI symbols (so a
+#   separate WebGPU accelerator .dll can load against the main executable).
+#   That is a different pattern from a plain shared library exposing a C API.
+#   We intentionally do not replicate it here because:
+#     (a) Using /DEF overrides __declspec(dllexport) — only symbols listed in
+#         the .def file get exported, and /OPT:REF dead-strips everything else.
+#         Building with both resulted in a 12 MB DLL with zero litert_lm_*
+#         exports.
+#     (b) For //c:engine_cpu there is no separate accelerator DLL, so the
+#         LiteRt* accelerator ABI does not need to be exported at all.
+#     (c) If/when we move to //c:engine (with GPU) and a standalone accelerator
+#         DLL is required, we will produce a combined .def file listing both
+#         LiteRt* and litert_lm_* symbols and add it back.
+
+package(default_visibility = ["//visibility:private"])
+
+licenses(["notice"])
+
+cc_binary(
+    name = "LiteRtLm",
+    srcs = ["LiteRtLm_exports.cc"],
+    linkshared = 1,
+    linkstatic = 1,
+    # /EXPORT: linker flags are ADDITIVE to __declspec(dllexport) — they add
+    # symbols to the DLL's export table without replacing the compiler-driven
+    # exports (unlike /DEF: which is exclusive). Use them only to work around
+    # upstream bugs where a specific function's definition is compiled without
+    # the dllexport attribute.
+    linkopts = select({
+        "@platforms//os:windows": [
+            # Upstream bug (LiteRT-LM v0.10.1): c/litert_lm_logging.h declares
+            # litert_lm_set_min_log_level WITHOUT __declspec(dllexport),
+            # while c/engine.h declares the SAME function WITH it. Because
+            # c/litert_lm_logging.cc only #include's the non-exporting header,
+            # its .obj file is compiled without a dllexport marker on the
+            # symbol, and our force-reference in LiteRtLm_exports.cc is
+            # insufficient to get it into the DLL's export table. This linker
+            # flag tells link.exe to export the symbol anyway. Remove this
+            # line when upstream adds the dllexport to litert_lm_logging.h.
+            "/EXPORT:litert_lm_set_min_log_level",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        # Start with the CPU-only engine for the first build. Swap to
+        # "//c:engine" (full, with GPU backend) once end-to-end UE integration
+        # is verified working.
+        "//c:engine_cpu",
+    ],
+)

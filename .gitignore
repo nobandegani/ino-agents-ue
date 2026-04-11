@@ -1,2 +1,10 @@
 Binaries
 Intermediate
+
+# Bazel build workspace (defensive; real bazel-* symlinks live inside the submodule)
+LiteRtLm/bazel-*
+LiteRtLm/user.bazelrc
+
+# Staged LiteRT-LM artifacts (produced by LiteRtLm/scripts/build-win64.ps1, not tracked)
+Source/ThirdParty/InoAgentsLibrary/Public/litert/
+Source/ThirdParty/InoAgentsLibrary/Win64/LiteRtLm.lib
