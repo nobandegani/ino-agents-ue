@@ -2,6 +2,7 @@
 
 #include "InoAgents.h"
 
+#include "Async/Async.h"              // AsyncTask for marshaling callbacks to GameThread
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -1156,6 +1157,301 @@ static FAutoConsoleCommand GToolCallTestCommand(
          "answer. Synchronous, freezes the editor ~5-15 seconds. Optionally "
          "takes a custom prompt: 'InoAgents.ToolCallTest What is 100 plus 250?'"),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunToolCallSmokeTest));
+
+
+// ============================================================================
+// Phase-1 streaming smoke test (milestone C)
+// ============================================================================
+//
+// Console command: InoAgents.StreamTest [optional prompt words...]
+//
+// Purpose: prove that the streaming generation path works AND that chunks
+// delivered by LiteRT-LM on its own worker thread can be safely marshaled
+// back to the UE game thread for further processing. This is the first
+// smoke test that does NOT freeze the editor — the console command returns
+// immediately, chunks trickle into the Output Log over the next few seconds,
+// and the final chunk triggers cleanup.
+//
+// Uses litert_lm_session_generate_content_stream (raw completion, no chat
+// template) for simplicity and because the purpose of this milestone is
+// streaming + threading, not instruction following. The conversation-level
+// streaming API will be layered on later in the real UInoAgentsSession.
+//
+// Threading model:
+//   1. RunStreamSmokeTest allocates an FInoAgentsStreamTestState on the heap,
+//      builds the engine/session, and kicks off generate_content_stream. The
+//      state owns the engine + session + the UTF-8 prompt buffer, so LiteRT-LM
+//      can safely read them from its worker thread.
+//   2. LiteRT-LM's worker thread calls OnInoAgentsStreamChunk() for each
+//      token/chunk. That callback MUST NOT touch any UE UObject or any field
+//      of State from the worker thread. Its only job is to copy `chunk` and
+//      `error_msg` into FStrings (which own their storage) and enqueue a
+//      lambda on the game thread via AsyncTask().
+//   3. On the game thread, the lambda accumulates chunks, logs them, and —
+//      on the final chunk — destroys the engine/session/state. Nothing in
+//      State is touched from anywhere else on any other thread.
+//
+// Lifetime:
+//   - State is created in RunStreamSmokeTest.
+//   - If any setup step fails BEFORE generate_content_stream returns success,
+//     State is cleaned up synchronously and the function returns.
+//   - If generate_content_stream returns success, the state's lifetime is
+//     owned by the stream. It is destroyed only by the final-chunk game
+//     thread lambda (is_final == true OR error_msg is non-null).
+//   - The very last statement of the destroying lambda is `delete State`.
+//     No other code may touch State after that.
+//
+// Invoke:
+//     InoAgents.StreamTest
+//     InoAgents.StreamTest Once upon a time in a land far far away
+// ============================================================================
+
+namespace
+{
+    /**
+     * Heap-allocated state shared between the console command (which owns
+     * setup) and the final-chunk game-thread lambda (which owns teardown).
+     * All non-const fields are touched only from the game thread except
+     * for the initial load in RunStreamSmokeTest.
+     */
+    struct FInoAgentsStreamTestState
+    {
+        double TStreamStart = 0.0;
+        int    NumChunks    = 0;
+        FString Accumulated;
+
+        /**
+         * UTF-8 prompt buffer, heap-allocated so its storage outlives the
+         * console command that kicked off the stream. generate_content_stream
+         * probably tokenizes the prompt synchronously and does not need the
+         * buffer after it returns, but keeping it alive for the whole stream
+         * is cheap insurance and matches how we will manage prompt buffers
+         * in the real UInoAgentsSession.
+         */
+        FTCHARToUTF8* PromptUtf8 = nullptr;
+
+        /** LiteRT-LM resources, destroyed in reverse order of creation. */
+        LiteRtLmEngineSettings* Settings = nullptr;
+        LiteRtLmEngine*         Engine   = nullptr;
+        LiteRtLmSession*        Session  = nullptr;
+    };
+
+    /**
+     * Destroy all LiteRT-LM resources in the state and delete the state
+     * itself. Must be called only from the game thread (to match where the
+     * resources were created) and only once.
+     */
+    void DeleteStreamTestState(FInoAgentsStreamTestState* State)
+    {
+        if (State == nullptr)
+        {
+            return;
+        }
+        if (State->Session != nullptr)
+        {
+            litert_lm_session_delete(State->Session);
+            State->Session = nullptr;
+        }
+        if (State->Engine != nullptr)
+        {
+            litert_lm_engine_delete(State->Engine);
+            State->Engine = nullptr;
+        }
+        if (State->Settings != nullptr)
+        {
+            litert_lm_engine_settings_delete(State->Settings);
+            State->Settings = nullptr;
+        }
+        if (State->PromptUtf8 != nullptr)
+        {
+            delete State->PromptUtf8;
+            State->PromptUtf8 = nullptr;
+        }
+        delete State;
+    }
+
+    /**
+     * C callback — runs on LiteRT-LM's internal worker thread. MUST NOT
+     * touch any UObject, UE global, or field of State. Copies the chunk
+     * and error message into FStrings, captures them by value into a
+     * lambda, and marshals the lambda to the game thread via AsyncTask.
+     *
+     * The game-thread lambda is the only code that touches State's fields,
+     * logs via UE_LOG, and decides when to clean up.
+     */
+    void OnInoAgentsStreamChunk(void* callback_data,
+                                const char* chunk,
+                                bool is_final,
+                                const char* error_msg)
+    {
+        if (callback_data == nullptr)
+        {
+            return;
+        }
+        auto* const State = static_cast<FInoAgentsStreamTestState*>(callback_data);
+
+        // chunk and error_msg are valid only for the duration of this call —
+        // copy their contents now, capture the FStrings into the lambda.
+        const FString ChunkStr = (chunk     != nullptr) ? FString(UTF8_TO_TCHAR(chunk))     : FString();
+        const FString ErrorStr = (error_msg != nullptr) ? FString(UTF8_TO_TCHAR(error_msg)) : FString();
+        const double  NowTime  = FPlatformTime::Seconds();
+
+        AsyncTask(ENamedThreads::GameThread,
+            [State, ChunkStr, ErrorStr, is_final, NowTime]()
+            {
+                const bool bHasError = !ErrorStr.IsEmpty();
+
+                if (bHasError)
+                {
+                    UE_LOG(LogInoAgents, Error, TEXT("StreamTest: error: %s"), *ErrorStr);
+                }
+
+                if (!ChunkStr.IsEmpty())
+                {
+                    State->NumChunks += 1;
+                    State->Accumulated += ChunkStr;
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("StreamTest: chunk %3d (+%.3f s)  \"%s\""),
+                           State->NumChunks, NowTime - State->TStreamStart, *ChunkStr);
+                }
+
+                if (is_final || bHasError)
+                {
+                    const double Elapsed = NowTime - State->TStreamStart;
+                    const double TokPerSec = (Elapsed > 0.0 && State->NumChunks > 0)
+                        ? (static_cast<double>(State->NumChunks) / Elapsed)
+                        : 0.0;
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("StreamTest: DONE in %.2f s (%d chunks, ~%.1f chunks/sec)"),
+                           Elapsed, State->NumChunks, TokPerSec);
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("StreamTest: full accumulated text: \"%s\""),
+                           *State->Accumulated);
+
+                    // State is owned by this lambda from here on. Destroy
+                    // resources in reverse order of construction and free
+                    // the state itself. Nothing may touch *State after this.
+                    DeleteStreamTestState(State);
+                }
+            });
+    }
+}
+
+static void RunStreamSmokeTest(const TArray<FString>& Args)
+{
+    const FString Prompt = (Args.Num() > 0)
+        ? FString::Join(Args, TEXT(" "))
+        : FString(TEXT("Once upon a time, in a land far far away,"));
+
+    // --- Resolve model path ---
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
+    if (!Plugin.IsValid())
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("StreamTest: plugin not found"));
+        return;
+    }
+    const FString BaseDir = Plugin->GetBaseDir();
+    const FString ModelPath = FPaths::Combine(
+        BaseDir, TEXT("Models"), TEXT("gemma-4-E2B-it.litertlm"));
+
+    if (!IFileManager::Get().FileExists(*ModelPath))
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("StreamTest: model file not found at %s"), *ModelPath);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("StreamTest: starting (NON-BLOCKING — editor stays responsive)"));
+    UE_LOG(LogInoAgents, Log, TEXT("  Prompt: \"%s\""), *Prompt);
+    UE_LOG(LogInoAgents, Log, TEXT("  Chunks will arrive asynchronously in the Output Log over the next few seconds."));
+
+    // --- Allocate state ---
+    auto* State = new FInoAgentsStreamTestState();
+    State->PromptUtf8 = new FTCHARToUTF8(*Prompt);
+
+    const double TSetupStart = FPlatformTime::Seconds();
+
+    // --- Load engine ---
+    const FTCHARToUTF8 ModelPathUtf8(*ModelPath);
+    State->Settings = litert_lm_engine_settings_create(
+        ModelPathUtf8.Get(), "cpu", nullptr, nullptr);
+    if (State->Settings == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("StreamTest: engine_settings_create returned NULL"));
+        DeleteStreamTestState(State);
+        return;
+    }
+
+    State->Engine = litert_lm_engine_create(State->Settings);
+    if (State->Engine == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("StreamTest: engine_create returned NULL"));
+        DeleteStreamTestState(State);
+        return;
+    }
+
+    State->Session = litert_lm_engine_create_session(State->Engine, /*config=*/ nullptr);
+    if (State->Session == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error, TEXT("StreamTest: engine_create_session returned NULL"));
+        DeleteStreamTestState(State);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("StreamTest: engine + session ready in %.2f s — kicking off stream"),
+           FPlatformTime::Seconds() - TSetupStart);
+
+    // --- Build InputData ---
+    //
+    // InputData itself is a plain POD struct; generate_content_stream
+    // reads its fields synchronously during tokenization, so passing a
+    // stack-local is safe. The `.data` pointer must be valid for the
+    // duration of the call — we route it through State->PromptUtf8 which
+    // lives on the heap until the final chunk.
+    InputData TextInput;
+    TextInput.type = kInputText;
+    TextInput.data = State->PromptUtf8->Get();
+    TextInput.size = static_cast<size_t>(State->PromptUtf8->Length());
+
+    // Mark the start of "streaming time" so chunk timestamps in the callback
+    // lambda are relative to when generation actually started, not when the
+    // engine was created.
+    State->TStreamStart = FPlatformTime::Seconds();
+
+    // --- Kick off the stream ---
+    //
+    // Returns 0 on success. The callback will fire asynchronously on a
+    // worker thread; from that point on, ownership of State belongs to the
+    // stream and only the final-chunk lambda may destroy it.
+    const int RC = litert_lm_session_generate_content_stream(
+        State->Session, &TextInput, /*num_inputs=*/ 1,
+        &OnInoAgentsStreamChunk, /*callback_data=*/ State);
+
+    if (RC != 0)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("StreamTest: generate_content_stream returned non-zero (%d) — stream did not start"),
+               RC);
+        DeleteStreamTestState(State);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("StreamTest: stream accepted (RC=0). Control returning to game thread — waiting for chunks."));
+    // Function returns here. Engine/session remain alive inside State.
+    // Chunks will arrive asynchronously.
+}
+
+static FAutoConsoleCommand GStreamTestCommand(
+    TEXT("InoAgents.StreamTest"),
+    TEXT("Phase-1 smoke test (milestone C): non-blocking streaming. Loads "
+         "engine, creates a session, kicks off generate_content_stream with "
+         "a worker-thread C callback that marshals each chunk back to the "
+         "game thread via AsyncTask. Editor stays responsive — chunks appear "
+         "asynchronously in the Output Log. Final chunk destroys the engine/"
+         "session. Optional custom prompt: 'InoAgents.StreamTest Once upon a time'."),
+    FConsoleCommandWithArgsDelegate::CreateStatic(&RunStreamSmokeTest));
 
 void FInoAgentsModule::ShutdownModule()
 {
