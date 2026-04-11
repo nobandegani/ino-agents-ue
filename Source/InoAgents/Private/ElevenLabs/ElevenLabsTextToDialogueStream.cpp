@@ -1,0 +1,443 @@
+// Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
+
+#include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
+
+#include "ElevenLabs/ElevenLabsSubsystem.h"
+#include "InoAgentsLog.h"
+
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Engine/GameInstance.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
+#include "Kismet/GameplayStatics.h"
+#include "Math/UnrealMathUtility.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
+namespace
+{
+    constexpr int32 kMaxInputs = 10;
+
+    /** Convert a JSON tree into a compact (no whitespace) string. */
+    FString SerializeJson(const TSharedRef<FJsonObject>& Object)
+    {
+        FString Out;
+        const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+            TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+        FJsonSerializer::Serialize(Object, Writer);
+        return Out;
+    }
+
+    /** Parse ElevenLabs' 422 error body and extract the first message. */
+    FString ExtractFirstErrorMessage(const FString& BodyJson)
+    {
+        if (BodyJson.IsEmpty())
+        {
+            return FString();
+        }
+
+        TSharedPtr<FJsonObject> Root;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(BodyJson);
+        if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+        {
+            return FString();
+        }
+
+        // Shape 1: { "detail": [ { "msg": "..." } ] }  (422)
+        const TArray<TSharedPtr<FJsonValue>>* DetailArray = nullptr;
+        if (Root->TryGetArrayField(TEXT("detail"), DetailArray) && DetailArray && DetailArray->Num() > 0)
+        {
+            const TSharedPtr<FJsonObject>* FirstObj = nullptr;
+            if ((*DetailArray)[0]->TryGetObject(FirstObj) && FirstObj && FirstObj->IsValid())
+            {
+                FString Msg;
+                if ((*FirstObj)->TryGetStringField(TEXT("msg"), Msg))
+                {
+                    return Msg;
+                }
+            }
+        }
+
+        // Shape 2: { "detail": "error string" }  (some 4xx)
+        FString DetailString;
+        if (Root->TryGetStringField(TEXT("detail"), DetailString))
+        {
+            return DetailString;
+        }
+
+        // Shape 3: { "error": "..." } or { "message": "..." }
+        FString Maybe;
+        if (Root->TryGetStringField(TEXT("error"), Maybe))   return Maybe;
+        if (Root->TryGetStringField(TEXT("message"), Maybe)) return Maybe;
+
+        return FString();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static helpers
+// ---------------------------------------------------------------------------
+
+FString UElevenLabsTextToDialogueStream::OutputFormatToQueryString(
+    EElevenLabsOutputFormat Fmt)
+{
+    switch (Fmt)
+    {
+        case EElevenLabsOutputFormat::Mp3_44100_128: return TEXT("mp3_44100_128");
+        case EElevenLabsOutputFormat::Mp3_44100_64:  return TEXT("mp3_44100_64");
+        case EElevenLabsOutputFormat::Mp3_22050_32:  return TEXT("mp3_22050_32");
+        case EElevenLabsOutputFormat::Pcm_16000:     return TEXT("pcm_16000");
+        case EElevenLabsOutputFormat::Pcm_24000:     return TEXT("pcm_24000");
+        case EElevenLabsOutputFormat::Pcm_44100:     return TEXT("pcm_44100");
+        case EElevenLabsOutputFormat::Ulaw_8000:     return TEXT("ulaw_8000");
+        default:                                     return TEXT("mp3_44100_128");
+    }
+}
+
+FString UElevenLabsTextToDialogueStream::NormalizationToString(
+    EElevenLabsTextNormalization N)
+{
+    switch (N)
+    {
+        case EElevenLabsTextNormalization::On:   return TEXT("on");
+        case EElevenLabsTextNormalization::Off:  return TEXT("off");
+        case EElevenLabsTextNormalization::Auto:
+        default:                                 return TEXT("auto");
+    }
+}
+
+FString UElevenLabsTextToDialogueStream::BuildJsonBody(
+    const FElevenLabsDialogueRequest& Req,
+    const FString&                    FallbackModelId)
+{
+    const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+
+    // inputs (required)
+    TArray<TSharedPtr<FJsonValue>> InputsArr;
+    InputsArr.Reserve(Req.Inputs.Num());
+    for (const FElevenLabsDialogueInput& In : Req.Inputs)
+    {
+        const TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("text"),     In.Text);
+        Obj->SetStringField(TEXT("voice_id"), In.VoiceId);
+        InputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Root->SetArrayField(TEXT("inputs"), InputsArr);
+
+    // model_id: per-call value, or fall back to subsystem default.
+    const FString EffectiveModelId = Req.ModelId.IsEmpty() ? FallbackModelId : Req.ModelId;
+    if (!EffectiveModelId.IsEmpty())
+    {
+        Root->SetStringField(TEXT("model_id"), EffectiveModelId);
+    }
+
+    // Optional language_code
+    if (!Req.LanguageCode.IsEmpty())
+    {
+        Root->SetStringField(TEXT("language_code"), Req.LanguageCode);
+    }
+
+    // settings.stability (always send - it's cheap and avoids surprises
+    // from server-side default changes).
+    const TSharedRef<FJsonObject> SettingsObj = MakeShared<FJsonObject>();
+    SettingsObj->SetNumberField(TEXT("stability"), Req.Stability);
+    Root->SetObjectField(TEXT("settings"), SettingsObj);
+
+    // seed (omit when negative = "let the server pick")
+    if (Req.Seed >= 0)
+    {
+        Root->SetNumberField(TEXT("seed"), static_cast<double>(Req.Seed));
+    }
+
+    // apply_text_normalization
+    Root->SetStringField(TEXT("apply_text_normalization"),
+                         NormalizationToString(Req.ApplyTextNormalization));
+
+    return SerializeJson(Root);
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+UElevenLabsTextToDialogueStream* UElevenLabsTextToDialogueStream::StreamTextToDialogue(
+    UObject*                          WorldContextObject,
+    const FElevenLabsDialogueRequest& Request,
+    FString                           ApiKeyOverride)
+{
+    UElevenLabsTextToDialogueStream* Action = NewObject<UElevenLabsTextToDialogueStream>();
+    Action->PendingRequest         = Request;
+    Action->PendingApiKeyOverride  = ApiKeyOverride;
+    Action->WorldContextObjectWeak = WorldContextObject;
+
+    // Hook into Blueprint's latent-action machinery when called from BP.
+    // RegisterWithGameInstance is a no-op when WorldContextObject is null
+    // (e.g. from a console command) - the subsystem's LiveActions set
+    // handles GC lifetime in that case.
+    if (WorldContextObject != nullptr)
+    {
+        Action->RegisterWithGameInstance(WorldContextObject);
+    }
+
+    return Action;
+}
+
+// ---------------------------------------------------------------------------
+// Activate
+// ---------------------------------------------------------------------------
+
+void UElevenLabsTextToDialogueStream::Activate()
+{
+    // 1. Resolve the subsystem via the captured WorldContextObject.
+    UElevenLabsSubsystem* Subsystem = nullptr;
+    if (UObject* Ctx = WorldContextObjectWeak.Get())
+    {
+        if (UGameInstance* GI = UGameplayStatics::GetGameInstance(Ctx))
+        {
+            Subsystem = GI->GetSubsystem<UElevenLabsSubsystem>();
+        }
+    }
+    if (Subsystem == nullptr)
+    {
+        EmitErrorAndFinish(
+            TEXT("No UElevenLabsSubsystem — call from a live game instance (PIE or packaged)"));
+        return;
+    }
+    SubsystemWeak = Subsystem;
+
+    // 2. Resolve API key: override > subsystem cache.
+    PendingApiKey = !PendingApiKeyOverride.IsEmpty()
+        ? PendingApiKeyOverride
+        : Subsystem->GetApiKey();
+
+    if (PendingApiKey.IsEmpty())
+    {
+        EmitErrorAndFinish(
+            TEXT("API key is empty; set it in Project Settings -> Plugins -> "
+                 "InoAgents ElevenLabs, or pass one to StreamTextToDialogue"));
+        return;
+    }
+
+    // 3. Validate the request.
+    if (PendingRequest.Inputs.Num() == 0)
+    {
+        EmitErrorAndFinish(TEXT("Dialogue request has no inputs"));
+        return;
+    }
+    if (PendingRequest.Inputs.Num() > kMaxInputs)
+    {
+        EmitErrorAndFinish(FString::Printf(
+            TEXT("Dialogue request has %d inputs but ElevenLabs allows at most %d"),
+            PendingRequest.Inputs.Num(), kMaxInputs));
+        return;
+    }
+    TSet<FString> UniqueVoices;
+    for (const FElevenLabsDialogueInput& In : PendingRequest.Inputs)
+    {
+        if (In.Text.IsEmpty())
+        {
+            EmitErrorAndFinish(TEXT("One of the dialogue inputs has an empty Text field"));
+            return;
+        }
+        if (In.VoiceId.IsEmpty())
+        {
+            EmitErrorAndFinish(TEXT("One of the dialogue inputs has an empty VoiceId"));
+            return;
+        }
+        UniqueVoices.Add(In.VoiceId);
+    }
+    if (UniqueVoices.Num() > kMaxInputs)
+    {
+        EmitErrorAndFinish(FString::Printf(
+            TEXT("Dialogue request uses %d unique voice IDs but ElevenLabs allows at most %d"),
+            UniqueVoices.Num(), kMaxInputs));
+        return;
+    }
+
+    // 4. Register with the subsystem so GC keeps us alive and CancelAll
+    //    can reach us.
+    Subsystem->RegisterLiveAction(this);
+
+    // 5. Build the URL.
+    const FString Url = FString::Printf(
+        TEXT("%s/v1/text-to-dialogue/stream?output_format=%s"),
+        *Subsystem->GetBaseUrl(),
+        *OutputFormatToQueryString(PendingRequest.OutputFormat));
+
+    // 6. Build the JSON body.
+    const FString Body = BuildJsonBody(PendingRequest, Subsystem->GetDefaultModelId());
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("UElevenLabsTextToDialogueStream: POST %s (%d inputs, %d-byte body)"),
+           *Url, PendingRequest.Inputs.Num(), Body.Len());
+
+    // 7. Create and configure the request.
+    HttpRequest = FHttpModule::Get().CreateRequest();
+    HttpRequest->SetURL(Url);
+    HttpRequest->SetVerb(TEXT("POST"));
+    HttpRequest->SetHeader(TEXT("xi-api-key"),   PendingApiKey);
+    HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+    HttpRequest->SetHeader(TEXT("Accept"),       TEXT("*/*"));
+    HttpRequest->SetContentAsString(Body);
+
+    HttpRequest->OnRequestProgress64().BindUObject(
+        this, &UElevenLabsTextToDialogueStream::HandleRequestProgress);
+    HttpRequest->OnProcessRequestComplete().BindUObject(
+        this, &UElevenLabsTextToDialogueStream::HandleRequestComplete);
+
+    LastReadOffset = 0;
+    HttpRequest->ProcessRequest();
+}
+
+// ---------------------------------------------------------------------------
+// HTTP callbacks
+// ---------------------------------------------------------------------------
+
+void UElevenLabsTextToDialogueStream::HandleRequestProgress(
+    FHttpRequestPtr Request, uint64 /*BytesSent*/, uint64 BytesReceivedU64)
+{
+    if (bFinished)
+    {
+        return;
+    }
+    if (!Request.IsValid())
+    {
+        return;
+    }
+
+    const FHttpResponsePtr Response = Request->GetResponse();
+    if (!Response.IsValid())
+    {
+        return;
+    }
+
+    // UE's IHttpResponse::GetContent() returns the FULL accumulated buffer
+    // received so far, not just the delta since the last progress tick.
+    // Slice from LastReadOffset forward to compute the incremental chunk.
+    const TArray<uint8>& All = Response->GetContent();
+    const int32 BytesReceived = static_cast<int32>(
+        FMath::Min<uint64>(BytesReceivedU64, static_cast<uint64>(All.Num())));
+
+    if (BytesReceived <= LastReadOffset)
+    {
+        return;
+    }
+
+    const int32 NewCount = BytesReceived - LastReadOffset;
+    TArray<uint8> Chunk;
+    Chunk.Append(All.GetData() + LastReadOffset, NewCount);
+    LastReadOffset = BytesReceived;
+
+    OnAudioChunk.Broadcast(Chunk, static_cast<int64>(BytesReceived));
+}
+
+void UElevenLabsTextToDialogueStream::HandleRequestComplete(
+    FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded)
+{
+    if (bFinished)
+    {
+        return;
+    }
+
+    // Network / DNS / cancel path: bSucceeded is false.
+    if (!bSucceeded || !Response.IsValid())
+    {
+        EmitErrorAndFinish(TEXT("HTTP request failed (network or connection error)"));
+        return;
+    }
+
+    const int32 Code = Response->GetResponseCode();
+    if (Code < 200 || Code >= 300)
+    {
+        // Try to extract a human-readable message from the JSON error body.
+        const FString BodyStr   = Response->GetContentAsString();
+        const FString FirstMsg  = ExtractFirstErrorMessage(BodyStr);
+        const FString Formatted = FirstMsg.IsEmpty()
+            ? FString::Printf(TEXT("HTTP %d: %s"), Code,
+                              BodyStr.Len() < 200 ? *BodyStr : TEXT("<truncated>"))
+            : FString::Printf(TEXT("HTTP %d: %s"), Code, *FirstMsg);
+        EmitErrorAndFinish(Formatted);
+        return;
+    }
+
+    // Successful 2xx: emit any trailing bytes that landed after the last
+    // progress tick (shouldn't happen often but the HTTP module can batch
+    // the final chunk with the complete callback on some backends), then
+    // fire OnComplete with the full buffer.
+    const TArray<uint8>& Full = Response->GetContent();
+    if (Full.Num() > LastReadOffset)
+    {
+        TArray<uint8> Tail;
+        Tail.Append(Full.GetData() + LastReadOffset, Full.Num() - LastReadOffset);
+        LastReadOffset = Full.Num();
+        OnAudioChunk.Broadcast(Tail, static_cast<int64>(Full.Num()));
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("UElevenLabsTextToDialogueStream: complete, %d bytes"),
+           Full.Num());
+
+    OnComplete.Broadcast(Full, PendingRequest.OutputFormat);
+    FinishCleanly();
+}
+
+// ---------------------------------------------------------------------------
+// Cancel / teardown
+// ---------------------------------------------------------------------------
+
+void UElevenLabsTextToDialogueStream::CancelStream()
+{
+    if (bFinished)
+    {
+        return;
+    }
+
+    if (HttpRequest.IsValid())
+    {
+        HttpRequest->CancelRequest();
+    }
+
+    EmitErrorAndFinish(TEXT("cancelled"));
+}
+
+void UElevenLabsTextToDialogueStream::EmitErrorAndFinish(const FString& Message)
+{
+    if (bFinished)
+    {
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Warning,
+           TEXT("UElevenLabsTextToDialogueStream: error: %s"), *Message);
+
+    OnError.Broadcast(Message);
+    FinishCleanly();
+}
+
+void UElevenLabsTextToDialogueStream::FinishCleanly()
+{
+    if (bFinished)
+    {
+        return;
+    }
+    bFinished = true;
+
+    // Drop the HTTP delegates so a late progress tick can't re-enter us.
+    if (HttpRequest.IsValid())
+    {
+        HttpRequest->OnRequestProgress64().Unbind();
+        HttpRequest->OnProcessRequestComplete().Unbind();
+        HttpRequest.Reset();
+    }
+
+    // Drop the subsystem's strong ref so GC can collect us.
+    if (UElevenLabsSubsystem* Subsystem = SubsystemWeak.Get())
+    {
+        Subsystem->UnregisterLiveAction(this);
+    }
+
+    SetReadyToDestroy();
+}

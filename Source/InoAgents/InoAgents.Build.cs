@@ -36,10 +36,16 @@ public class InoAgents : ModuleRules
 				// Added so sibling .cpps can #include "InoAgentsChatStyle.h"
 				// and #include "SInoAgentsMessageBubble.h" without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "UI", "Slate"),
+
+				// Subdirectory of Private/ that holds the ElevenLabs HTTP
+				// backend implementation (subsystem, async actions, request
+				// builders). Added so sibling .cpps can include each other's
+				// private headers directly.
+				Path.Combine(ModuleDirectory, "Private", "ElevenLabs"),
 			}
 			);
-			
-		
+
+
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -50,8 +56,10 @@ public class InoAgents : ModuleRules
 				                     // used in ULiteRtLmModelConfig and ULiteRtLmSubsystem.
 				"InoAgentsLibrary",  // LiteRT-LM C API via the staged header.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
-				                     // (used by Phase 1 smoke tests and by D.4 tool-call parsing).
+				                     // and building ElevenLabs request bodies.
 				"Projects",          // IPluginManager for locating the plugin's base directory at runtime.
+				"HTTP",              // FHttpModule / IHttpRequest / IHttpResponse — ElevenLabs backend only.
+				"DeveloperSettings", // UDeveloperSettings base class — UElevenLabsSettings.
 			}
 			);
 			
