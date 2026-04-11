@@ -1030,3 +1030,79 @@ Expected: `git status --short` returns empty after the commit.
 D.1 is complete. Move on to D.2.
 
 ---
+
+## Sub-milestone D.2: `ULiteRtLmConversation` + non-streaming `SendMessageAsync`
+
+**Goal:** Introduce the UObject-based conversation wrapper, a dedicated worker `FRunnable` per conversation, and the non-streaming send path. After D.2, game code can create a conversation from the subsystem, send a user message, and receive the assistant's full response on the game thread via a delegate — still without editor freezes. Streaming (D.3) and tool calling (D.4) layer on top of this foundation.
+
+**Testable via:** `InoAgents.LiteRtLm.ConversationSendTest` console command.
+
+**Non-negotiable threading rules** (from spec section 6):
+- Worker-per-conversation isolation (one pinned `FRunnableThread` per `ULiteRtLmConversation`).
+- Worker → game thread marshaling exclusively via `AsyncTask(ENamedThreads::GameThread, ...)` with a captured `TWeakObjectPtr<ULiteRtLmConversation>`.
+- The worker never touches `UObject` pointers directly. The game-thread lambda checks the weak pointer for validity before dereferencing.
+- Conversation destruction (via `BeginDestroy`) joins the worker thread *before* destroying native resources.
+
+### Files created in D.2
+
+1. `Source/InoAgents/Public/LiteRtLm/LiteRtLmConversation.h` — `UCLASS(BlueprintType) ULiteRtLmConversation : public UObject` with `SendMessageAsync`, `OnComplete`, `OnError`, `BeginDestroy`, and the internal `Initialize(Subsystem, Engine, Config)` that the factory calls.
+2. `Source/InoAgents/Private/LiteRtLm/LiteRtLmConversationWorker.h` — private `class FLiteRtLmConversationWorker : public FRunnable`. Holds the native `LiteRtLmConversation*` + `LiteRtLmConversationConfig*`, a `TQueue<FString, Spsc>` for pending messages, an `FEvent` for wake-up, a `TAtomic<bool>` stop flag, and a `TUniquePtr<FRunnableThread>`.
+3. `Source/InoAgents/Private/LiteRtLm/LiteRtLmConversationWorker.cpp` — constructor starts the thread, destructor signals stop and joins. `Run()` is a `TQueue::Dequeue` loop with `FEvent::Wait` when empty. `ProcessMessage` builds the user-message JSON (reusing the Phase 1 `EscapeJsonString` + format pattern), calls blocking `litert_lm_conversation_send_message`, parses the response via `FJsonObject` / `TJsonReaderFactory`, extracts concatenated `content[*].text`, and dispatches `OnComplete` via `AsyncTask`. Errors dispatch `OnError`.
+4. `Source/InoAgents/Private/LiteRtLm/LiteRtLmConversation.cpp` — `Initialize` wraps the config's plain-text `SystemMessage` in JSON, calls `litert_lm_conversation_config_create` + `litert_lm_conversation_create`, hands the native pointers to a new `FLiteRtLmConversationWorker`. `SendMessageAsync` enqueues on the worker. `BeginDestroy` resets the worker's `TUniquePtr`, which runs the worker's destructor (join + native cleanup).
+5. `Source/InoAgents/Private/SmokeTests/InoAgentsLiteRtLmConversationSendTest.h` — observer `UCLASS` with `HandleModelLoaded`, `HandleConversationComplete`, `HandleConversationError` `UFUNCTION`s. All `FString` parameters are by value (per D.1 lesson).
+6. `Source/InoAgents/Private/SmokeTests/InoAgentsLiteRtLmConversationSendTest.cpp` — registers `InoAgents.LiteRtLm.ConversationSendTest`. Orchestrates: load-if-not-loaded → create conversation → bind delegates → `SendMessageAsync` → log response → release observer. Reuses an already-loaded model across test runs (skips the load step if `IsModelLoaded()` returns true).
+
+### Files modified in D.2
+
+- `Source/InoAgents/Public/LiteRtLm/LiteRtLmSubsystem.h` — forward-declare `ULiteRtLmConversation`; add `UFUNCTION(BlueprintCallable) ULiteRtLmConversation* CreateConversation()`.
+- `Source/InoAgents/Private/LiteRtLm/LiteRtLmSubsystem.cpp` — `#include "LiteRtLm/LiteRtLmConversation.h"`; implement `CreateConversation` as a factory that `NewObject<ULiteRtLmConversation>()` + `Initialize(this, Engine, LoadedConfig)`.
+
+### Key design decisions (why D.2 looks the way it does)
+
+- **Smoke test does NOT unload the model on exit.** Reason: if it did, the subsystem's `UnloadModel()` would destroy the engine while the conversation's worker might still be finishing its `BeginDestroy → Worker.Reset()` path (UE GC is deferred — setting a `TObjectPtr` to null does not destroy the UObject immediately). The worker's destructor tries to call `litert_lm_conversation_delete` on its native pointer, which references the engine — dangling. Leaving the model loaded sidesteps the race entirely. Subsequent test runs reuse the loaded model via an `IsModelLoaded()` check at the top of the test. Editor tear-down (PIE stop or editor close) handles final cleanup via `Subsystem::Deinitialize → UnloadModel`.
+- **All dynamic delegate handlers take `FString` by value**, not `const FString&`. UE's `BindDynamic` does strict method-pointer type matching against the `DECLARE_DYNAMIC_*_Param` macro's type list. `const FString&` does not match `FString` even though both work for read-only semantics. This is documented on both the D.1 observer and the D.2 observer so the pattern is clear for D.3 and D.4.
+- **Response text extraction inlined in `LiteRtLmConversationWorker.cpp`**, not factored into a shared helper with the Phase 1 smoke tests. The smoke tests' `InoAgentsSmokeTest::ExtractAssistantText` is dev-time code; the worker is production code. They happen to do the same thing today, but the production version will diverge in D.4 when it needs to distinguish `tool_calls` from plain text. Premature factoring would create coupling that hurts the D.4 refactor.
+- **Empty assistant text is treated as an error**, not as `OnComplete("")`. An empty response usually indicates a template / tool-call edge case and is not what a plain-chat caller expects. If this turns out to be wrong in practice (some model legitimately returns an empty success response), we relax the check — but defaulting to "raise it early" catches silent failures.
+- **`TAtomic<bool>` + `FEvent` for the worker's wake-up loop**, not `std::condition_variable`. UE-idiomatic pattern, plays nicely with `FRunnableThread`'s shutdown expectations.
+
+### Task breakdown
+
+- [x] **Task 2.1:** Write `LiteRtLmConversation.h` (public header). Done.
+- [x] **Task 2.2:** Write `LiteRtLmConversationWorker.{h,cpp}` (private worker). Done.
+- [x] **Task 2.3:** Write `LiteRtLmConversation.cpp` (implementation). Done.
+- [x] **Task 2.4:** Extend `LiteRtLmSubsystem.{h,cpp}` with `CreateConversation`. Done.
+- [x] **Task 2.5:** Write `InoAgentsLiteRtLmConversationSendTest.{h,cpp}` smoke test. Done.
+- [x] **Task 2.6:** Append D.2 section to this plan doc. Done (this section).
+- [ ] **Task 2.7:** User rebuilds, opens the editor, enters PIE, runs `InoAgents.LiteRtLm.ConversationSendTest`, confirms the expected output. On success, commit. On failure, diagnose from the log.
+
+### Expected successful output for `InoAgents.LiteRtLm.ConversationSendTest`
+
+```
+(PIE start)
+LogInoAgents: ULiteRtLmSubsystem: Initialize
+(user types: InoAgents.LiteRtLm.ConversationSendTest)
+LogInoAgents: ConversationSendTest: starting — loading model first (non-blocking)
+LogInoAgents: LoadModelAsync: dispatching async load of .../gemma-4-E2B-it.litertlm (backend=cpu)
+LogInoAgents: LoadModelAsync: SUCCESS in 0.2X s
+LogInoAgents: ConversationSendTest: model loaded, creating conversation
+LogInoAgents: ULiteRtLmConversation: initialized (system_message=<set>)
+LogInoAgents: FLiteRtLmConversationWorker: thread started
+LogInoAgents: ConversationSendTest: sending prompt: "What is 2 plus 2? Answer in one sentence."
+(brief pause while the worker runs litert_lm_conversation_send_message)
+LogInoAgents: ConversationSendTest: response received in X.XX s (total test elapsed)
+LogInoAgents: ConversationSendTest: assistant text: "Two plus two equals four."
+LogInoAgents: ConversationSendTest: DONE
+(later, on PIE stop)
+LogInoAgents: FLiteRtLmConversationWorker: destroyed
+LogInoAgents: ULiteRtLmSubsystem: Deinitialize
+LogInoAgents: ULiteRtLmSubsystem: UnloadModel complete
+```
+
+The key things I want to see:
+- `FLiteRtLmConversationWorker: thread started` appears during conversation creation (confirms the worker thread actually started)
+- `response received in X.XX s` (X is the full round-trip time including blocking `send_message`)
+- Assistant text is coherent and answers the question (tests that the chat template is applied, which was Milestone A's Phase 1 test — D.2 reuses the same path)
+- `FLiteRtLmConversationWorker: destroyed` appears at PIE stop (confirms the worker thread joined cleanly)
+- No crashes, no warnings about dangling weak pointers, no `OnError` unexpectedly
+
+---

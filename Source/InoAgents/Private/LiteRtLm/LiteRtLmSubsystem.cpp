@@ -3,6 +3,7 @@
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "InoAgentsLog.h"
+#include "LiteRtLm/LiteRtLmConversation.h"
 #include "LiteRtLm/LiteRtLmModelConfig.h"
 #include "LiteRtLm/LiteRtLmTypes.h"
 
@@ -216,4 +217,31 @@ void ULiteRtLmSubsystem::UnloadModel()
     LoadedConfig = nullptr;
 
     UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem: UnloadModel complete"));
+}
+
+ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
+{
+    check(IsInGameThread());
+
+    if (Engine == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("CreateConversation: no model loaded — call LoadModelAsync first"));
+        return nullptr;
+    }
+
+    // LoadedConfig is guaranteed non-null whenever Engine is non-null
+    // (see the success path of LoadModelAsync's completion lambda), but
+    // defensively check anyway.
+    if (LoadedConfig == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("CreateConversation: LoadedConfig is null despite Engine being "
+                    "set — this should be impossible"));
+        return nullptr;
+    }
+
+    ULiteRtLmConversation* Conv = NewObject<ULiteRtLmConversation>();
+    Conv->Initialize(this, Engine, LoadedConfig);
+    return Conv;
 }

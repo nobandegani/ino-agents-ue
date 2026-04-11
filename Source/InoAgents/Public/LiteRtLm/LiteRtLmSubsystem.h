@@ -10,6 +10,7 @@
 #include "LiteRtLmSubsystem.generated.h"
 
 class ULiteRtLmModelConfig;
+class ULiteRtLmConversation;
 
 // Forward declarations of opaque native types from LiteRT-LM's C API.
 // We deliberately do NOT include "litert/lm/engine.h" here — that would pull
@@ -108,6 +109,27 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void UnloadModel();
+
+    // ------------------------------------------------------------------
+    // Conversation factory (D.2)
+    // ------------------------------------------------------------------
+
+    /**
+     * Create and return a new ULiteRtLmConversation bound to the currently
+     * loaded engine. Returns nullptr if no model is loaded.
+     *
+     * The subsystem does NOT own the returned conversation — the caller
+     * must hold a reference (UPROPERTY on an actor, widget, or other
+     * UObject) to keep it alive. When no references remain, UE garbage
+     * collection destroys the conversation, which joins its worker thread
+     * and releases native resources.
+     *
+     * Uses the currently-loaded config (LoadedConfig) for system message
+     * and backend. A future iteration may add an OverrideConfig parameter
+     * for per-conversation customization.
+     */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    ULiteRtLmConversation* CreateConversation();
 
 private:
     // Opaque native handles. Never exposed to Blueprint. The extern "C"
