@@ -2,13 +2,18 @@
 
 #include "InoAgents.h"
 
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
+#include "Misc/DateTime.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"  // EscapeJsonString() used by ConversationTest
 
 // LiteRT-LM C API. Staged into Source/ThirdParty/InoAgentsLibrary/Public/ by
@@ -502,11 +507,18 @@ static void RunConversationSmokeTest(const TArray<FString>& Args)
     const FTCHARToUTF8 ModelPathUtf8(*ModelPath);
 
     // Build the message JSON. The user prompt is embedded as the text of
-    // a single content part. Escape for JSON safety.
-    const FString EscapedPrompt = EscapeJsonString(Prompt);
+    // a single content part.
+    //
+    // IMPORTANT: UE's EscapeJsonString (Serialization/JsonWriter.h) returns
+    // the escaped string WITH surrounding double quotes already appended —
+    // i.e. it returns `"Hello"`, not `Hello`. So the format string must NOT
+    // wrap %s in its own quotes, or we end up with `""Hello""` and
+    // nlohmann::json::parse silently discards the JSON, producing a fast
+    // NULL return from litert_lm_conversation_send_message.
+    const FString EscapedPromptQuoted = EscapeJsonString(Prompt);
     const FString MessageJson = FString::Printf(
-        TEXT(R"({"role":"user","content":[{"type":"text","text":"%s"}]})"),
-        *EscapedPrompt);
+        TEXT(R"({"role":"user","content":[{"type":"text","text":%s}]})"),
+        *EscapedPromptQuoted);
     const FTCHARToUTF8 MessageJsonUtf8(*MessageJson);
 
     UE_LOG(LogInoAgents, Verbose, TEXT("  message_json: %s"), *MessageJson);
