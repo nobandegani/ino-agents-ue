@@ -74,13 +74,32 @@ namespace
         {
             return nullptr;
         }
+
+        // Prefer a PIE world — that's where UElevenLabsSubsystem actually
+        // lives. The editor preview world has no GameInstance, so handing
+        // it to the async action's Activate() makes
+        // UGameplayStatics::GetGameInstance return null and the subsystem
+        // lookup fails with "No UElevenLabsSubsystem — call from a live
+        // game instance". First successful PIE world wins.
         for (const FWorldContext& Context : GEngine->GetWorldContexts())
         {
-            if (Context.World() != nullptr)
+            if (Context.WorldType == EWorldType::PIE && Context.World() != nullptr)
             {
                 return Context.World();
             }
         }
+
+        // Fallback: any world that has a game instance attached. Still
+        // good enough for a subsystem lookup even if it's not strictly
+        // PIE (e.g. standalone game).
+        for (const FWorldContext& Context : GEngine->GetWorldContexts())
+        {
+            if (Context.OwningGameInstance != nullptr && Context.World() != nullptr)
+            {
+                return Context.World();
+            }
+        }
+
         return nullptr;
     }
 
