@@ -796,35 +796,79 @@ namespace
     }
 
     /**
-     * The one local tool this smoke test exposes to the model. Takes no
-     * arguments; returns the current wall-clock time as a human-readable
-     * ISO-like string.
+     * The one local tool this smoke test exposes to the model. Adds two
+     * integers from the model's parsed arguments and returns the sum.
      *
-     * IMPORTANT: UE's FDateTime::ToString format specifiers are NOT the
-     * same as C strftime. Supported characters are only:
-     *   %Y (year 4d) %y (year 2d) %m (month 2d) %d (day 2d)
-     *   %H (hour 24) %h (hour 12) %M (minute)   %S (second)
-     *   %s (ms)      %A (AM/PM)   %D (day of year)
-     * There is NO %A=weekday-name, NO %B=month-name, NO %w. Any other
-     * characters after % are passed through literally.
+     * Returns true on success, false if the arguments object did not
+     * contain parseable integer fields 'a' and 'b'.
      *
-     * Using strftime-style specifiers like %B produced garbage output
-     * ("PM, B 11 2026 at 14:00:16") which confused the model into denying
-     * it had time data. Use ISO format for unambiguous round-tripping.
+     * Why this tool and not get_current_time: Gemma 4 E2B is RLHF-trained
+     * to refuse questions about the current time ("I do not have access
+     * to real-time information"), and that reflex is stronger than its
+     * willingness to use a tool result. A pure math function has no such
+     * training baggage, so it's a cleaner test of whether tool results
+     * actually round-trip into the model's response.
      */
-    FString ExecuteGetCurrentTimeTool()
+    bool ExecuteAddNumbersTool(const TSharedPtr<FJsonObject>& ArgumentsObj,
+                               int64& OutSum,
+                               FString& OutErrorMessage)
     {
-        const FDateTime Now = FDateTime::Now();
-        return Now.ToString(TEXT("%Y-%m-%d %H:%M:%S"));
+        if (!ArgumentsObj.IsValid())
+        {
+            OutErrorMessage = TEXT("arguments object is null");
+            return false;
+        }
+
+        // Models sometimes emit integer args as JSON numbers and sometimes
+        // as strings containing integers. Accept both.
+        auto ReadIntField = [&](const TCHAR* FieldName, int64& Out) -> bool
+        {
+            double AsNumber = 0.0;
+            if (ArgumentsObj->TryGetNumberField(FieldName, AsNumber))
+            {
+                Out = static_cast<int64>(AsNumber);
+                return true;
+            }
+            FString AsString;
+            if (ArgumentsObj->TryGetStringField(FieldName, AsString))
+            {
+                if (AsString.IsNumeric())
+                {
+                    Out = FCString::Atoi64(*AsString);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        int64 A = 0;
+        int64 B = 0;
+        if (!ReadIntField(TEXT("a"), A))
+        {
+            OutErrorMessage = TEXT("missing or non-numeric argument 'a'");
+            return false;
+        }
+        if (!ReadIntField(TEXT("b"), B))
+        {
+            OutErrorMessage = TEXT("missing or non-numeric argument 'b'");
+            return false;
+        }
+
+        OutSum = A + B;
+        return true;
     }
 }
 
 static void RunToolCallSmokeTest(const TArray<FString>& Args)
 {
     // --- Prompt ---
+    // Default is a plain arithmetic question. Small instruction-tuned models
+    // have no reflex around math questions (unlike "what time is it?" which
+    // Gemma 4 is RLHFed to refuse) so this is a much cleaner test of the
+    // full agent loop: user question → tool call → result → final answer.
     const FString Prompt = (Args.Num() > 0)
         ? FString::Join(Args, TEXT(" "))
-        : FString(TEXT("What time is it right now?"));
+        : FString(TEXT("What is 27 plus 15?"));
 
     // --- Resolve model path ---
     const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
@@ -852,26 +896,28 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
 
     // --- Static JSON strings (owned here, lifetimes simple) ---
     //
-    // A single tool: get_current_time. OpenAI-style function schema. Note
-    // the empty properties + empty required array — the model should
-    // understand that this tool takes no arguments.
+    // A single tool: add_numbers. OpenAI-style function schema with two
+    // required integer parameters.
     const char* const ToolsJsonCStr = R"([
         {
             "type": "function",
             "function": {
-                "name": "get_current_time",
-                "description": "Returns the current local date and time of the machine the assistant is running on. Use this when the user asks what time it is or asks about the current date.",
+                "name": "add_numbers",
+                "description": "Adds two integers and returns their sum. Always use this tool when the user asks to add, sum, or total two numbers — do not compute in your head.",
                 "parameters": {
                     "type": "object",
-                    "properties": {},
-                    "required": []
+                    "properties": {
+                        "a": {"type": "integer", "description": "first integer addend"},
+                        "b": {"type": "integer", "description": "second integer addend"}
+                    },
+                    "required": ["a", "b"]
                 }
             }
         }
     ])";
 
     const char* const SystemMessageJsonCStr =
-        R"({"type":"text","text":"You are a helpful assistant. When you need information you do not know, such as the current time, you MUST call the available tools rather than making up an answer."})";
+        R"({"type":"text","text":"You are a helpful assistant with access to tools. When a user asks you to perform arithmetic, you MUST call the add_numbers tool to compute it rather than calculating in your head. When you receive a tool result, use its value directly in your answer."})";
 
     // --- UTF-8 buffer for the model path ---
     const FTCHARToUTF8 ModelPathUtf8(*ModelPath);
@@ -999,38 +1045,57 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
     UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: model called tool \"%s\""), *ToolName);
 
     // --- Execute the tool locally ---
-    FString ToolResultValue;
-    if (ToolName == TEXT("get_current_time"))
+    //
+    // ToolResultValueJsonLiteral is a self-contained JSON literal (either a
+    // bare number like "42" or a quoted JSON string like "\"ERROR: ...\"")
+    // that will be embedded directly into the tool_response.value field
+    // without additional quoting.
+    FString ToolResultValueJsonLiteral;
+    if (ToolName == TEXT("add_numbers"))
     {
-        ToolResultValue = ExecuteGetCurrentTimeTool();
+        int64 Sum = 0;
+        FString LocalErr;
+        if (ExecuteAddNumbersTool(ArgumentsObj, Sum, LocalErr))
+        {
+            // Emit the sum as a bare JSON number — no quotes, no escaping.
+            ToolResultValueJsonLiteral = FString::Printf(TEXT("%lld"), Sum);
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("ToolCallTest: local tool result: add_numbers -> %lld"), Sum);
+        }
+        else
+        {
+            // Emit an error string as a quoted JSON string value.
+            ToolResultValueJsonLiteral = EscapeJsonString(
+                FString::Printf(TEXT("ERROR: %s"), *LocalErr));
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("ToolCallTest: add_numbers failed: %s"), *LocalErr);
+        }
     }
     else
     {
-        ToolResultValue = FString::Printf(TEXT("ERROR: unknown tool '%s'"), *ToolName);
+        ToolResultValueJsonLiteral = EscapeJsonString(
+            FString::Printf(TEXT("ERROR: unknown tool '%s'"), *ToolName));
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("ToolCallTest: unexpected tool name '%s'"), *ToolName);
     }
-
-    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: local tool result: %s"), *ToolResultValue);
 
     // --- Build tool result message ---
     //
-    // Shape (from runtime/conversation/model_data_processor/gemma4_data_processor_test.cc):
-    //   {
-    //     "role": "tool",
-    //     "content": [{
-    //       "type": "tool_response",
-    //       "tool_response": {
-    //         "name": "<tool name>",
-    //         "value": { "result": "<the value>" }
-    //       }
-    //     }]
-    //   }
+    // Shape (from runtime/conversation/model_data_processor/gemma4_data_processor_test.cc,
+    // specifically MessageToTemplateInputWithToolResponseWithNonObjectValue):
+    // tool_response.value may be a scalar — a number or a string — and the
+    // data processor renders it as "<tool_name>{value:<ctrl46><scalar><ctrl46>}"
+    // in the text the model sees. For a single-result tool like add_numbers,
+    // a bare scalar is cleaner than an object like {"sum": 42} because it
+    // avoids introducing an arbitrary field name.
     const FString EscapedToolNameQuoted = EscapeJsonString(ToolName);
-    const FString EscapedToolResultQuoted = EscapeJsonString(ToolResultValue);
     const FString ToolResultMessageJson = FString::Printf(
-        TEXT(R"({"role":"tool","content":[{"type":"tool_response","tool_response":{"name":%s,"value":{"result":%s}}}]})"),
+        TEXT(R"({"role":"tool","content":[{"type":"tool_response","tool_response":{"name":%s,"value":%s}}]})"),
         *EscapedToolNameQuoted,
-        *EscapedToolResultQuoted);
+        *ToolResultValueJsonLiteral);
     const FTCHARToUTF8 ToolResultMessageJsonUtf8(*ToolResultMessageJson);
+
+    UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: tool result message: %s"), *ToolResultMessageJson);
 
     // --- Round 2: send tool result, get final text answer ---
     UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: round 2 — sending tool result..."));
@@ -1083,13 +1148,13 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
 
 static FAutoConsoleCommand GToolCallTestCommand(
     TEXT("InoAgents.ToolCallTest"),
-    TEXT("Phase-1 smoke test (milestone B): full agent loop. Registers a "
-         "'get_current_time' tool with the conversation, sends a user prompt "
-         "that should trigger the tool, executes the tool locally, sends the "
-         "result back, and logs the model's final answer. Proves tool calling "
-         "works end-to-end. Synchronous, freezes the editor ~5-15 seconds. "
-         "Optionally takes a custom prompt: 'InoAgents.ToolCallTest Please "
-         "tell me the current date.'"),
+    TEXT("Phase-1 smoke test (milestone B): full agent loop. Registers an "
+         "'add_numbers(a, b)' tool with the conversation, sends a user prompt "
+         "('What is 27 plus 15?' by default), waits for the model to emit a "
+         "tool call with parsed integer arguments, executes add locally, "
+         "sends the sum back as a tool result, and logs the model's final "
+         "answer. Synchronous, freezes the editor ~5-15 seconds. Optionally "
+         "takes a custom prompt: 'InoAgents.ToolCallTest What is 100 plus 250?'"),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunToolCallSmokeTest));
 
 void FInoAgentsModule::ShutdownModule()
