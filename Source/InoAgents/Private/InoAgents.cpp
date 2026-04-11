@@ -13,7 +13,8 @@
 // LiteRtLm/scripts/build-win64.ps1. Used here only for the trivial
 // set_min_log_level() startup smoke test. Every other public API call
 // happens inside the smoke test commands under Private/SmokeTests/ or in
-// the real UInoAgentsSubsystem (future milestone D).
+// the Milestone D classes under Private/LiteRtLm/ — module startup
+// should stay cheap and side-effect-free.
 #include "litert/lm/engine.h"
 
 // Single definition for the shared log category declared in InoAgentsLog.h.
@@ -53,8 +54,9 @@ namespace
      * Unlike the stock UE "Third Party Library" plugin template, this does
      * NOT show a blocking MessageDialog on failure — that dialog pops up
      * every editor start if a single DLL is missing, which is hostile during
-     * development. An error log is sufficient; later layers of the plugin
-     * surface the failure to Blueprint via UInoAgentsSubsystem::LoadModel.
+     * development. An error log is sufficient; ULiteRtLmSubsystem::LoadModelAsync
+     * surfaces the actual load failure to Blueprint / C++ via its
+     * FOnLiteRtLmModelLoaded delegate.
      */
     void* LoadStagedDll(const TCHAR* DllFileName)
     {

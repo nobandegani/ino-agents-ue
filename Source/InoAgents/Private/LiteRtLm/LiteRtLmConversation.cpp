@@ -200,6 +200,17 @@ void ULiteRtLmConversation::Cancel()
     Worker->Cancel();
 }
 
+bool ULiteRtLmConversation::IsStreamingInFlight() const
+{
+    if (!Worker.IsValid())
+    {
+        // Zombie conversation (Shutdown called or Initialize never ran).
+        // Not streaming because it can't stream.
+        return false;
+    }
+    return Worker->IsStreamInFlight();
+}
+
 void ULiteRtLmConversation::Shutdown()
 {
     check(IsInGameThread());

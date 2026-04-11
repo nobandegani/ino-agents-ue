@@ -18,10 +18,11 @@
  *   - LiteRtLm.dll                         (our monolithic Bazel output)
  *
  * This module does NOT block on model loading — that happens lazily in
- * UInoAgentsSubsystem::LoadModel, off the game thread. Loading a 3 GB
+ * ULiteRtLmSubsystem::LoadModelAsync, off the game thread. Loading a 3 GB
  * Gemma 4 model from here would freeze the editor for seconds.
  *
- * See Plugins/InoAgents/CLAUDE.md for the full architecture.
+ * See Plugins/InoAgents/README.md for the plugin's user-facing API and
+ * Plugins/InoAgents/CLAUDE.md for the architecture + build notes.
  */
 class FInoAgentsModule : public IModuleInterface
 {

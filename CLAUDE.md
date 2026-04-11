@@ -176,77 +176,168 @@ A developer machine needs all of the following before `scripts/build-win64.ps1` 
 
 The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and should be the first thing a new dev runs.
 
-## UE-side integration architecture
+## UE-side integration architecture (Milestone D)
+
+The UE-facing API lives under `Source/InoAgents/Public/LiteRtLm/` and `Private/LiteRtLm/`. Names are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin will host multiple backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit.
 
 ```
-Blueprint ─┬─ UInoAgentsSubsystem    (UGameInstanceSubsystem)
-           │     owns LiteRtLmEngine*, tool registry, async LoadModel
+Blueprint ─┬─ ULiteRtLmSubsystem       (UGameInstanceSubsystem)
+           │     owns LiteRtLmEngine*, tool registry, async LoadModelAsync,
+           │     CreateConversation, RegisterTool / UnregisterTool /
+           │     FindTool / BuildToolsJsonForConversation
            │
-           ├─ UInoAgentsSession       (UObject, BlueprintType)
-           │     owns LiteRtLmSession* / LiteRtLmConversation*
-           │     latent Generate node, OnToken, OnComplete, OnToolCallRequested delegates
+           ├─ ULiteRtLmConversation    (UObject, BlueprintType)
+           │     owns one native LiteRtLmConversation* plus a pinned
+           │     worker thread. Public surface:
+           │       SendMessageAsync(UserText)
+           │       Cancel()
+           │       Shutdown()                 — deterministic teardown
+           │       IsStreamingInFlight()      — BlueprintPure
+           │       SubmitDeferredToolResult() — stubbed for future
+           │     Multicast delegates:
+           │       OnToken(Chunk)
+           │       OnComplete(FullText)
+           │       OnError(ErrorMessage)
+           │       OnToolCalled(Name, ArgsJson, ResultJson)
            │
-           └─ IInoAgentsTool          (Blueprint interface)
-                 Name, SchemaJson, Execute(ArgsJson) → ResultJson
-                    │
-                    ▼
-          FInoAgentsInferenceWorker   (FRunnable, one per session)
-                 calls litert_lm_session_generate_content_stream()
-                 static C callback marshals tokens → game thread via AsyncTask
-                    │
-                    ▼
-                 LiteRtLm.dll  (pure C API)
+           ├─ ULiteRtLmModelConfig     (UDataAsset, BlueprintType)
+           │     designer-editable asset. Fields:
+           │       ModelFileName (relative to Plugins/InoAgents/Models/)
+           │       Backend       (ELiteRtLmBackend::Cpu / Gpu)
+           │       MaxNumTokens
+           │       SystemMessage (plain text, wrapped into JSON internally)
+           │
+           ├─ ILiteRtLmTool            (Blueprintable UInterface)
+           │     Three BlueprintNativeEvents that both C++ and
+           │     Blueprint classes can implement:
+           │       GetToolName() → FName
+           │       GetToolSchemaJson() → FString (OpenAI function-call schema)
+           │       Execute(ArgumentsJson) → FString (result JSON literal)
+           │
+           └─ ULiteRtLmAddNumbersTool  (UCLASS, reference implementation)
+                 Adds two integers. Doubles as the smoke-test fixture
+                 for InoAgents.LiteRtLm.ConversationToolTest and as a
+                 cargo-cult template for plugin consumers who want to
+                 author their own tools in C++.
+                      │
+                      ▼
+          FLiteRtLmConversationWorker   (FRunnable, one per conversation, NOT a UObject)
+                 Owns the native LiteRtLmConversation and ConversationConfig.
+                 Runs a multi-round agent loop inside ProcessMessage:
+                   round 0:   send user message (SendMessageStream)
+                   round N+1: execute collected tool_calls on game thread
+                              via FEvent, build tool_result message, send
+                   terminate: when a round produces final text, dispatch
+                              OnComplete; cancelled/error dispatches OnError
+                 Static C callback (OnStreamChunkStatic) runs on LiteRT-LM's
+                 internal thread and marshals token chunks and tool_call
+                 entries back to the worker via StreamEvent + AsyncTask.
+                      │
+                      ▼
+                 LiteRtLm.dll  (pure C API — litert_lm_conversation_*)
 ```
 
 ### Threading model (non-negotiable)
 
-- **`StartupModule` never blocks on model load.** Gemma 4 E2B is ~3.2 GB; synchronous load would freeze the editor for 5–30 seconds. `LoadModel` is an async Blueprint-callable that spawns a worker, calls `litert_lm_engine_create`, and fires a completion delegate back to the game thread.
-- **Inference never runs on the game thread.** Every `UInoAgentsSession` owns an `FInoAgentsInferenceWorker` (an `FRunnable` on a dedicated `FRunnableThread`). Prompts enter the worker via a `TQueue<FInferenceCommand, EQueueMode::Mpsc>`. The worker calls into `litert_lm_session_generate_content_stream` with a static C callback.
-- **Tokens marshal back to the game thread via `AsyncTask(ENamedThreads::GameThread, ...)`.** The static C callback never touches UObjects directly — it captures the session and schedules a game-thread task that broadcasts `OnToken`.
-- **One worker per session.** LiteRT-LM sessions are stateful (KV cache) and not thread-safe. Concurrent conversations = multiple sessions, each with its own pinned worker thread.
+- **`StartupModule` never blocks on model load.** Gemma 4 E2B is ~3.2 GB; synchronous load would freeze the editor for 5–30 seconds. `LoadModelAsync` dispatches via `Async(EAsyncExecution::ThreadPool, ...)`, calls `litert_lm_engine_create` there, and marshals the `FOnLiteRtLmModelLoaded` delegate back to the game thread via `AsyncTask(ENamedThreads::GameThread, ...)`. A `TWeakObjectPtr<ULiteRtLmSubsystem>` guards against the subsystem being torn down while the load is in flight.
+- **Inference never runs on the game thread.** Every `ULiteRtLmConversation` owns an `FLiteRtLmConversationWorker` (an `FRunnable` on a dedicated `FRunnableThread`). Messages enter the worker via a `TQueue<FString, EQueueMode::Spsc>` whose producer is `EnqueueMessage` on the game thread. The worker calls `litert_lm_conversation_send_message_stream` which itself is non-blocking — it returns immediately and fires the C callback from LiteRT-LM's own internal thread. The worker uses two `FEvent`s:
+  - **QueueEvent** (auto-reset) — wakes the worker thread when a new message is enqueued or `Stop` is called.
+  - **StreamEvent** (manual-reset) — signalled by the stream callback when a round reaches `is_final` or errors. The worker thread blocks on this inside `RunOneStreamRound` to serialise rounds within a send.
+- **Tokens marshal back to the game thread via `AsyncTask(ENamedThreads::GameThread, ...)`.** The static C callback never touches `UObject` state directly — it copies `chunk` / `error_msg` into `FString`s (which own their storage), dispatches an `OnToken` broadcast via `AsyncTask`, and then signals `StreamEvent` for terminal callbacks. The worker thread's `ProcessMessage` eventually dispatches the terminal `OnComplete` / `OnError` via the same `AsyncTask` pattern, so observers always see `OnToken`s in order followed by exactly one terminal broadcast.
+- **TUniquePtr<FLiteRtLmConversationWorker> ordering.** Because the worker is a forward-declared type in the public `ULiteRtLmConversation` header, UHT's generated `.gen.cpp` emits both the default constructor and the `FVTableHelper` hot-reload helper constructor inline. Both must be declared out-of-line in the header and defined in `LiteRtLmConversation.cpp` (where `LiteRtLmConversationWorker.h` is fully included) so the `TDefaultDelete<FLiteRtLmConversationWorker>` deleter instantiation lands in a TU with the complete type. Leaving any of them implicit produces C4150 "delete of pointer to incomplete type" — see the comments at the top of the class in `LiteRtLmConversation.h`.
+- **One worker per conversation.** LiteRT-LM conversations are stateful (KV cache) and not thread-safe. Concurrent conversations mean multiple native conversations, each with its own pinned worker thread. LiteRT-LM also appears to reject creating a second native conversation on the same engine while a prior one is still alive, so tests that run back-to-back must call `Conversation->Shutdown()` (synchronous worker teardown) before constructing the next one. `CollectGarbage` from inside a delegate handler is NOT a valid substitute — parallel GC workers racing the in-flight delegate's write access trigger `FMRSWRecursiveAccessDetector` ensure fires (learned the hard way during D.3).
 - **Never call inference from `Tick`.** Not even once.
 
-### Tool calling flow
+### Tool calling flow (Milestone D.4)
 
-1. Blueprint class implements `IInoAgentsTool` with `Name`, `SchemaJson` (OpenAPI-ish JSON schema), and `Execute(FString ArgsJson) → FString ResultJson`.
-2. `UInoAgentsSubsystem::RegisterTool` stores the tool by name and appends its schema to the `tools_json` used on the next `litert_lm_conversation_create`.
-3. When the model emits a tool call, the LiteRT-LM C callback fires on the worker thread. The static callback dispatches a game-thread task to invoke the Blueprint tool's `Execute`.
-4. The worker blocks on a `TPromise<FString>`; the game-thread task fulfils the `TFuture` once `Execute` returns.
-5. The returned JSON result flows back into LiteRT-LM via the conversation API, and generation resumes.
+1. A Blueprint class or C++ class implements `ILiteRtLmTool` with `GetToolName()`, `GetToolSchemaJson()` (OpenAI-style function-call schema), and `Execute(FString ArgumentsJson) → FString ResultJson`.
+2. `ULiteRtLmSubsystem::RegisterTool` validates the schema parses as JSON and that its `function.name` field matches `GetToolName()` before storing the tool in its internal `TMap<FName, TScriptInterface<ILiteRtLmTool>>`. Mismatched / unparseable schemas are rejected with a clear error log.
+3. `ULiteRtLmSubsystem::CreateConversation` calls `BuildToolsJsonForConversation` which serialises every registered tool's schema into a JSON array via `FJsonSerializer::Serialize` with `TCondensedJsonPrintPolicy`. The array plus `enable_constrained_decoding=true` are passed to `litert_lm_conversation_config_create`. When no tools are registered, both are left at their defaults and the conversation behaves as a plain chat.
+4. When the model emits a tool call, LiteRT-LM delivers the chunk to the static C callback as an **OpenAI-compatible** envelope with `tool_calls` at the **top level** of the assistant message (NOT as a `content[*]` part — this was a D.4b bug until we read `TryExtractFirstToolCall` to confirm the actual shape):
+   ```json
+   {"role":"assistant",
+    "tool_calls":[
+      {"type":"function",
+       "function":{"name":"add_numbers","arguments":{"a":27,"b":15}}}]}
+   ```
+   `OnStreamChunk` walks `content[*]` for text parts AND the top-level `tool_calls[*]` independently, so a single chunk can in principle carry either or both.
+5. Tool-call entries are re-serialised (arguments sub-object → compact JSON string) and queued into `StreamPendingToolCalls`. Text from tool-call rounds is suppressed — `OnToken` only sees tokens from the final text-producing round, never intermediate tool-call JSON.
+6. When the round's `is_final` callback fires, the worker thread wakes from `StreamEvent->Wait`, sees non-empty `StreamPendingToolCalls`, and runs `ExecuteToolSynchronously` for each. That method:
+   - Allocates a pooled `FEvent` (auto-reset).
+   - Dispatches an `AsyncTask` to the game thread that looks up the tool via `Subsystem->FindTool(ToolName)`, calls `ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson)` inside a try/catch, and triggers the `FEvent`.
+   - Blocks on the `FEvent`. The game thread is never blocked because the outer `SendMessageAsync` is already async.
+   - Returns the result JSON string (or a `"\"ERROR: ...\""` literal if the tool was missing / the subsystem was GC'd / Execute threw).
+7. The worker builds a single `{"role":"tool","content":[{"type":"tool_response",...}, ...]}` message bundling every executed tool's result, sends that via a fresh `litert_lm_conversation_send_message_stream` on the **same** native conversation (reusing the KV cache), and loops back to round N+1.
+8. Eventually a round produces final text with no tool calls. The worker dispatches `OnComplete` with the accumulated text of **that round only** — callers never see intermediate tool-call rounds. `OnToolCalled` fires once per tool execution on the game thread, strictly before the terminal `OnComplete`, as a diagnostic.
+9. A safety cap (`kMaxAgentLoopRounds = 8`) bounds the loop. Hitting it dispatches `OnError("Agent loop exceeded N rounds...")` rather than spinning forever.
 
-Sync tools run on the game thread. Async tools that need to do their own async work block the worker's future until the game-thread work completes. The game thread itself never blocks.
+**Why this is not a deadlock trap.** Tools are executed via AsyncTask on the game thread while the worker blocks on an `FEvent`. The game thread itself is not blocked — `SendMessageAsync` has already returned control to the caller, so the game thread is free to run ticks, process more AsyncTasks, and eventually execute the tool. The worker wakes up when the tool is done.
 
-**Deadlock guard:** a tool that tries to call `Generate` on the same session from within its `Execute` implementation will deadlock on the worker queue. `UInoAgentsSession::Generate` must raise an error if called during tool execution.
+**Deferred tool results.** `ULiteRtLmConversation::SubmitDeferredToolResult` is declared in the public API but stubbed in Milestone D.4 — it logs a warning and is a no-op. A future milestone will wire it through the worker's agent loop so tools that need to do their own async work (network, disk I/O, user confirmation dialogs) can unblock the worker with a fresh result later. The method exists in the header now so Blueprint consumers can wire it up ahead of the implementation landing.
 
-## Phase 1 smoke tests
+## Smoke tests
 
-Development-time console commands that exercise each layer of the native integration before the real UE-facing API (subsystem, session, tools) exists. They live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
+Development-time console commands. Two groups: the Phase 1 group exercises the native C API directly (no UObjects), and the Milestone D group exercises the UE-facing API surface end-to-end through PIE. Both groups stay in the codebase so a regression in either layer can be diagnosed without the other being a suspect.
 
-Invoke from the editor's Output Log command input:
+Both groups live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
 
-| Command | What it proves |
-|---|---|
-| `InoAgents.LoadEngineTest` | LiteRT-LM engine can be constructed and destroyed without crashing. |
-| `InoAgents.GenerateTest [prompt]` | Raw text generation via `session_generate_content` (no chat template). |
-| `InoAgents.ConversationTest [prompt]` | Chat-template API via `conversation_send_message` actually follows instructions. |
-| `InoAgents.ToolCallTest [prompt]` | Full tool-calling agent loop: user prompt → model emits tool call → we execute → tool result → final answer. Uses a local `add_numbers(a,b)` tool. |
-| `InoAgents.StreamTest [prompt]` | Non-blocking streaming via `generate_content_stream` with worker→game thread marshaling through `AsyncTask`. First non-blocking smoke test. |
+Invoke from the editor's Output Log command input. Milestone D tests require **PIE** (the subsystem is a `UGameInstanceSubsystem`), Phase 1 tests do not.
 
-All smoke tests resolve the same default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoAgentsSmokeTest::ResolveDefaultModelPath()`. The first four are synchronous (freeze the editor for 2–15 s); only `InoAgents.StreamTest` is non-blocking and demonstrates the async-lifetime pattern the real `UInoAgentsSession` will reuse.
+### Phase 1 — native C API layer (no UE API)
 
-Shared helpers (model path resolution, JSON parsing, tool-call extraction, assistant text extraction) live in `InoAgentsSmokeTestCommon.{h,cpp}` under the `InoAgentsSmokeTest` namespace. Test-specific helpers (e.g. `ExecuteAddNumbersTool`, the streaming state struct) live in the test file's anonymous namespace.
+| Command | What it proves | PIE? |
+|---|---|---|
+| `InoAgents.LoadEngineTest` | LiteRT-LM engine can be constructed and destroyed without crashing. | no |
+| `InoAgents.GenerateTest [prompt]` | Raw text generation via `session_generate_content` (no chat template). | no |
+| `InoAgents.ConversationTest [prompt]` | Chat-template API via `conversation_send_message` actually follows instructions. | no |
+| `InoAgents.ToolCallTest [prompt]` | Full tool-calling agent loop at the raw C API layer: user prompt → model emits tool call → we execute inline → tool result → final answer. Uses a local `add_numbers(a,b)` helper directly, NOT the D.4 `ULiteRtLmAddNumbersTool`. | no |
+| `InoAgents.StreamTest [prompt]` | Non-blocking streaming via `generate_content_stream` with worker→game-thread marshaling through `AsyncTask`. First non-blocking smoke test. | no |
 
-To add a new smoke test, drop a new `.cpp` into `Private/SmokeTests/`. UBT auto-picks up `.cpp` files under `Private/`; no `Build.cs` changes needed. `Private/SmokeTests/` is already on the include path via `PrivateIncludePaths`.
+All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2–15 s). They resolve the default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoAgentsSmokeTest::ResolveDefaultModelPath()` and call the LiteRT-LM C API directly — no UObjects, no subsystem, no conversations. Their purpose is to prove the native integration works independently of the UE API layer.
 
-Smoke tests are compiled into every build configuration. For phase 1 that's fine — they're gated behind console commands and never run unless explicitly invoked. If any individual test grows shipping-sensitive logic, wrap that file in `#if !UE_BUILD_SHIPPING` as a follow-up change.
+### Milestone D — UE-facing API
 
-## Phase plan
+| Command | What it proves | PIE? |
+|---|---|---|
+| `InoAgents.LiteRtLm.SubsystemLoadTest` | `ULiteRtLmSubsystem::LoadModelAsync` dispatches to a ThreadPool worker, marshals `FOnLiteRtLmModelLoaded` back to the game thread, and `IsModelLoaded` reports true afterward. Non-blocking. | **yes** |
+| `InoAgents.LiteRtLm.ConversationSendTest` | `ULiteRtLmConversation` round-trips a non-streaming "What is 2 plus 2?" prompt through the worker's agent loop (streaming internally) and delivers the full accumulated text via `OnComplete`. Validates D.2 regression against D.3 streaming internals. | **yes** |
+| `InoAgents.LiteRtLm.ConversationStreamTest [prompt]` | D.3 streaming surface: binds `OnToken` in addition to `OnComplete` and logs each chunk with per-stream elapsed time. Cross-checks that the locally-accumulated tokens match the `FullText` delivered to `OnComplete`. | **yes** |
+| `InoAgents.LiteRtLm.ToolRegistryTest` | Registry-only check (no model load): constructs a `ULiteRtLmAddNumbersTool`, registers it, looks it up, serialises `BuildToolsJsonForConversation`, invokes `Execute_Execute` via the BlueprintNativeEvent wrapper, unregisters, and verifies `FindTool` returns null. Fastest D.4 smoke test; useful as a pre-flight before running the full agent loop. | **yes** |
+| `InoAgents.LiteRtLm.ConversationToolTest [prompt]` | **The headline test.** Registers a `ULiteRtLmAddNumbersTool`, creates a conversation with `tools_json` + constrained decoding, binds all four delegates (`OnToken` / `OnToolCalled` / `OnComplete` / `OnError`), sends "What is 27 plus 15?", watches the multi-round agent loop run, and logs PASS if `OnToolCalled` fired with `add_numbers` + result `"42"` AND `OnComplete`'s text contains `"42"` or `"forty-two"`. | **yes** |
 
-Five platform phases. Every phase ships the same C++ API and the same UE-side integration — only the `InoAgentsLibrary.Build.cs` branch and the Bazel build config differ.
+Every Milestone D observer UCLASS uses the same pattern: `NewObject` + `AddToRoot`, bind dynamic delegates via `AddDynamic`, run the workflow, and in `Finish()` call `Conversation->Shutdown()` for deterministic teardown before clearing UPROPERTY refs and `RemoveFromRoot`. Do NOT call `CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, true)` from inside a delegate handler — parallel GC workers race the in-flight delegate's write access and trip `FMRSWRecursiveAccessDetector`. `Shutdown()` is the safe alternative because it only resets the worker `TUniquePtr`; it never touches delegate state.
+
+All dynamic delegate handlers on observer UCLASSes MUST take `FString` **by value**, not `const FString&`. UE's `BindDynamic` does strict method-pointer matching against the delegate's declared signature, and every delegate in this plugin declares `FString` by value. A handler with `const FString&` compiles fine on its own but fails at the `BindDynamic` call site with a cryptic `cannot convert argument` error — learned the hard way during D.1.
+
+### Shared helpers + adding new tests
+
+Shared helpers (model path resolution, JSON parsing, tool-call extraction, assistant text extraction) live in `InoAgentsSmokeTestCommon.{h,cpp}` under the `InoAgentsSmokeTest` namespace. Test-specific helpers live in the test file's anonymous namespace.
+
+To add a new smoke test, drop a new `.cpp` (and optional `.h` for observer UCLASSes) into `Private/SmokeTests/`. UBT auto-picks up `.cpp` files under `Private/`; no `Build.cs` changes needed. `Private/SmokeTests/` is already on the include path via `PrivateIncludePaths`.
+
+Smoke tests are compiled into every build configuration. For now they're gated behind console commands and never run unless explicitly invoked. If any individual test grows shipping-sensitive logic, wrap that file in `#if !UE_BUILD_SHIPPING` as a follow-up change.
+
+## Milestone plan
+
+Two independent axes of progress: **UE API milestones** (A → D → E → ...) which build up the UObject / Blueprint surface, and **platform phases** (1 → 5) which port the Bazel build and `InoAgentsLibrary.Build.cs` to new targets.
+
+### UE API milestones
+
+| Milestone | Status | What it delivered |
+|---|---|---|
+| A — Phase 1 native bring-up | ✅ done | `InoAgents.LoadEngineTest`, `GenerateTest`, `ConversationTest`. Proves the C API works via raw smoke tests. |
+| B — Tool calling at the C API layer | ✅ done | `InoAgents.ToolCallTest`. Full agent loop using `litert_lm_conversation_*` directly, no UObjects. |
+| C — Non-blocking streaming | ✅ done | `InoAgents.StreamTest`. First worker → game-thread marshaling via `AsyncTask`; template for Milestone D's worker. |
+| **D** — UE-facing API | ✅ done | `ULiteRtLmSubsystem`, `ULiteRtLmConversation`, `ULiteRtLmModelConfig`, `ILiteRtLmTool`, `ULiteRtLmAddNumbersTool`. Five `InoAgents.LiteRtLm.*` smoke tests validate the full surface in PIE. See the Milestone D design spec in `docs/superpowers/specs/2026-04-11-milestone-d-litert-lm-ue-api-design.md` for the design record, and `README.md` for the user-facing API documentation. |
+| E — TBD | ⏳ pending | Possible scope: deferred-tool-result state machine (wire through `SubmitDeferredToolResult`), multi-conversation concurrency, per-conversation config overrides, Blueprint latent nodes wrapping `SendMessageAsync`. |
+
+### Platform phases
+
+Five platform phases. Every phase ships the same UE API from Milestone D and the same Bazel recipe — only the `InoAgentsLibrary.Build.cs` branch and the Bazel build config differ.
 
 | Phase | Platform | Notes |
 |---|---|---|
-| **1** | **Windows (Win64, MSVC)** | Full feature set (text / image / audio / tool calling) — the C API exposes everything from day one, no point in artificially restricting phase 1 to text-only. D3D12/DXC GPU path. |
+| **1** | **Windows (Win64, MSVC)** | ✅ in progress. CPU inference works end-to-end. GPU path (`//c:engine`) builds but is untested with the Milestone D API — swap the Bazel target when enabling. |
 | 2 | Android | `--config=android_arm64` already exists in upstream `.bazelrc`. Port `InoAgentsLibrary.Build.cs` with an `Android` branch. |
 | 3 | iOS | `--config=ios_arm64` already exists in upstream `.bazelrc`. Port Build.cs with an `IOS` branch. |
 | 4 | Linux | Port Build.cs with a `Linux` branch. |
@@ -289,16 +380,19 @@ const FString ModelPath = FPaths::Combine(BaseDir, TEXT("Models"), TEXT("gemma-4
 
 This is the same `IPluginManager` pattern used in `FInoAgentsModule::StartupModule` for locating the native DLLs. One consistent convention: *anything the plugin needs to find at runtime lives under the plugin's base directory and is located via `IPluginManager::FindPlugin`*.
 
-### Phase 1 smoke test
+### Model config (Milestone D)
 
-Hardcoded path (`Models/gemma-4-E2B-it.litertlm`) is acceptable for the phase-1 bring-up milestone. A later milestone replaces the hardcode with a `UInoAgentsModelConfig` data asset so designers can swap models per demo / difficulty / level without code changes.
+Models are selected via `ULiteRtLmModelConfig` — a `UDataAsset` subclass. Create one as a Content Browser asset (right-click → Miscellaneous → Data Asset → `LiteRtLmModelConfig`), point its `ModelFileName` at the file inside `Plugins/InoAgents/Models/`, and pass the asset to `ULiteRtLmSubsystem::LoadModelAsync`. The subsystem prepends `IPluginManager::FindPlugin("InoAgents")->GetBaseDir() + "/Models/"` internally so the config remains portable across developer machines.
 
-### Shipping builds (not phase 1)
+Phase 1 smoke tests under `InoAgents.*` still hardcode the path via `InoAgentsSmokeTest::ResolveDefaultModelPath()` because they bypass the UE API and call the C functions directly — that is intentional to keep the native layer testable without `ULiteRtLmSubsystem`.
 
-For shipping, the model can't live inside the plugin tree — it would bloat the packaged build. The plan for shipping, which we will implement in a later phase:
+### Shipping builds
+
+For shipping the model can't live inside the plugin tree — it would bloat the packaged build. The plan, still to be implemented:
 - **Download on first run** to `FPaths::ProjectPersistentDownloadDir()` (canonical UE location for runtime-acquired user content)
 - Verify SHA-256 against a manifest baked into the game
 - Show a progress UI (the download is 2.5–5 GB)
+- Point a runtime `ULiteRtLmModelConfig` at the downloaded path instead of the dev-time `Models/` directory
 
 ### Model sources
 

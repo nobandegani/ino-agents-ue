@@ -106,6 +106,19 @@ public:
     void EnqueueMessage(FString UserText);
 
     /**
+     * Snapshot of the in-flight flag. Reads the atomic so it is safe
+     * to call from any thread, though the intended caller is
+     * ULiteRtLmConversation::IsStreamingInFlight on the game thread.
+     * Returns true from the moment the worker calls
+     * litert_lm_conversation_send_message_stream until the round's
+     * final callback signals StreamEvent and the worker clears the
+     * flag. Between rounds of a multi-round agent loop it briefly
+     * reads as false, which is fine for the usual "disable send
+     * button while a reply is in progress" use case.
+     */
+    bool IsStreamInFlight() const { return bStreamInFlight.Load(); }
+
+    /**
      * Cancel the in-flight stream, if any. Called on the game thread.
      * Sets an atomic cancel flag and invokes
      * litert_lm_conversation_cancel_process on the native conversation.

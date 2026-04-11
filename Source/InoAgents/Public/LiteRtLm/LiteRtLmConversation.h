@@ -124,6 +124,23 @@ public:
     void Cancel();
 
     /**
+     * True while a SendMessageAsync is actively generating — i.e.
+     * from the moment the worker's stream has been kicked off to
+     * the moment the round's terminal callback fires. Useful for
+     * Blueprint UI that wants to disable the "Send" button while
+     * the model is replying, or to show a typing indicator.
+     *
+     * Returns false before the first send, between rounds of the
+     * agent loop (briefly), after OnComplete / OnError has fired,
+     * and after Shutdown has been called.
+     *
+     * Safe to call from any thread, but the intended caller is the
+     * game thread from Blueprint / Tick.
+     */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
+    bool IsStreamingInFlight() const;
+
+    /**
      * Immediately release the worker thread and native LiteRT-LM
      * resources. After calling Shutdown the conversation is a
      * "zombie": SendMessageAsync will log an error and fail, Cancel
