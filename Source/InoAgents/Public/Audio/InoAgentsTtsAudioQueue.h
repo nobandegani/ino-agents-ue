@@ -108,7 +108,7 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
     void EnqueueSentence(const FString& SentenceText,
-                         const FString& VoiceIdOverride = FString());
+                         const FString& VoiceIdOverride);
 
     /**
      * Drop all queued (not yet started) AND in-flight slots. Calls
