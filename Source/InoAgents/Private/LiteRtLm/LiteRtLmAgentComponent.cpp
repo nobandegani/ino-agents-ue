@@ -70,6 +70,7 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     const FString& InVoiceId,
     const FElevenLabsDialogueRequest& InTtsRequestTemplate,
     int32 InPauseDurationMs,
+    int32 InPreBufferMs,
     int32 InPcmSampleRate,
     int32 InPcmNumChannels)
 {
@@ -77,12 +78,14 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     VoiceId            = InVoiceId;
     TtsRequestTemplate = InTtsRequestTemplate;
     PauseDurationMs    = FMath::Max(InPauseDurationMs, 0);
+    PreBufferMs        = FMath::Clamp(InPreBufferMs, 0, 2000);
     PcmSampleRate      = FMath::Clamp(InPcmSampleRate, 8000, 192000);
     PcmNumChannels     = FMath::Clamp(InPcmNumChannels, 1, 2);
 
     if (AudioComp != nullptr)
     {
         AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+        AudioComp->PreBufferMs = PreBufferMs;
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -345,6 +348,7 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     if (AudioComp != nullptr)
     {
         AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+        AudioComp->PreBufferMs = PreBufferMs;
         AudioComp->OnReadyToPlay.AddDynamic(
             this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay);
     }

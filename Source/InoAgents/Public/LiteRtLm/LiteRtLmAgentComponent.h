@@ -84,6 +84,12 @@ public:
               meta = (ClampMin = "0", ClampMax = "5000"))
     int32 PauseDurationMs = 500;
 
+    /** How many ms of audio to buffer before starting playback.
+     *  Higher = smoother start, lower = faster first word. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
+              meta = (ClampMin = "0", ClampMax = "2000"))
+    int32 PreBufferMs = 250;
+
     /** PCM sample rate for the audio component. Must match the
      *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
@@ -113,6 +119,7 @@ public:
         const FString& InVoiceId,
         const FElevenLabsDialogueRequest& InTtsRequestTemplate,
         int32 InPauseDurationMs,
+        int32 InPreBufferMs,
         int32 InPcmSampleRate,
         int32 InPcmNumChannels);
 
