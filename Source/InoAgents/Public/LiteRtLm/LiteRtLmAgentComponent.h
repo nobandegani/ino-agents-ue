@@ -85,8 +85,9 @@ public:
     int32 PauseDurationMs = 500;
 
     /** How many ms of audio to buffer before starting playback.
-     *  Higher = smoother start, lower = faster first word. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
+     *  Higher = smoother start, lower = faster first word.
+     *  Set via Initialize or directly on the child audio component. */
+    UPROPERTY(BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "0", ClampMax = "2000"))
     int32 PreBufferMs = 250;
 
