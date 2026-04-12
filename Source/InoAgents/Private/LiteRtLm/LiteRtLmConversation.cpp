@@ -184,6 +184,12 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
         return;
     }
 
+    // Clear any leftover sentence buffer from a prior send so it
+    // doesn't leak into this one. (FlushSentenceBuffer at OnComplete
+    // normally empties it, but if the prior send errored instead of
+    // completing, the buffer may be non-empty.)
+    SentenceBuffer.Empty();
+
     Worker->EnqueueMessage(UserText);
 }
 
@@ -258,4 +264,60 @@ void ULiteRtLmConversation::BeginDestroy()
     Worker.Reset();
 
     Super::BeginDestroy();
+}
+
+// ======================================================================
+// Sentence detection
+// ======================================================================
+
+void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
+{
+    check(IsInGameThread());
+
+    SentenceBuffer += Chunk;
+
+    // Scan for the FIRST sentence-ending delimiter. Emit the sentence,
+    // shift the buffer, and repeat until no more delimiters are found.
+    // This handles multi-sentence chunks like "Hello. How are you?"
+    // — each sentence fires separately.
+    while (true)
+    {
+        int32 SplitIndex = INDEX_NONE;
+        for (int32 i = 0; i < SentenceBuffer.Len(); ++i)
+        {
+            const TCHAR Ch = SentenceBuffer[i];
+            if (Ch == TEXT('.') || Ch == TEXT('!') || Ch == TEXT('?') || Ch == TEXT('\n'))
+            {
+                SplitIndex = i;
+                break;
+            }
+        }
+
+        if (SplitIndex == INDEX_NONE)
+        {
+            break;
+        }
+
+        // Emit everything up to and including the delimiter, trimmed.
+        FString Sentence = SentenceBuffer.Left(SplitIndex + 1).TrimStartAndEnd();
+        SentenceBuffer.MidInline(SplitIndex + 1);
+
+        if (!Sentence.IsEmpty())
+        {
+            OnSentence.Broadcast(Sentence);
+        }
+    }
+}
+
+void ULiteRtLmConversation::FlushSentenceBuffer()
+{
+    check(IsInGameThread());
+
+    const FString Remainder = SentenceBuffer.TrimStartAndEnd();
+    SentenceBuffer.Empty();
+
+    if (!Remainder.IsEmpty())
+    {
+        OnSentence.Broadcast(Remainder);
+    }
 }

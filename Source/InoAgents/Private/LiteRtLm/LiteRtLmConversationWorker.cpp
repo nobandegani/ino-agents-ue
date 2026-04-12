@@ -717,6 +717,7 @@ void FLiteRtLmConversationWorker::DispatchTokenOnGameThread(FString Chunk)
         if (ULiteRtLmConversation* Conv = WeakOwnerCopy.Get())
         {
             Conv->OnToken.Broadcast(Chunk);
+            Conv->AccumulateTokenForSentence(Chunk);
         }
     });
 }
@@ -733,6 +734,11 @@ void FLiteRtLmConversationWorker::DispatchCompleteOnGameThread(FString FullText)
     {
         if (ULiteRtLmConversation* Conv = WeakOwnerCopy.Get())
         {
+            // Flush any trailing text that didn't end with a sentence
+            // delimiter (e.g. "The answer is 42" with no period). This
+            // fires a final OnSentence so the concatenation of every
+            // OnSentence always equals the full response.
+            Conv->FlushSentenceBuffer();
             Conv->OnComplete.Broadcast(FullText);
         }
     });

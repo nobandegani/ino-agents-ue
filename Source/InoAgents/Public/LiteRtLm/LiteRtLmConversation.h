@@ -235,6 +235,23 @@ public:
     FOnLiteRtLmError OnError;
 
     /**
+     * Fires each time the accumulated streaming tokens cross a sentence
+     * boundary (., !, ?, or \n). SentenceText is the complete sentence
+     * including its trailing punctuation but trimmed of leading /
+     * trailing whitespace.
+     *
+     * Typical use: pipe each sentence to ElevenLabs TTS independently
+     * so audio generation starts before the full LLM response is done.
+     *
+     * At OnComplete time, any remaining text that hasn't crossed a
+     * sentence boundary is flushed as a final OnSentence broadcast, so
+     * the concatenation of every OnSentence always equals the full
+     * assistant response.
+     */
+    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
+    FOnLiteRtLmSentence OnSentence;
+
+    /**
      * Diagnostic event: fires AFTER a tool has been executed and its
      * result has been fed back into the conversation. Broadcast on
      * the game thread with the tool name, the arguments JSON the
@@ -269,9 +286,38 @@ public:
         LiteRtLmEngine* InEngine,
         const ULiteRtLmModelConfig* InConfig);
 
+    // ------------------------------------------------------------------
+    // Sentence detection (called from worker's game-thread token path)
+    // ------------------------------------------------------------------
+
+    /**
+     * Append a token chunk and broadcast OnSentence for each complete
+     * sentence boundary found. Called automatically from the worker's
+     * game-thread OnToken dispatch — callers do NOT need to call this
+     * themselves; it runs as part of the normal token flow.
+     *
+     * Game thread only.
+     */
+    void AccumulateTokenForSentence(const FString& Chunk);
+
+    /**
+     * Broadcast any remaining text in SentenceBuffer as a final sentence.
+     * Called from the game-thread OnComplete dispatch so no trailing
+     * text is lost.
+     *
+     * Game thread only.
+     */
+    void FlushSentenceBuffer();
+
 private:
     UPROPERTY()
     TWeakObjectPtr<ULiteRtLmSubsystem> Subsystem;
+
+    /** Rolling buffer for sentence detection. Accumulates tokens until
+     *  a sentence-ending delimiter is found, at which point the complete
+     *  sentence is broadcast via OnSentence and the buffer shifts to
+     *  whatever follows the delimiter. */
+    FString SentenceBuffer;
 
     // Worker owns the pinned thread + native conversation + native config.
     // TUniquePtr because FLiteRtLmConversationWorker is a plain C++ class,

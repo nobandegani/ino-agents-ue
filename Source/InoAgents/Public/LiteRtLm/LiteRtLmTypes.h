@@ -76,6 +76,23 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmError,
     FString, ErrorMessage);
 
 /**
+ * Fired each time the streaming token buffer crosses a sentence boundary.
+ * Sentence boundaries are: period (.), exclamation (!), question mark (?),
+ * and newline (\n). The SentenceText delivered includes the trailing
+ * punctuation but not the whitespace that follows it.
+ *
+ * Fires zero or more times per send, between OnToken broadcasts and before
+ * the terminal OnComplete. The concatenation of every SentenceText plus
+ * any trailing fragment (delivered only via OnComplete) equals the full
+ * assistant response.
+ *
+ * Primary use case: pipe each sentence to ElevenLabs TTS independently so
+ * audio generation starts before the full response is done.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmSentence,
+    FString, SentenceText);
+
+/**
  * Diagnostic event fired after ULiteRtLmConversation has handled a tool call
  * end-to-end (looked up the tool in the subsystem's registry, invoked it on
  * the game thread, fed the result back into the LiteRT-LM conversation).
