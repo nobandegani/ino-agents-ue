@@ -406,17 +406,23 @@ bool FLiteRtLmConversationWorker::RunOneStreamRound(
     // display stderr output.
 #if PLATFORM_WINDOWS
     // Redirect stderr to a temp file BEFORE the C API call.
-    FString StderrCapturePath = FPaths::CreateTempFilename(
-        *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
+    // Guard: UE GUI apps have no console — _fileno(stderr) returns -2
+    // (invalid fd). Calling _dup/-2 trips the SECURE CRT invalid-parameter
+    // handler and crashes. Only attempt the redirect when stderr is valid.
+    FString StderrCapturePath;
     FILE* StderrFile = nullptr;
     int OldStderr = -1;
+    const int StderrFd = _fileno(stderr);
+    if (StderrFd >= 0)
     {
+        StderrCapturePath = FPaths::CreateTempFilename(
+            *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
         const FTCHARToUTF8 PathUtf8(*StderrCapturePath);
-        OldStderr = _dup(_fileno(stderr));
+        OldStderr = _dup(StderrFd);
         StderrFile = fopen(PathUtf8.Get(), "w");
         if (StderrFile != nullptr)
         {
-            _dup2(_fileno(StderrFile), _fileno(stderr));
+            _dup2(_fileno(StderrFile), StderrFd);
         }
     }
 #endif
@@ -434,7 +440,7 @@ bool FLiteRtLmConversationWorker::RunOneStreamRound(
     if (StderrFile != nullptr)
     {
         fflush(stderr);
-        _dup2(OldStderr, _fileno(stderr));
+        _dup2(OldStderr, StderrFd);
         fclose(StderrFile);
         _close(OldStderr);
         FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
