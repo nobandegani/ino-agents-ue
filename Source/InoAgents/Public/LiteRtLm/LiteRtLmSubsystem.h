@@ -8,12 +8,12 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UObject/ScriptInterface.h"
 
-#include "LiteRtLm/LiteRtLmTool.h"    // TScriptInterface<ILiteRtLmTool> needs full type
 #include "LiteRtLm/LiteRtLmTypes.h"
 
 #include "LiteRtLmSubsystem.generated.h"
 
 class ULiteRtLmConversation;
+class ULiteRtLmToolBase;
 
 // Forward declarations of opaque native types from LiteRT-LM's C API.
 // We deliberately do NOT include "litert/lm/engine.h" here — that would pull
@@ -37,7 +37,7 @@ extern "C" {
  *
  * Owns:
  *   - The loaded LiteRtLmEngine* (expensive, shared across conversations)
- *   - A map of registered ILiteRtLmTool implementations
+ *   - A map of registered ULiteRtLmToolBase instances
  *   - A weak reference to the single currently-active ULiteRtLmConversation,
  *     used to enforce "one conversation per engine" and to tear it down
  *     before the engine at shutdown time.
@@ -199,25 +199,22 @@ public:
     // ------------------------------------------------------------------
 
     /**
-     * Register a tool implementation so it becomes available to every
-     * conversation created AFTER this call. Registering the same tool
-     * name again overwrites the previous registration and logs a
-     * warning.
+     * Register a tool so it becomes available to every conversation
+     * created AFTER this call. Registering the same tool name again
+     * overwrites the previous registration and logs a warning.
      *
-     * The subsystem parses the tool's schema JSON once at registration
-     * time and verifies that its "function.name" field matches the
-     * tool's GetToolName(). Tools with mismatched or unparseable
-     * schemas are rejected and logged, not silently accepted.
+     * The subsystem validates the tool's schema (built from its
+     * ToolName, Description, and Parameters properties) at registration
+     * time. Tools with empty names or unparseable schemas are rejected.
      *
      * Conversations that were created before RegisterTool ran do NOT
-     * see the new tool — tool_json is snapshotted at conversation
-     * creation time because LiteRT-LM's tools_json is passed to
-     * conversation_config_create and not mutable afterward.
+     * see the new tool — tools_json is snapshotted at conversation
+     * creation time.
      *
      * Called on the game thread.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Tools")
-    void RegisterTool(TScriptInterface<ILiteRtLmTool> Tool);
+    void RegisterTool(ULiteRtLmToolBase* Tool);
 
     /**
      * Remove a tool from the registry by name. If no tool is registered
@@ -237,7 +234,7 @@ public:
      * loop on the game thread when the model emits a tool call.
      */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category="InoAgents|LiteRT-LM|Tools")
-    TScriptInterface<ILiteRtLmTool> FindTool(FName ToolName) const;
+    ULiteRtLmToolBase* FindTool(FName ToolName) const;
 
     /**
      * Serialise every registered tool's schema into a single JSON
@@ -298,11 +295,9 @@ private:
     // references.
     TWeakObjectPtr<ULiteRtLmConversation> ActiveConversation;
 
-    // Tool registry. Keyed by the tool's GetToolName() result. Values
-    // are TScriptInterface<ILiteRtLmTool>, which keeps a UPROPERTY
-    // reference to the implementing UObject so the tool is not
-    // garbage-collected while registered. UnregisterTool drops the
+    // Tool registry. Keyed by the tool's ToolName. UPROPERTY keeps
+    // the tool alive while registered. UnregisterTool drops the
     // reference; Deinitialize clears the whole map.
     UPROPERTY()
-    TMap<FName, TScriptInterface<ILiteRtLmTool>> Tools;
+    TMap<FName, TObjectPtr<ULiteRtLmToolBase>> Tools;
 };

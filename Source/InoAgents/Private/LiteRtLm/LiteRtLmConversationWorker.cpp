@@ -5,7 +5,7 @@
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
-#include "LiteRtLm/LiteRtLmTool.h"
+#include "LiteRtLm/LiteRtLmToolBase.h"
 
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
@@ -498,21 +498,20 @@ FString FLiteRtLmConversationWorker::ExecuteToolSynchronously(
         // and touch UObjects.
         if (ULiteRtLmSubsystem* Subs = WeakSubs.Get())
         {
-            TScriptInterface<ILiteRtLmTool> Tool = Subs->FindTool(ToolName);
-            if (UObject* ToolObj = Tool.GetObject())
+            ULiteRtLmToolBase* Tool = Subs->FindTool(ToolName);
+            if (Tool != nullptr)
             {
-                // ILiteRtLmTool is a BlueprintNativeEvent interface —
-                // MUST go through the Execute_Execute wrapper so
-                // Blueprint implementors work too. Wrap in try/catch
-                // so a misbehaving tool that throws can't kill the
-                // game thread.
+                // Execute is a BlueprintNativeEvent — calling it on
+                // the UObject dispatches to either C++ or Blueprint
+                // implementations. Wrap in try/catch so a misbehaving
+                // tool that throws can't kill the game thread.
                 FString LocalResult;
                 #if PLATFORM_EXCEPTIONS_DISABLED
-                    LocalResult = ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson);
+                    LocalResult = Tool->Execute(ArgsJson);
                 #else
                     try
                     {
-                        LocalResult = ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson);
+                        LocalResult = Tool->Execute(ArgsJson);
                     }
                     catch (...)
                     {
@@ -725,7 +724,7 @@ void FLiteRtLmConversationWorker::OnStreamChunk(
             //
             // We re-serialise the arguments sub-object to a compact
             // JSON string here so the worker thread can hand it
-            // directly to ILiteRtLmTool::Execute without needing to
+            // directly to ULiteRtLmToolBase::Execute without needing to
             // re-serialise.
             const TArray<TSharedPtr<FJsonValue>>* ToolCallsArrayPtr = nullptr;
             if (RootObj->TryGetArrayField(TEXT("tool_calls"), ToolCallsArrayPtr)

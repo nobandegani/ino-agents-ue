@@ -9,44 +9,33 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
-FName ULiteRtLmAddNumbersTool::GetToolName_Implementation() const
+ULiteRtLmAddNumbersTool::ULiteRtLmAddNumbersTool()
 {
-    return TEXT("add_numbers");
-}
+    ToolName = TEXT("add_numbers");
+    Description = TEXT("Adds two integers and returns their sum. Always use this "
+                       "tool when the user asks to add, sum, or total two numbers "
+                       "— do not compute in your head.");
 
-FString ULiteRtLmAddNumbersTool::GetToolSchemaJson_Implementation() const
-{
-    // OpenAI-style function schema. The "name" field MUST match
-    // GetToolName() or the subsystem's BuildToolsJsonForConversation
-    // will refuse to register this tool. The description is the
-    // single most important field for getting Gemma 4 E2B to
-    // actually USE the tool instead of computing inline — phrasing
-    // it as an explicit instruction ("Always use this tool when...")
-    // moves the needle significantly. This exact text is the one
-    // that worked in the Phase 1 ToolCallTest.
-    return FString(TEXT(R"({
-        "type": "function",
-        "function": {
-            "name": "add_numbers",
-            "description": "Adds two integers and returns their sum. Always use this tool when the user asks to add, sum, or total two numbers — do not compute in your head.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "a": {"type": "integer", "description": "first integer addend"},
-                    "b": {"type": "integer", "description": "second integer addend"}
-                },
-                "required": ["a", "b"]
-            }
-        }
-    })"));
+    FLiteRtLmToolParameter ParamA;
+    ParamA.Name = TEXT("a");
+    ParamA.Type = TEXT("integer");
+    ParamA.Description = TEXT("first integer addend");
+    ParamA.bRequired = true;
+    Parameters.Add(ParamA);
+
+    FLiteRtLmToolParameter ParamB;
+    ParamB.Name = TEXT("b");
+    ParamB.Type = TEXT("integer");
+    ParamB.Description = TEXT("second integer addend");
+    ParamB.bRequired = true;
+    Parameters.Add(ParamB);
 }
 
 FString ULiteRtLmAddNumbersTool::Execute_Implementation(const FString& ArgumentsJson)
 {
     // Parse arguments. Small models often emit numeric arguments as
     // JSON strings rather than numbers (e.g. "a": "27" instead of
-    // "a": 27), so we accept both — see the Phase 1 ToolCallTest's
-    // ExecuteAddNumbersTool helper for the same pattern.
+    // "a": 27), so we accept both.
     TSharedPtr<FJsonObject> ArgsObj;
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ArgumentsJson);
     if (!FJsonSerializer::Deserialize(Reader, ArgsObj) || !ArgsObj.IsValid())
@@ -92,10 +81,5 @@ FString ULiteRtLmAddNumbersTool::Execute_Implementation(const FString& Arguments
     UE_LOG(LogInoAgents, Log,
            TEXT("add_numbers: %lld + %lld = %lld"), A, B, Sum);
 
-    // Return as a bare JSON number. The conversation worker will
-    // embed this verbatim into the tool_response.value field, which
-    // LiteRT-LM's Gemma 4 data processor renders as "<tool>{value:42}"
-    // in the text the model sees. See the Phase 1 ToolCallTest
-    // comments for the exact rendering details.
     return FString::Printf(TEXT("%lld"), Sum);
 }

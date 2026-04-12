@@ -18,7 +18,7 @@
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmAddNumbersTool.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
-#include "LiteRtLm/LiteRtLmTool.h"
+#include "LiteRtLm/LiteRtLmToolBase.h"
 
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -68,7 +68,7 @@ namespace
         {
             ULiteRtLmAddNumbersTool* Tool = NewObject<ULiteRtLmAddNumbersTool>();
             GAddNumbersTool = TStrongObjectPtr<ULiteRtLmAddNumbersTool>(Tool);
-            Subsys->RegisterTool(TScriptInterface<ILiteRtLmTool>(Tool));
+            Subsys->RegisterTool(Tool);
             UE_LOG(LogInoAgents, Log,
                    TEXT("ShowChatPanel: registered add_numbers tool"));
         }

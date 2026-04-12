@@ -39,7 +39,7 @@
 #include "LiteRtLm/LiteRtLmConversation.h"
 // FLiteRtLmModelConfig struct is in LiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/LiteRtLmSubsystem.h"
-#include "LiteRtLm/LiteRtLmTool.h"
+#include "LiteRtLm/LiteRtLmToolBase.h"
 
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -93,7 +93,7 @@ void UInoAgentsLiteRtLmConversationToolTestObserver::HandleModelLoaded(
     // Register the tool BEFORE creating the conversation — the
     // conversation snapshots the tool registry in its Initialize.
     Tool = NewObject<ULiteRtLmAddNumbersTool>();
-    Subsystem->RegisterTool(TScriptInterface<ILiteRtLmTool>(Tool));
+    Subsystem->RegisterTool(Tool);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationToolTest: creating conversation (should see 'constrained decoding ENABLED' next)"));

@@ -235,7 +235,7 @@ Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-o
            │       ElevenLabs: ApiKey, BaseUrl, DefaultModelId, OutputFormat
            │       LiteRT-LM → Models: array of {DisplayName, FileName, URL}
            │
-           ├─ ILiteRtLmTool            (Blueprintable UInterface)
+           ├─ ULiteRtLmToolBase         (Blueprintable abstract UObject base class)
            │
            ├─ UInoAgentsStreamingAudioComponent  (UAudioComponent subclass)
            │     plays PCM int16 / PCM float32 / MP3 bytes at runtime.
@@ -280,8 +280,8 @@ Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-o
 
 ### Tool calling flow
 
-1. A Blueprint class or C++ class implements `ILiteRtLmTool` with `GetToolName()`, `GetToolSchemaJson()` (OpenAI-style function-call schema), and `Execute(FString ArgumentsJson) → FString ResultJson`.
-2. `ULiteRtLmSubsystem::RegisterTool` validates the schema parses as JSON and that its `function.name` field matches `GetToolName()` before storing the tool in its internal `TMap<FName, TScriptInterface<ILiteRtLmTool>>`. Mismatched / unparseable schemas are rejected with a clear error log.
+1. A Blueprint or C++ class subclasses `ULiteRtLmToolBase`, sets `ToolName`, `Description`, and `Parameters` (array of `FLiteRtLmToolParameter`), and overrides `Execute(FString ArgumentsJson) → FString ResultJson`. The base class builds the OpenAI-style function-call JSON schema automatically from these properties via `BuildSchemaJson()`.
+2. `ULiteRtLmSubsystem::RegisterTool` validates the schema built from the tool's properties and checks that `function.name` matches `ToolName` before storing the tool in its internal `TMap<FName, TObjectPtr<ULiteRtLmToolBase>>`. Unparseable schemas are rejected with a clear error log.
 3. `ULiteRtLmSubsystem::CreateConversation` calls `BuildToolsJsonForConversation` which serialises every registered tool's schema into a JSON array via `FJsonSerializer::Serialize` with `TCondensedJsonPrintPolicy`. The array plus `enable_constrained_decoding=true` are passed to `litert_lm_conversation_config_create`. When no tools are registered, both are left at their defaults and the conversation behaves as a plain chat.
 4. When the model emits a tool call, LiteRT-LM delivers the chunk to the static C callback as an **OpenAI-compatible** envelope with `tool_calls` at the **top level** of the assistant message (NOT as a `content[*]` part):
    ```json
@@ -294,7 +294,7 @@ Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-o
 5. Tool-call entries are re-serialised (arguments sub-object → compact JSON string) and queued into `StreamPendingToolCalls`. Text from tool-call rounds is suppressed — `OnToken` only sees tokens from the final text-producing round, never intermediate tool-call JSON.
 6. When the round's `is_final` callback fires, the worker thread wakes from `StreamEvent->Wait`, sees non-empty `StreamPendingToolCalls`, and runs `ExecuteToolSynchronously` for each. That method:
    - Allocates a pooled `FEvent` (auto-reset).
-   - Dispatches an `AsyncTask` to the game thread that looks up the tool via `Subsystem->FindTool(ToolName)`, calls `ILiteRtLmTool::Execute_Execute(ToolObj, ArgsJson)` inside a try/catch, and triggers the `FEvent`.
+   - Dispatches an `AsyncTask` to the game thread that looks up the tool via `Subsystem->FindTool(ToolName)`, calls `Tool->Execute(ArgsJson)` inside a try/catch, and triggers the `FEvent`.
    - Blocks on the `FEvent`. The game thread is never blocked because the outer `SendMessageAsync` is already async.
    - Returns the result JSON string (or a `"\"ERROR: ...\""` literal if the tool was missing / the subsystem was GC'd / Execute threw).
 7. The worker builds a single `{"role":"tool","content":[{"type":"tool_response",...}, ...]}` message bundling every executed tool's result, sends that via a fresh `litert_lm_conversation_send_message_stream` on the **same** native conversation (reusing the KV cache), and loops back to round N+1.

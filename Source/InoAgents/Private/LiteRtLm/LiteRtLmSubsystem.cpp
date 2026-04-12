@@ -5,7 +5,7 @@
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
 #include "InoAgentsSettings.h"
-#include "LiteRtLm/LiteRtLmTool.h"
+#include "LiteRtLm/LiteRtLmToolBase.h"
 #include "LiteRtLm/LiteRtLmTypes.h"
 #include "UI/Slate/InoAgentsChatBridge.h"
 #include "UI/Slate/SInoAgentsChatPanel.h"
@@ -356,46 +356,34 @@ ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
 // Tool registry (D.4)
 // ----------------------------------------------------------------------
 
-void ULiteRtLmSubsystem::RegisterTool(TScriptInterface<ILiteRtLmTool> Tool)
+void ULiteRtLmSubsystem::RegisterTool(ULiteRtLmToolBase* Tool)
 {
     check(IsInGameThread());
 
-    // Defensive null check — TScriptInterface can carry a UObject with
-    // a null interface pointer if the UObject doesn't actually implement
-    // the interface. The second check catches that case.
-    UObject* const ToolObj = Tool.GetObject();
-    if (ToolObj == nullptr || Tool.GetInterface() == nullptr)
+    if (Tool == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: the supplied Tool is null or does not implement ILiteRtLmTool"));
+               TEXT("RegisterTool: the supplied Tool is null"));
         return;
     }
 
-    // Look up the tool's declared name via the Execute_* wrapper.
-    // ILiteRtLmTool is a BlueprintNativeEvent interface so we MUST
-    // go through the wrapper (ILiteRtLmTool::Execute_GetToolName),
-    // not the raw _Implementation — the wrapper handles both C++
-    // and Blueprint implementors.
-    const FName DeclaredName = ILiteRtLmTool::Execute_GetToolName(ToolObj);
+    const FName DeclaredName = Tool->ToolName;
     if (DeclaredName == NAME_None)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s returned NAME_None from GetToolName — "
+               TEXT("RegisterTool: tool %s has an empty ToolName — "
                     "every tool must have a unique non-empty name"),
-               *ToolObj->GetName());
+               *Tool->GetName());
         return;
     }
 
-    // Validate the schema: it must parse, and its function.name must
-    // match DeclaredName. Catching a mismatch here prevents the
-    // confusing downstream case where LiteRT-LM advertises a tool
-    // with name X to the model but our registry routes the resulting
-    // call to name Y.
-    const FString SchemaJson = ILiteRtLmTool::Execute_GetToolSchemaJson(ToolObj);
+    // Validate the schema built from the tool's properties. It must
+    // parse as JSON and its function.name must match ToolName.
+    const FString SchemaJson = Tool->BuildSchemaJson();
     if (SchemaJson.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s returned an empty schema from GetToolSchemaJson"),
+               TEXT("RegisterTool: tool %s produced an empty schema from BuildSchemaJson"),
                *DeclaredName.ToString());
         return;
     }
@@ -405,43 +393,31 @@ void ULiteRtLmSubsystem::RegisterTool(TScriptInterface<ILiteRtLmTool> Tool)
     if (!FJsonSerializer::Deserialize(SchemaReader, SchemaObj) || !SchemaObj.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s has a schema that does not parse as JSON. Schema was: %s"),
+               TEXT("RegisterTool: tool %s schema does not parse as JSON. Schema was: %s"),
                *DeclaredName.ToString(), *SchemaJson);
         return;
     }
 
+    // Verify function.name matches the declared ToolName.
     const TSharedPtr<FJsonObject>* FunctionObjPtr = nullptr;
-    if (!SchemaObj->TryGetObjectField(TEXT("function"), FunctionObjPtr)
-        || FunctionObjPtr == nullptr
-        || !FunctionObjPtr->IsValid())
+    if (SchemaObj->TryGetObjectField(TEXT("function"), FunctionObjPtr)
+        && FunctionObjPtr != nullptr
+        && FunctionObjPtr->IsValid())
     {
-        UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s schema is missing the top-level \"function\" object"),
-               *DeclaredName.ToString());
-        return;
+        FString SchemaName;
+        if ((*FunctionObjPtr)->TryGetStringField(TEXT("name"), SchemaName))
+        {
+            if (FName(*SchemaName) != DeclaredName)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("RegisterTool: tool %s schema name mismatch: "
+                            "ToolName==%s but schema function.name==%s. Refusing to register."),
+                       *Tool->GetName(), *DeclaredName.ToString(), *SchemaName);
+                return;
+            }
+        }
     }
 
-    FString SchemaName;
-    if (!(*FunctionObjPtr)->TryGetStringField(TEXT("name"), SchemaName))
-    {
-        UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s schema is missing function.name"),
-               *DeclaredName.ToString());
-        return;
-    }
-
-    if (FName(*SchemaName) != DeclaredName)
-    {
-        UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s has a schema name mismatch: "
-                    "GetToolName()==%s but schema function.name==%s. Refusing to register."),
-               *ToolObj->GetName(), *DeclaredName.ToString(), *SchemaName);
-        return;
-    }
-
-    // Warn on replacement so a developer notices double-registration
-    // bugs, but allow it — sometimes reregistration is intentional
-    // (e.g. Blueprint reload in the editor).
     if (Tools.Contains(DeclaredName))
     {
         UE_LOG(LogInoAgents, Warning,
@@ -474,13 +450,13 @@ void ULiteRtLmSubsystem::UnregisterTool(FName ToolName)
            *ToolName.ToString());
 }
 
-TScriptInterface<ILiteRtLmTool> ULiteRtLmSubsystem::FindTool(FName ToolName) const
+ULiteRtLmToolBase* ULiteRtLmSubsystem::FindTool(FName ToolName) const
 {
-    if (const TScriptInterface<ILiteRtLmTool>* Found = Tools.Find(ToolName))
+    if (const TObjectPtr<ULiteRtLmToolBase>* Found = Tools.Find(ToolName))
     {
         return *Found;
     }
-    return TScriptInterface<ILiteRtLmTool>();
+    return nullptr;
 }
 
 FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
@@ -489,44 +465,28 @@ FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
 
     if (Tools.Num() == 0)
     {
-        // Empty string is the signal to CreateConversation / Initialize
-        // that tools_json should be left NULL in the native config.
         return FString();
     }
 
-    // Build a JSON array of schema objects. Each schema was validated
-    // as parseable JSON at RegisterTool time, so here we just
-    // re-deserialise and stitch the objects into an array. We could
-    // in theory string-concat the raw schema JSON with commas between,
-    // but that would require extra care around trailing whitespace /
-    // comments inside schema strings; going through FJsonObject keeps
-    // the output canonical.
     TArray<TSharedPtr<FJsonValue>> SchemaArray;
     SchemaArray.Reserve(Tools.Num());
 
-    for (const TPair<FName, TScriptInterface<ILiteRtLmTool>>& Pair : Tools)
+    for (const TPair<FName, TObjectPtr<ULiteRtLmToolBase>>& Pair : Tools)
     {
-        UObject* const ToolObj = Pair.Value.GetObject();
-        if (ToolObj == nullptr)
+        ULiteRtLmToolBase* const Tool = Pair.Value;
+        if (Tool == nullptr)
         {
-            // Shouldn't happen — RegisterTool rejects nulls — but
-            // handle defensively in case something cleared the
-            // UObject behind our back.
             continue;
         }
 
-        const FString SchemaJson = ILiteRtLmTool::Execute_GetToolSchemaJson(ToolObj);
+        const FString SchemaJson = Tool->BuildSchemaJson();
 
         TSharedPtr<FJsonObject> SchemaObj;
         const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SchemaJson);
         if (!FJsonSerializer::Deserialize(Reader, SchemaObj) || !SchemaObj.IsValid())
         {
-            // Schema was valid at registration time; if it is no
-            // longer valid, the implementor changed it behind our
-            // back (e.g. a Blueprint tool whose schema is dynamic).
-            // Log and drop it.
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("BuildToolsJsonForConversation: tool \"%s\" schema no longer parses; dropping"),
+                   TEXT("BuildToolsJsonForConversation: tool \"%s\" schema does not parse; dropping"),
                    *Pair.Key.ToString());
             continue;
         }
@@ -539,8 +499,6 @@ FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
         return FString();
     }
 
-    // Condensed writer keeps the output a single compact line —
-    // smaller payload to pass through the C API and cleaner to log.
     FString OutJson;
     const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
         TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutJson);
