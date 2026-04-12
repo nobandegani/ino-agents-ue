@@ -111,8 +111,16 @@ public:
     // Runtime API
     // =============================================================
 
+    /** Extra context injected alongside every SendMessage. Updated
+     *  from Blueprint any time — player location, inventory, scene
+     *  state, etc. The model sees it but it doesn't pollute chat
+     *  history. Set to empty to clear. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
+    FString ExtraContext;
+
     /** Send a user message. The model streams a response, TTS
-     *  dispatches per-line, audio plays from this actor's position. */
+     *  dispatches per-line, audio plays from this actor's position.
+     *  ExtraContext is passed alongside automatically. */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void SendMessage(const FString& Text);
 

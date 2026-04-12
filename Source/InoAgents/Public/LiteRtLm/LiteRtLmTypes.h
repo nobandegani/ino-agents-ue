@@ -26,7 +26,64 @@ enum class ELiteRtLmBackend : uint8
 INOAGENTS_API const char* LiteRtLmBackendToString(ELiteRtLmBackend Backend);
 
 // ============================================================================
-// Model config (USTRUCT — replaces the old ULiteRtLmModelConfig UDataAsset)
+// Sampler + activation enums/structs
+// ============================================================================
+
+/** Sampling strategy for token selection. */
+UENUM(BlueprintType)
+enum class ELiteRtLmSamplerType : uint8
+{
+    /** Probabilistically pick among the top-k tokens. */
+    TopK    UMETA(DisplayName = "Top-K"),
+    /** Top-k first, then pick among tokens summing to >= p probability. */
+    TopP    UMETA(DisplayName = "Top-P"),
+    /** Always pick the highest-probability token (deterministic). */
+    Greedy  UMETA(DisplayName = "Greedy (deterministic)"),
+};
+
+/** Sampling parameters for token generation. */
+USTRUCT(BlueprintType)
+struct FLiteRtLmSamplerConfig
+{
+    GENERATED_BODY()
+
+    /** Sampling strategy. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    ELiteRtLmSamplerType Type = ELiteRtLmSamplerType::TopK;
+
+    /** Number of top tokens to consider (for TopK / TopP). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (ClampMin = "1"))
+    int32 TopK = 40;
+
+    /** Cumulative probability threshold (for TopP). 0..1. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float TopP = 0.95f;
+
+    /** Temperature. 0 = greedy, <1 = focused, 1 = neutral, >1 = creative. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float Temperature = 0.8f;
+
+    /** RNG seed for reproducible sampling. <0 = non-deterministic. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    int32 Seed = -1;
+};
+
+/** Activation precision for inference. Lower = faster + less RAM but
+ *  more quantization noise. */
+UENUM(BlueprintType)
+enum class ELiteRtLmActivationType : uint8
+{
+    F32  UMETA(DisplayName = "Float32 (full precision)"),
+    F16  UMETA(DisplayName = "Float16 (half precision)"),
+    I16  UMETA(DisplayName = "Int16"),
+    I8   UMETA(DisplayName = "Int8 (most quantized)"),
+};
+
+// ============================================================================
+// Model config
 // ============================================================================
 
 /**
@@ -39,11 +96,9 @@ struct FLiteRtLmModelConfig
 {
     GENERATED_BODY()
 
-    /** Filename of the .litertlm model file. Resolved at load time by
-     *  checking PersistentDownloadDir/InoAgents/Models/ first, then
-     *  the plugin's Models/ directory as a legacy fallback. If not
-     *  found anywhere, the agent component downloads it from the URL
-     *  configured in Project Settings → Plugins → InoAgents LiteRT-LM. */
+    // ----- Model file + backend -----
+
+    /** Filename of the .litertlm model file. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
     FString ModelFileName = TEXT("gemma-4-E4B-it.litertlm");
 
@@ -51,16 +106,43 @@ struct FLiteRtLmModelConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
     ELiteRtLmBackend Backend = ELiteRtLmBackend::Cpu;
 
-    /** Upper bound on tokens per decode step. 0 = engine default. */
+    /** Engine-level token budget (KV cache size). 0 = engine default. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
               meta = (ClampMin = "0"))
     int32 MaxNumTokens = 0;
 
-    /** System message applied to conversations. Plain text — the
-     *  subsystem wraps it for the native API internally. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+    // ----- Conversation -----
+
+    /** System prompt. Plain text — wrapped for the native API internally. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
               meta = (MultiLine = true))
     FString SystemMessage;
+
+    /** Sampling parameters: temperature, top-k, top-p, seed. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation")
+    FLiteRtLmSamplerConfig Sampler;
+
+    /** Max tokens per response. 0 = unlimited. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
+              meta = (ClampMin = "0"))
+    int32 MaxOutputTokens = 0;
+
+    /** Pre-populated conversation history as a JSON array. Empty = none.
+     *  Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+     *  Useful for resuming saved conversations or seeding backstory. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
+              meta = (MultiLine = true))
+    FString InitialMessages;
+
+    // ----- Engine optimization -----
+
+    /** Activation precision. Lower = faster + less RAM. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
+    ELiteRtLmActivationType ActivationType = ELiteRtLmActivationType::F32;
+
+    /** Custom XNNPACK cache directory. Empty = default (next to model file). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
+    FString CacheDir;
 };
 
 /**

@@ -112,17 +112,52 @@ void ULiteRtLmConversation::Initialize(
         }
     }
 
-    // Create the native conversation config. D.4 passes tools_json
-    // and enable_constrained_decoding when the subsystem has
-    // registered tools; otherwise both stay in their D.3 defaults
-    // (null / false) and the conversation behaves as a plain chat.
+    // Build a session config with sampler params + max output tokens.
+    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
+    if (SessionConfig != nullptr)
+    {
+        // Sampler params.
+        LiteRtLmSamplerParams NativeSampler = {};
+        switch (InConfig.Sampler.Type)
+        {
+            case ELiteRtLmSamplerType::TopK:   NativeSampler.type = kTopK;   break;
+            case ELiteRtLmSamplerType::TopP:   NativeSampler.type = kTopP;   break;
+            case ELiteRtLmSamplerType::Greedy: NativeSampler.type = kGreedy; break;
+            default:                           NativeSampler.type = kTopK;   break;
+        }
+        NativeSampler.top_k       = InConfig.Sampler.TopK;
+        NativeSampler.top_p       = InConfig.Sampler.TopP;
+        NativeSampler.temperature = InConfig.Sampler.Temperature;
+        NativeSampler.seed        = InConfig.Sampler.Seed >= 0 ? InConfig.Sampler.Seed : 0;
+        litert_lm_session_config_set_sampler_params(SessionConfig, &NativeSampler);
+
+        // Max output tokens per response.
+        if (InConfig.MaxOutputTokens > 0)
+        {
+            litert_lm_session_config_set_max_output_tokens(
+                SessionConfig, InConfig.MaxOutputTokens);
+        }
+    }
+
+    // Pre-populated conversation history (messages_json).
+    const FTCHARToUTF8 MessagesJsonUtf8(*InConfig.InitialMessages);
+    const char* const MessagesCStr =
+        InConfig.InitialMessages.IsEmpty() ? nullptr : MessagesJsonUtf8.Get();
+
+    // Create the native conversation config.
     LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create(
         InEngine,
-        /*session_config=*/              nullptr,
+        /*session_config=*/              SessionConfig,
         /*system_message_json=*/         SystemMessageCStr,
         /*tools_json=*/                  ToolsJsonCStr,
-        /*messages_json=*/               nullptr,
+        /*messages_json=*/               MessagesCStr,
         /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
+
+    // Session config can be freed after conversation_config_create.
+    if (SessionConfig != nullptr)
+    {
+        litert_lm_session_config_delete(SessionConfig);
+    }
 
     // Free the heap UTF-8 converter — the C API has already read
     // the string by the time conversation_config_create returns.
@@ -181,7 +216,8 @@ void ULiteRtLmConversation::Initialize(
     }
 }
 
-void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
+void ULiteRtLmConversation::SendMessageAsync(
+    const FString& UserText, const FString& ExtraContext)
 {
     check(IsInGameThread());
 
@@ -200,7 +236,7 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
     // completing, the buffer may be non-empty.)
     SentenceBuffer.Empty();
 
-    Worker->EnqueueMessage(UserText);
+    Worker->EnqueueMessage(UserText, ExtraContext);
 }
 
 void ULiteRtLmConversation::Cancel()

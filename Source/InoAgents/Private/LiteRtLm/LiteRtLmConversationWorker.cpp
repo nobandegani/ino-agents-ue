@@ -152,9 +152,9 @@ FLiteRtLmConversationWorker::~FLiteRtLmConversationWorker()
            TEXT("FLiteRtLmConversationWorker: destroyed"));
 }
 
-void FLiteRtLmConversationWorker::EnqueueMessage(FString UserText)
+void FLiteRtLmConversationWorker::EnqueueMessage(FString UserText, FString ExtraContext)
 {
-    MessageQueue.Enqueue(MoveTemp(UserText));
+    MessageQueue.Enqueue({ MoveTemp(UserText), MoveTemp(ExtraContext) });
     if (QueueEvent)
     {
         QueueEvent->Trigger();
@@ -191,10 +191,10 @@ uint32 FLiteRtLmConversationWorker::Run()
 {
     while (!bStopRequested)
     {
-        FString UserText;
-        if (MessageQueue.Dequeue(UserText))
+        FPendingMessage Msg;
+        if (MessageQueue.Dequeue(Msg))
         {
-            ProcessMessage(UserText);
+            ProcessMessage(Msg.UserText, Msg.ExtraContext);
         }
         else
         {
@@ -218,7 +218,8 @@ void FLiteRtLmConversationWorker::Stop()
     }
 }
 
-void FLiteRtLmConversationWorker::ProcessMessage(const FString& UserText)
+void FLiteRtLmConversationWorker::ProcessMessage(
+    const FString& UserText, const FString& ExtraContext)
 {
     if (NativeConversation == nullptr)
     {
@@ -255,7 +256,11 @@ void FLiteRtLmConversationWorker::ProcessMessage(const FString& UserText)
     for (int32 Round = 0; Round < kMaxAgentLoopRounds; ++Round)
     {
         // --- Run the stream for this round ---
-        if (!RunOneStreamRound(CurrentMessageJson))
+        // Pass ExtraContext only on round 0 (the user's message).
+        // Subsequent rounds are tool-result messages where extra
+        // context isn't meaningful.
+        const FString& RoundContext = (Round == 0) ? ExtraContext : FString();
+        if (!RunOneStreamRound(CurrentMessageJson, RoundContext))
         {
             // RunOneStreamRound populates StreamError on failure
             // (stream failed to start). Dispatch and bail.
@@ -351,7 +356,8 @@ void FLiteRtLmConversationWorker::ProcessMessage(const FString& UserText)
         kMaxAgentLoopRounds));
 }
 
-bool FLiteRtLmConversationWorker::RunOneStreamRound(const FString& MessageJson)
+bool FLiteRtLmConversationWorker::RunOneStreamRound(
+    const FString& MessageJson, const FString& ExtraContextForRound)
 {
     // Reset per-round state BEFORE calling into LiteRT-LM. StreamEvent
     // is manual-reset, so we must clear any leftover signal from the
@@ -372,10 +378,16 @@ bool FLiteRtLmConversationWorker::RunOneStreamRound(const FString& MessageJson)
 
     bStreamInFlight = true;
 
+    // Extra context is passed as a plain string (like system message).
+    // The C API parses it as JSON; if that fails, it uses the raw string.
+    const FTCHARToUTF8 ExtraContextUtf8(*ExtraContextForRound);
+    const char* const ExtraContextCStr =
+        ExtraContextForRound.IsEmpty() ? nullptr : ExtraContextUtf8.Get();
+
     const int StartRc = litert_lm_conversation_send_message_stream(
         NativeConversation,
         MessageJsonUtf8.Get(),
-        /*extra_context=*/ nullptr,
+        /*extra_context=*/ ExtraContextCStr,
         &FLiteRtLmConversationWorker::OnStreamChunkStatic,
         /*callback_data=*/ this);
 

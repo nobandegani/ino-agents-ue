@@ -159,16 +159,21 @@ void ULiteRtLmSubsystem::ProceedWithLoad(
     const FString& ModelPath, const FOnLiteRtLmModelLoaded& OnLoaded)
 {
     TWeakObjectPtr<ULiteRtLmSubsystem> WeakThis(this);
-    const FString                     ModelPathCopy = ModelPath;
-    const ELiteRtLmBackend            BackendCopy   = LoadedConfig.Backend;
-    const double                      TStart        = FPlatformTime::Seconds();
+    const FString                       ModelPathCopy   = ModelPath;
+    const ELiteRtLmBackend              BackendCopy     = LoadedConfig.Backend;
+    const int32                         MaxNumTokens    = LoadedConfig.MaxNumTokens;
+    const ELiteRtLmActivationType       ActivationType  = LoadedConfig.ActivationType;
+    const FString                       CacheDirCopy    = LoadedConfig.CacheDir;
+    const double                        TStart          = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: dispatching async load of %s (backend=%s)"),
-           *ModelPathCopy, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)));
+           TEXT("LoadModelAsync: dispatching async load of %s (backend=%s, activation=%d)"),
+           *ModelPathCopy, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)),
+           static_cast<int32>(ActivationType));
 
     Async(EAsyncExecution::ThreadPool,
-        [ModelPathCopy, BackendCopy, WeakThis, OnLoaded, TStart]()
+        [ModelPathCopy, BackendCopy, MaxNumTokens, ActivationType,
+         CacheDirCopy, WeakThis, OnLoaded, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -191,6 +196,25 @@ void ULiteRtLmSubsystem::ProceedWithLoad(
 
         FString          LocalError;
         LiteRtLmEngine*  NewEngine = nullptr;
+
+        if (NewSettings != nullptr)
+        {
+            // Apply engine-level settings from the model config.
+            if (MaxNumTokens > 0)
+            {
+                litert_lm_engine_settings_set_max_num_tokens(NewSettings, MaxNumTokens);
+            }
+            if (ActivationType != ELiteRtLmActivationType::F32)
+            {
+                litert_lm_engine_settings_set_activation_data_type(
+                    NewSettings, static_cast<int>(ActivationType));
+            }
+            if (!CacheDirCopy.IsEmpty())
+            {
+                const FTCHARToUTF8 CacheDirUtf8(*CacheDirCopy);
+                litert_lm_engine_settings_set_cache_dir(NewSettings, CacheDirUtf8.Get());
+            }
+        }
 
         if (NewSettings == nullptr)
         {

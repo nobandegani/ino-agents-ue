@@ -105,7 +105,8 @@ public:
      * Blueprint or C++ never see off-thread delegates.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
-    void SendMessageAsync(const FString& UserText);
+    void SendMessageAsync(const FString& UserText,
+                          const FString& ExtraContext = FString());
 
     /**
      * Cancel the in-flight stream, if any. Safe to call at any time

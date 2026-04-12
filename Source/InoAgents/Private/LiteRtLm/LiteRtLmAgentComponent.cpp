@@ -152,7 +152,7 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
         OnError.Broadcast(TEXT("No conversation — call LoadModel first"));
         return;
     }
-    Conversation->SendMessageAsync(Text);
+    Conversation->SendMessageAsync(Text, ExtraContext);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::Cancel()

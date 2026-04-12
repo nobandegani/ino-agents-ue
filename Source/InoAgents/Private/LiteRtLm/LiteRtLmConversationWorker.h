@@ -103,7 +103,7 @@ public:
      * the game thread; the worker thread consumes from the same queue.
      * Triggers the queue event to wake the worker if it was idle.
      */
-    void EnqueueMessage(FString UserText);
+    void EnqueueMessage(FString UserText, FString ExtraContext = FString());
 
     /**
      * Snapshot of the in-flight flag. Reads the atomic so it is safe
@@ -159,7 +159,7 @@ private:
      * calls and loops to the next round, or dispatches OnComplete
      * with the final text. Runs on the worker thread.
      */
-    void ProcessMessage(const FString& UserText);
+    void ProcessMessage(const FString& UserText, const FString& ExtraContext);
 
     /**
      * Run ONE round of the agent loop: reset per-round state, call
@@ -173,7 +173,8 @@ private:
      * stream failed to start (in which case StreamError is
      * populated and the caller should dispatch OnError).
      */
-    bool RunOneStreamRound(const FString& MessageJson);
+    bool RunOneStreamRound(const FString& MessageJson,
+                           const FString& ExtraContextForRound);
 
     /**
      * Execute a single tool call on the game thread and return the
@@ -245,8 +246,14 @@ private:
     LiteRtLmConversation*       NativeConversation       = nullptr;
     LiteRtLmConversationConfig* NativeConversationConfig = nullptr;
 
+    struct FPendingMessage
+    {
+        FString UserText;
+        FString ExtraContext;
+    };
+
     // SPSC queue: game thread produces, worker thread consumes.
-    TQueue<FString, EQueueMode::Spsc> MessageQueue;
+    TQueue<FPendingMessage, EQueueMode::Spsc> MessageQueue;
 
     // Event used to wake the worker when a new message is enqueued or
     // when Stop() is called. Created from the UE event pool; returned
