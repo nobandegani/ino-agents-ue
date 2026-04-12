@@ -119,7 +119,7 @@ void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleModelLoaded(
     // SendMessageAsync call — there may be a few milliseconds between
     // "test started" (StartTime) and "stream started" (FirstTokenTime
     // is the real per-chunk baseline, populated inside HandleToken).
-    Conversation->SendMessageAsync(Prompt);
+    Conversation->SendMessageAsync(Prompt, FString());
 }
 
 void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleToken(FString Chunk)

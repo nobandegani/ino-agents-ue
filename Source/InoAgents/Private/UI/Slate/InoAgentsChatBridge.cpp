@@ -59,7 +59,7 @@ void UInoAgentsChatBridge::SendUserMessage(const FString& Text)
         Panel->SetStreaming(true);
     }
 
-    Conversation->SendMessageAsync(Text);
+    Conversation->SendMessageAsync(Text, FString());
 }
 
 void UInoAgentsChatBridge::CancelStream()

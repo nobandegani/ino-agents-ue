@@ -120,7 +120,7 @@ void UInoAgentsLiteRtLmConversationToolTestObserver::HandleModelLoaded(
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationToolTest: sending prompt: \"%s\""), *Prompt);
 
-    Conversation->SendMessageAsync(Prompt);
+    Conversation->SendMessageAsync(Prompt, FString());
 }
 
 void UInoAgentsLiteRtLmConversationToolTestObserver::HandleToken(FString Chunk)
