@@ -84,6 +84,13 @@ public:
               meta = (ClampMin = "0", ClampMax = "5000"))
     int32 PauseDurationMs = 500;
 
+    /** How long the Interrupted status lasts (seconds) before
+     *  transitioning to Thinking. 0 = instant (no delay). Use this
+     *  to play an interruption animation or sound effect. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent",
+              meta = (ClampMin = "0.0", ClampMax = "5.0"))
+    float InterruptionDelaySec = 0.0f;
+
     /** How many ms of audio to buffer before starting playback.
      *  Higher = smoother start, lower = faster first word.
      *  Set via Initialize or directly on the child audio component. */
@@ -267,6 +274,11 @@ private:
     /** Set status and broadcast OnStatusChanged if it actually changed. */
     void SetStatus(EInoAgentsAgentStatus NewStatus);
 
+    /** Pending message held during interruption delay. */
+    FString PendingInterruptMessage;
+    FTimerHandle InterruptionTimerHandle;
+    void OnInterruptionDelayFinished();
+
     // Delegate trampolines.
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
     UFUNCTION() void HandleToken(FString RawText, FString CleanText);
@@ -276,6 +288,7 @@ private:
     UFUNCTION() void HandleError(FString ErrorMessage);
     UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
     UFUNCTION() void HandleAudioReadyToPlay();
+    UFUNCTION() void HandleAudioPlaybackFinished();
     UFUNCTION() void HandleAudioFinished();
     UFUNCTION() void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 

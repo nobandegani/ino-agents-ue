@@ -9,7 +9,9 @@
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "TimerManager.h"
 
 UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
     const FObjectInitializer& ObjectInitializer)
@@ -45,6 +47,11 @@ void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 
 void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 {
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(InterruptionTimerHandle);
+    }
+
     if (DialogueQueue != nullptr)
     {
         DialogueQueue->Clear();
@@ -165,23 +172,53 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
         return;
     }
 
-    // If the agent was talking, mark as interrupted before transitioning
-    // to thinking. The Interrupted state is transient — it fires as a
-    // broadcast so listeners can react (e.g. play an interruption sound),
-    // then immediately transitions to Thinking.
-    if (Status == EInoAgentsAgentStatus::Talking)
-    {
-        SetStatus(EInoAgentsAgentStatus::Interrupted);
-    }
-
     // Stop any in-progress audio from the previous response.
     if (DialogueQueue != nullptr)
     {
         DialogueQueue->StopAndReset();
     }
 
+    // If the agent was talking, mark as interrupted. If there's a
+    // delay configured, hold in Interrupted state for that duration
+    // before transitioning to Thinking and sending the message.
+    if (Status == EInoAgentsAgentStatus::Talking && InterruptionDelaySec > 0.0f)
+    {
+        SetStatus(EInoAgentsAgentStatus::Interrupted);
+        PendingInterruptMessage = Text;
+
+        if (UWorld* World = GetWorld())
+        {
+            World->GetTimerManager().ClearTimer(InterruptionTimerHandle);
+            World->GetTimerManager().SetTimer(
+                InterruptionTimerHandle,
+                this,
+                &UInoAgentsLiteRtLmAgentComponent::OnInterruptionDelayFinished,
+                InterruptionDelaySec,
+                /*bLoop=*/ false);
+        }
+        return;
+    }
+
+    // No delay (or wasn't talking) — go straight to Thinking.
+    if (Status == EInoAgentsAgentStatus::Talking)
+    {
+        SetStatus(EInoAgentsAgentStatus::Interrupted);
+    }
     SetStatus(EInoAgentsAgentStatus::Thinking);
     Conversation->SendMessageAsync(Text);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::OnInterruptionDelayFinished()
+{
+    if (Conversation == nullptr)
+    {
+        SetStatus(EInoAgentsAgentStatus::Idle);
+        return;
+    }
+
+    const FString Message = MoveTemp(PendingInterruptMessage);
+    SetStatus(EInoAgentsAgentStatus::Thinking);
+    Conversation->SendMessageAsync(Message);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::Cancel()
@@ -295,10 +332,18 @@ void UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay()
     SetStatus(EInoAgentsAgentStatus::Talking);
 }
 
-void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
+void UInoAgentsLiteRtLmAgentComponent::HandleAudioPlaybackFinished()
 {
+    // Audio component has fully drained — no more sound playing.
     SetStatus(EInoAgentsAgentStatus::Idle);
     OnAudioFinished.Broadcast();
+}
+
+void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
+{
+    // DialogueQueue::OnAllComplete — all TTS slots processed and audio
+    // queued. Audio may still be playing. Don't set Idle here — wait
+    // for HandleAudioPlaybackFinished (AudioComp::OnFinished) instead.
 }
 
 void UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress(
@@ -351,6 +396,8 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         AudioComp->PreBufferMs = PreBufferMs;
         AudioComp->OnReadyToPlay.AddDynamic(
             this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay);
+        AudioComp->OnFinished.AddDynamic(
+            this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioPlaybackFinished);
     }
 
     // Create and initialize the dialogue queue.
