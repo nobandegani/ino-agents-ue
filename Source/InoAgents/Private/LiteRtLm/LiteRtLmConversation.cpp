@@ -128,7 +128,13 @@ void ULiteRtLmConversation::Initialize(
         NativeSampler.top_k       = InConfig.Sampler.TopK;
         NativeSampler.top_p       = InConfig.Sampler.TopP;
         NativeSampler.temperature = InConfig.Sampler.Temperature;
-        NativeSampler.seed        = InConfig.Sampler.Seed >= 0 ? InConfig.Sampler.Seed : 0;
+        // The native sampler uses std::default_random_engine(seed) —
+        // seed=0 is deterministic (same output every time). When the
+        // user wants non-deterministic output (Seed<0), pass a random
+        // value so each conversation gets a different sequence.
+        NativeSampler.seed        = InConfig.Sampler.Seed >= 0
+            ? InConfig.Sampler.Seed
+            : FMath::Rand();
         litert_lm_session_config_set_sampler_params(SessionConfig, &NativeSampler);
 
         // Max output tokens per response.
