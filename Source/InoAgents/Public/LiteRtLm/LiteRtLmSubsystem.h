@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UObject/ScriptInterface.h"
@@ -268,14 +269,19 @@ private:
     bool bLoadInFlight = false;
 
     // Download state — used when LoadModelAsync needs to fetch the model.
+    // Writes chunks directly to disk via IFileHandle to avoid buffering
+    // 3+ GB in a TArray (which overflows int32 and crashes).
     FHttpRequestPtr DownloadRequest;
     FString         PendingDownloadTargetPath;
     FOnLiteRtLmModelLoaded PendingOnLoaded;
+    IFileHandle*    DownloadFileHandle = nullptr;
+    uint64          DownloadLastWriteOffset = 0;
 
     void StartDownload(const FString& Url, const FString& TargetPath,
                        const FOnLiteRtLmModelLoaded& OnLoaded);
     void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
     void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void CleanupDownload();
     void ProceedWithLoad(const FString& ModelPath, const FOnLiteRtLmModelLoaded& OnLoaded);
 
     // Weak ref to the most recently created conversation. Used to enforce
