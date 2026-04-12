@@ -33,7 +33,7 @@ Two C API features are declared in the header and compile but fail at runtime wi
 
 2. **Activation data type (F16/I16/I8).** `litert_lm_engine_settings_set_activation_data_type` with non-F32 values loads the engine successfully (model file loads, XNNPACK cache regenerates), but `litert_lm_conversation_send_message_stream` returns error 13 (`absl::StatusCode::kInternal`) at runtime. This is corroborated by the upstream source: `engine.cc:332-338` force-overrides activation to F32 for GPU backends, and a TODO bug (`b/433590109`) acknowledges FP16 GPU incompatibilities. For CPU, the XNNPACK delegate configuration likely fails when model tensors don't match the requested activation format. **Workaround:** default `ActivationType` to `F32`. The enum and field exist in `FLiteRtLmModelConfig` for forward-compatibility but should not be changed from F32 until a future LiteRT-LM release fixes this. If a user has previously loaded a model with F16 and gets error 13, deleting the XNNPACK cache (next to the model file, or in the custom CacheDir) forces regeneration with F32.
 
-Both limitations were discovered empirically during Milestone D+ development. When upgrading LiteRT-LM, re-test these two features first — they are the most impactful unlocks (lower RAM via F16, creative control via temperature).
+Both limitations were discovered empirically during development. When upgrading LiteRT-LM, re-test these two features first — they are the most impactful unlocks (lower RAM via F16, creative control via temperature).
 
 ## Integration approach: link, not subprocess
 
@@ -186,7 +186,7 @@ A developer machine needs all of the following before `scripts/build-win64.ps1` 
 
 The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and should be the first thing a new dev runs.
 
-## UE-side integration architecture (Milestone D)
+## UE-side integration architecture
 
 The UE-facing API lives under `Source/InoAgents/Public/LiteRtLm/` and `Private/LiteRtLm/`. Names are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin will host multiple backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit.
 
@@ -276,7 +276,7 @@ Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-o
 - **One worker per conversation.** LiteRT-LM conversations are stateful (KV cache) and not thread-safe. Concurrent conversations mean multiple native conversations, each with its own pinned worker thread. LiteRT-LM also appears to reject creating a second native conversation on the same engine while a prior one is still alive, so tests that run back-to-back must call `Conversation->Shutdown()` (synchronous worker teardown) before constructing the next one. `CollectGarbage` from inside a delegate handler is NOT a valid substitute — parallel GC workers racing the in-flight delegate's write access trigger `FMRSWRecursiveAccessDetector` ensure fires (learned the hard way during D.3).
 - **Never call inference from `Tick`.** Not even once.
 
-### Tool calling flow (Milestone D.4)
+### Tool calling flow
 
 1. A Blueprint class or C++ class implements `ILiteRtLmTool` with `GetToolName()`, `GetToolSchemaJson()` (OpenAI-style function-call schema), and `Execute(FString ArgumentsJson) → FString ResultJson`.
 2. `ULiteRtLmSubsystem::RegisterTool` validates the schema parses as JSON and that its `function.name` field matches `GetToolName()` before storing the tool in its internal `TMap<FName, TScriptInterface<ILiteRtLmTool>>`. Mismatched / unparseable schemas are rejected with a clear error log.
@@ -301,15 +301,15 @@ Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-o
 
 **Why this is not a deadlock trap.** Tools are executed via AsyncTask on the game thread while the worker blocks on an `FEvent`. The game thread itself is not blocked — `SendMessageAsync` has already returned control to the caller, so the game thread is free to run ticks, process more AsyncTasks, and eventually execute the tool. The worker wakes up when the tool is done.
 
-**Deferred tool results.** `ULiteRtLmConversation::SubmitDeferredToolResult` is declared in the public API but stubbed in Milestone D.4 — it logs a warning and is a no-op. A future milestone will wire it through the worker's agent loop so tools that need to do their own async work (network, disk I/O, user confirmation dialogs) can unblock the worker with a fresh result later. The method exists in the header now so Blueprint consumers can wire it up ahead of the implementation landing.
+**Deferred tool results.** `ULiteRtLmConversation::SubmitDeferredToolResult` is declared in the public API but currently stubbed — it logs a warning and is a no-op. A future update will wire it through the worker's agent loop so tools that need to do their own async work (network, disk I/O, user confirmation dialogs) can unblock the worker with a fresh result later. The method exists in the header now so Blueprint consumers can wire it up ahead of the implementation landing.
 
 ## Smoke tests
 
-Development-time console commands. Two groups: the Phase 1 group exercises the native C API directly (no UObjects), and the Milestone D group exercises the UE-facing API surface end-to-end through PIE. Both groups stay in the codebase so a regression in either layer can be diagnosed without the other being a suspect.
+Development-time console commands. Two groups: the Phase 1 group exercises the native C API directly (no UObjects), and the UE API group exercises the UE-facing API surface end-to-end through PIE. Both groups stay in the codebase so a regression in either layer can be diagnosed without the other being a suspect.
 
 Both groups live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
 
-Invoke from the editor's Output Log command input. Milestone D tests require **PIE** (the subsystem is a `UGameInstanceSubsystem`), Phase 1 tests do not.
+Invoke from the editor's Output Log command input. UE API tests require **PIE** (the subsystem is a `UGameInstanceSubsystem`), Phase 1 tests do not.
 
 ### Phase 1 — native C API layer (no UE API)
 
@@ -323,7 +323,7 @@ Invoke from the editor's Output Log command input. Milestone D tests require **P
 
 All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2–15 s). They resolve the default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoAgentsSmokeTest::ResolveDefaultModelPath()` and call the LiteRT-LM C API directly — no UObjects, no subsystem, no conversations. Their purpose is to prove the native integration works independently of the UE API layer.
 
-### Milestone D — UE-facing API
+### UE-facing API
 
 | Command | What it proves | PIE? |
 |---|---|---|
@@ -345,34 +345,11 @@ To add a new smoke test, drop a new `.cpp` (and optional `.h` for observer UCLAS
 
 Smoke tests are compiled into every build configuration. For now they're gated behind console commands and never run unless explicitly invoked. If any individual test grows shipping-sensitive logic, wrap that file in `#if !UE_BUILD_SHIPPING` as a follow-up change.
 
-## Milestone plan
+## Platform support
 
-Two independent axes of progress: **UE API milestones** (A → D → E → ...) which build up the UObject / Blueprint surface, and **platform phases** (1 → 5) which port the Bazel build and `InoAgentsLibrary.Build.cs` to new targets.
+Currently **Windows (Win64, MSVC)** only. CPU inference works end-to-end. GPU path (`//c:engine`) builds but is untested — swap the Bazel target when enabling.
 
-### UE API milestones
-
-| Milestone | Status | What it delivered |
-|---|---|---|
-| A — Phase 1 native bring-up | ✅ done | `InoAgents.LoadEngineTest`, `GenerateTest`, `ConversationTest`. Proves the C API works via raw smoke tests. |
-| B — Tool calling at the C API layer | ✅ done | `InoAgents.ToolCallTest`. Full agent loop using `litert_lm_conversation_*` directly, no UObjects. |
-| C — Non-blocking streaming | ✅ done | `InoAgents.StreamTest`. First worker → game-thread marshaling via `AsyncTask`; template for Milestone D's worker. |
-| **D** — UE-facing API | ✅ done | `ULiteRtLmSubsystem`, `ULiteRtLmConversation`, `FLiteRtLmModelConfig` (USTRUCT), `ILiteRtLmTool`, `ULiteRtLmAddNumbersTool`. Five `InoAgents.LiteRtLm.*` smoke tests validate the full surface in PIE. |
-| **D+** — Agent component + integrations | ✅ done | `UInoAgentsLiteRtLmAgentComponent` (all-in-one scene component), `UInoAgentsStreamingAudioComponent` (MP3/PCM playback via bundled minimp3), `UInoAgentsLiteRtLmDialogueQueue` (ordered TTS with pauses), `UElevenLabsSubsystem` + `UElevenLabsTextToDialogueStream` (ElevenLabs HTTP client), `UInoAgentsSettings` (unified Project Settings), model auto-download, `OnSentence(RawText,CleanText)` + `OnNewLine` delegates, system message format fix, Slate chat panel (`ShowChatPanel`/`HideChatPanel`). |
-| E — TBD | ⏳ pending | Possible scope: deferred-tool-result state machine (wire through `SubmitDeferredToolResult`), multi-conversation concurrency, ElevenLabs TTS phase 2 (single-voice), STT phase 3, SHA-256 model verification. |
-
-### Platform phases
-
-Five platform phases. Every phase ships the same UE API from Milestone D and the same Bazel recipe — only the `InoAgentsLibrary.Build.cs` branch and the Bazel build config differ.
-
-| Phase | Platform | Notes |
-|---|---|---|
-| **1** | **Windows (Win64, MSVC)** | ✅ in progress. CPU inference works end-to-end. GPU path (`//c:engine`) builds but is untested with the Milestone D API — swap the Bazel target when enabling. |
-| 2 | Android | `--config=android_arm64` already exists in upstream `.bazelrc`. Port `InoAgentsLibrary.Build.cs` with an `Android` branch. |
-| 3 | iOS | `--config=ios_arm64` already exists in upstream `.bazelrc`. Port Build.cs with an `IOS` branch. |
-| 4 | Linux | Port Build.cs with a `Linux` branch. |
-| 5 | macOS | `build:macos_arm64` already exists. Port Build.cs with a `Mac` branch. |
-
-No backend abstraction layer. LiteRT-LM is the one backend, and its public C API is identical on every platform.
+Future platforms (Android, iOS, Linux, macOS) each require porting `InoAgentsLibrary.Build.cs` with a platform branch. Upstream `.bazelrc` already has `--config=android_arm64`, `--config=ios_arm64`, and `build:macos_arm64`. The UE API and Bazel recipe are identical across platforms — only the Build.cs branch differs.
 
 ## Windows gotchas
 
