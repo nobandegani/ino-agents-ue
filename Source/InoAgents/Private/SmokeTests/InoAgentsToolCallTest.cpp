@@ -139,8 +139,14 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
         }
     ])";
 
+    // Pass system message as PLAIN TEXT (not a JSON object). The C API
+    // tries to JSON-parse the string; if parsing fails, it uses the raw
+    // string as-is in {"role":"system","content":"<raw_string>"}. Gemma 4's
+    // chat template expects content to be a string — passing a JSON object
+    // like {"type":"text","text":"..."} produces an object that the template
+    // silently drops (neither the string nor the sequence branch matches).
     const char* const SystemMessageJsonCStr =
-        R"({"type":"text","text":"You are a helpful assistant with access to tools. When a user asks you to perform arithmetic, you MUST call the add_numbers tool to compute it rather than calculating in your head. When you receive a tool result, use its value directly in your answer."})";
+        "You are a helpful assistant with access to tools. When a user asks you to perform arithmetic, you MUST call the add_numbers tool to compute it rather than calculating in your head. When you receive a tool result, use its value directly in your answer.";
 
     // --- UTF-8 buffer for the model path ---
     const FTCHARToUTF8 ModelPathUtf8(*ModelPath);

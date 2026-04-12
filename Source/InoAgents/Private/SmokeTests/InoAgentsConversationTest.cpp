@@ -65,9 +65,12 @@ static void RunConversationSmokeTest(const TArray<FString>& Args)
 
     UE_LOG(LogInoAgents, Verbose, TEXT("  message_json: %s"), *MessageJson);
 
-    // Canonical system message format (from LiteRT-LM's own tests).
+    // Pass system message as PLAIN TEXT. The C API's JSON parse will
+    // fail on a raw string, so it falls back to using it as-is in
+    // {"role":"system","content":"<raw_string>"}. Gemma 4's template
+    // expects content to be a string — JSON objects are silently dropped.
     const char* const SystemMessageJsonCStr =
-        R"({"type":"text","text":"You are a helpful assistant. Answer concisely."})";
+        "You are a helpful assistant. Answer concisely.";
 
     // --- Load engine ---
     const double T0 = FPlatformTime::Seconds();
