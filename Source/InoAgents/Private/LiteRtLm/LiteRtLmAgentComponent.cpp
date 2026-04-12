@@ -6,7 +6,6 @@
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmSetEmotionTool.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/GameInstance.h"
@@ -323,8 +322,48 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToken(FString RawText, FString Clea
     OnToken.Broadcast(RawText, CleanText);
 }
 
+namespace
+{
+    bool TryParseEmotion(const FString& Text, EInoAgentsEmotion& OutEmotion)
+    {
+        // Look for {emotion} tag in the text.
+        int32 Open = Text.Find(TEXT("{"));
+        int32 Close = Text.Find(TEXT("}"));
+        if (Open == INDEX_NONE || Close == INDEX_NONE || Close <= Open)
+        {
+            return false;
+        }
+
+        const FString Tag = Text.Mid(Open + 1, Close - Open - 1).ToLower().TrimStartAndEnd();
+
+        if (Tag == TEXT("neutral"))   { OutEmotion = EInoAgentsEmotion::Neutral;   return true; }
+        if (Tag == TEXT("happy"))     { OutEmotion = EInoAgentsEmotion::Happy;     return true; }
+        if (Tag == TEXT("sad"))       { OutEmotion = EInoAgentsEmotion::Sad;       return true; }
+        if (Tag == TEXT("disgust"))   { OutEmotion = EInoAgentsEmotion::Disgust;   return true; }
+        if (Tag == TEXT("anger") || Tag == TEXT("angry"))
+                                     { OutEmotion = EInoAgentsEmotion::Anger;     return true; }
+        if (Tag == TEXT("surprise") || Tag == TEXT("surprised"))
+                                     { OutEmotion = EInoAgentsEmotion::Surprise;  return true; }
+        if (Tag == TEXT("fear"))      { OutEmotion = EInoAgentsEmotion::Fear;      return true; }
+        if (Tag == TEXT("confident")) { OutEmotion = EInoAgentsEmotion::Confident; return true; }
+        if (Tag == TEXT("excited"))   { OutEmotion = EInoAgentsEmotion::Excited;   return true; }
+        if (Tag == TEXT("bored"))     { OutEmotion = EInoAgentsEmotion::Bored;     return true; }
+        if (Tag == TEXT("playful"))   { OutEmotion = EInoAgentsEmotion::Playful;   return true; }
+        if (Tag == TEXT("confused"))  { OutEmotion = EInoAgentsEmotion::Confused;  return true; }
+
+        return false;
+    }
+}
+
 void UInoAgentsLiteRtLmAgentComponent::HandleSentence(FString RawText, FString CleanText)
 {
+    // Detect {emotion} tag in the raw text and update emotion state.
+    EInoAgentsEmotion DetectedEmotion;
+    if (TryParseEmotion(RawText, DetectedEmotion))
+    {
+        SetEmotion(DetectedEmotion);
+    }
+
     OnSentence.Broadcast(RawText, CleanText);
 }
 
@@ -381,16 +420,6 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         UE_LOG(LogInoAgents, Error,
                TEXT("UInoAgentsLiteRtLmAgentComponent: subsystem gone"));
         return;
-    }
-
-    // Auto-register the set_emotion tool if enabled. Must happen
-    // BEFORE CreateConversation so it's in the tools_json snapshot.
-    if (bEnableEmotionTool && EmotionTool == nullptr)
-    {
-        ULiteRtLmSetEmotionTool* Tool = NewObject<ULiteRtLmSetEmotionTool>();
-        Tool->SetAgent(this);
-        Subsys->RegisterTool(Tool);
-        EmotionTool = Tool;
     }
 
     // Create conversation.

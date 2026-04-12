@@ -275,6 +275,7 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
     // Clear per-send state from a prior send.
     SentenceBuffer.Empty();
     TokenTagDepth = 0;
+    TokenCurlyDepth = 0;
 
     // Record the user message in history (original text, not augmented).
     FLiteRtLmMessage UserMsg;
@@ -481,22 +482,18 @@ void ULiteRtLmConversation::RecordAssistantMessage(const FString& Text)
 
 FString ULiteRtLmConversation::StripTags(const FString& Raw)
 {
+    // Strip both [bracketed] and {curly} tags from the text.
     FString Clean;
     Clean.Reserve(Raw.Len());
-    int32 Depth = 0;
+    int32 SquareDepth = 0;
+    int32 CurlyDepth = 0;
     for (const TCHAR Ch : Raw)
     {
-        if (Ch == TEXT('['))
-        {
-            Depth++;
-            continue;
-        }
-        if (Ch == TEXT(']') && Depth > 0)
-        {
-            Depth--;
-            continue;
-        }
-        if (Depth == 0)
+        if (Ch == TEXT('[')) { SquareDepth++; continue; }
+        if (Ch == TEXT(']') && SquareDepth > 0) { SquareDepth--; continue; }
+        if (Ch == TEXT('{')) { CurlyDepth++; continue; }
+        if (Ch == TEXT('}') && CurlyDepth > 0) { CurlyDepth--; continue; }
+        if (SquareDepth == 0 && CurlyDepth == 0)
         {
             Clean.AppendChar(Ch);
         }
@@ -515,17 +512,11 @@ FString ULiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
 
     for (const TCHAR Ch : RawChunk)
     {
-        if (Ch == TEXT('['))
-        {
-            TokenTagDepth++;
-            continue;
-        }
-        if (Ch == TEXT(']') && TokenTagDepth > 0)
-        {
-            TokenTagDepth--;
-            continue;
-        }
-        if (TokenTagDepth == 0)
+        if (Ch == TEXT('[')) { TokenTagDepth++; continue; }
+        if (Ch == TEXT(']') && TokenTagDepth > 0) { TokenTagDepth--; continue; }
+        if (Ch == TEXT('{')) { TokenCurlyDepth++; continue; }
+        if (Ch == TEXT('}') && TokenCurlyDepth > 0) { TokenCurlyDepth--; continue; }
+        if (TokenTagDepth == 0 && TokenCurlyDepth == 0)
         {
             Clean.AppendChar(Ch);
         }

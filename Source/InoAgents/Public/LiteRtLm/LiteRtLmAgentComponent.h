@@ -106,12 +106,6 @@ public:
               meta = (ClampMin = "0", ClampMax = "5000"))
     int32 PauseDurationMs = 500;
 
-    /** Register the built-in set_emotion tool so the model can drive
-     *  facial expressions via tool calls. Disable if you prefer to
-     *  detect emotions from [tags] in the response text instead. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
-    bool bEnableEmotionTool = true;
-
     /** How long the Interrupted status lasts (seconds) before
      *  transitioning to Thinking. 0 = instant (no delay). Use this
      *  to play an interruption animation or sound effect. */
@@ -316,9 +310,6 @@ private:
     /** Set status and broadcast OnStatusChanged if it actually changed. */
     void SetStatus(EInoAgentsAgentStatus NewStatus);
 
-    /** The auto-registered set_emotion tool. Kept alive via UPROPERTY. */
-    UPROPERTY()
-    TObjectPtr<ULiteRtLmToolBase> EmotionTool;
 
     /** Pending message held during interruption delay. */
     FString PendingInterruptMessage;

@@ -396,7 +396,8 @@ private:
     TMap<FString, FString> UserContextMap;
     FString BuildMergedContext() const;
 
-    int32 TokenTagDepth = 0;
+    int32 TokenTagDepth = 0;       // [bracket] depth
+    int32 TokenCurlyDepth = 0;     // {curly} depth
 
     /** Rolling buffer for sentence detection. Accumulates tokens until
      *  a sentence-ending delimiter is found, at which point the complete
