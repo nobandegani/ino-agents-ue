@@ -89,6 +89,10 @@ public class InoAgents : ModuleRules
 				"Slate",
 				"SlateCore",
 
+				// UInoAgentsProceduralWave subclasses USoundWaveProcedural which
+				// depends on IAudioProxyDataFactory from AudioMixer.
+				"AudioMixer",
+
 				// Required for EKeys::Enter / EKeys::Escape constants used by the
 				// chat input's Enter-to-send and ESC-to-dismiss handling. Forgetting
 				// this gives a confusing link error rather than a header error.
