@@ -68,6 +68,11 @@ FString ULiteRtLmSetEmotionTool::Execute_Implementation(const FJsonObjectWrapper
         return FString(TEXT("\"ERROR: missing 'emotion' parameter\""));
     }
 
+    // Gemma 4's FC format wraps string values in escape tags like
+    // <|"|>happy<|"|> or <ctrl46>happy<ctrl46>. Strip them.
+    EmotionStr.ReplaceInline(TEXT("<|\"|>"), TEXT(""));
+    EmotionStr.ReplaceInline(TEXT("<ctrl46>"), TEXT(""));
+
     EInoAgentsEmotion NewEmotion;
     if (!ParseEmotion(EmotionStr, NewEmotion))
     {
