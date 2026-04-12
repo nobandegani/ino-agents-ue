@@ -157,6 +157,22 @@ void UInoAgentsLiteRtLmDialogueQueue::Clear()
     }
 }
 
+void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
+{
+    // Same as Clear but keeps the conversation binding so the queue
+    // continues to receive OnSentence/OnNewLine for the next response.
+    Slots.Reset();
+    Observers.Reset();
+    CurrentPlayIndex      = 0;
+    bCurrentSlotStreaming  = false;
+    bPauseTimerPending    = false;
+
+    if (AudioComponent != nullptr)
+    {
+        AudioComponent->StopAndReset();
+    }
+}
+
 // ======================================================================
 // Auto-bound conversation handlers
 // ======================================================================

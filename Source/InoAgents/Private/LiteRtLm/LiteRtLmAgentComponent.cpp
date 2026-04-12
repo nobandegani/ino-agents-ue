@@ -152,6 +152,17 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
         OnError.Broadcast(TEXT("No conversation — call LoadModel first"));
         return;
     }
+
+    // Stop any in-progress audio from the previous response so the
+    // user doesn't hear stale TTS while the model is generating a
+    // new answer. StopAndReset clears slots and stops playback but
+    // keeps the conversation binding so the queue picks up the new
+    // response's OnSentence events automatically.
+    if (DialogueQueue != nullptr)
+    {
+        DialogueQueue->StopAndReset();
+    }
+
     Conversation->SendMessageAsync(Text);
 }
 

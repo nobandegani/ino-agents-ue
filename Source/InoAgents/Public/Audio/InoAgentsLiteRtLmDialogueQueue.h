@@ -102,6 +102,16 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
     void Clear();
 
+    /**
+     * Stop audio playback and drop all pending/playing slots, but keep
+     * the conversation binding intact. Call this when the user sends a
+     * new message while the previous response is still playing — the
+     * queue will pick up the new response's OnSentence events
+     * automatically.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
+    void StopAndReset();
+
     /** Fires once when every enqueued slot has been played. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
     FOnInoAgentsAudioFinished OnAllComplete;
