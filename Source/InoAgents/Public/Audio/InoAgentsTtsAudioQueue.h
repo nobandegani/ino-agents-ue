@@ -162,8 +162,14 @@ private:
     EInoAgentsAudioFormat      DerivedAudioFormat = EInoAgentsAudioFormat::Mp3;
 
     TArray<FSlot> Slots;
-    int32 CurrentPlayIndex    = 0;
-    bool  bCurrentSlotStreaming = false;
+    int32 CurrentPlayIndex      = 0;
+    bool  bCurrentSlotStreaming  = false;
+
+    /** True while a pause timer is counting down. Prevents re-entrant
+     *  DrainReadySlots calls (from concurrent OnSlotComplete) from
+     *  advancing past the consumed pause slot, which would cause the
+     *  timer callback to double-advance and skip slots. */
+    bool  bPauseTimerPending    = false;
 
     void DrainReadySlots();
 };

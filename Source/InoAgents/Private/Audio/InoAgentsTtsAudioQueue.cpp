@@ -149,6 +149,7 @@ void UInoAgentsTtsAudioQueue::Clear()
     Observers.Reset();
     CurrentPlayIndex      = 0;
     bCurrentSlotStreaming  = false;
+    bPauseTimerPending    = false;
 
     if (AudioComponent != nullptr)
     {
@@ -313,6 +314,17 @@ void UInoAgentsTtsAudioQueue::OnSlotError(int32 SlotIndex, const FString& ErrorM
 
 void UInoAgentsTtsAudioQueue::DrainReadySlots()
 {
+    // If a pause timer is counting down, don't advance — the timer
+    // callback will clear the flag and re-enter DrainReadySlots when
+    // the pause is over. Without this guard, a concurrent
+    // OnSlotComplete re-enters drain, advances past the consumed
+    // pause slot (PauseDurationMs==0), and then the timer fires and
+    // advances AGAIN — double-advancing, skipping a slot.
+    if (bPauseTimerPending)
+    {
+        return;
+    }
+
     while (Slots.IsValidIndex(CurrentPlayIndex))
     {
         FSlot& Slot = Slots[CurrentPlayIndex];
@@ -323,13 +335,20 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
         }
 
         // --- Pause slot: wait, then advance --------------------------
-        if (Slot.bIsPause && Slot.PauseDurationMs > 0)
+        if (Slot.bIsPause)
         {
+            if (Slot.PauseDurationMs <= 0)
+            {
+                // Zero-duration pause — skip immediately.
+                CurrentPlayIndex++;
+                bCurrentSlotStreaming = false;
+                continue;
+            }
+
             const float DelaySec =
                 static_cast<float>(Slot.PauseDurationMs) / 1000.0f;
 
-            // Mark consumed so re-entry doesn't re-start the timer.
-            Slot.PauseDurationMs = 0;
+            bPauseTimerPending = true;
 
             TWeakObjectPtr<UInoAgentsTtsAudioQueue> WeakSelf(this);
             FTSTicker::GetCoreTicker().AddTicker(
@@ -338,6 +357,7 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
                     {
                         if (UInoAgentsTtsAudioQueue* Self = WeakSelf.Get())
                         {
+                            Self->bPauseTimerPending = false;
                             Self->CurrentPlayIndex++;
                             Self->bCurrentSlotStreaming = false;
                             Self->DrainReadySlots();
