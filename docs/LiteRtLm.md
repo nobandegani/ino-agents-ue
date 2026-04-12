@@ -107,17 +107,26 @@ The `Models/` directory is `.gitignore`d — the file never lands in source cont
    ```
    If you see `PASS`, everything is working — the full agent loop just ran end-to-end.
 
-### 4. Use it from Blueprint
+### 4. Use it from Blueprint — the easy path (agent component)
 
-Typical Blueprint flow (describing nodes, not screenshots):
+The **LiteRT-LM Agent Component** wraps everything into a single drop-on-actor component:
 
-1. On **BeginPlay** in some actor: `Get Game Instance → Get Subsystem (ULiteRtLmSubsystem)`.
-2. Create a `ULiteRtLmModelConfig` data asset (Content Browser → Add → Miscellaneous → Data Asset → `LiteRtLmModelConfig`). Set `ModelFileName` to `gemma-4-E2B-it.litertlm`, set a `SystemMessage` like "You are a helpful in-game assistant."
-3. Call `LoadModelAsync (Config, OnLoaded)`. Bind a custom event to `OnLoaded`.
-4. In the loaded handler: `CreateConversation` → store the returned `ULiteRtLmConversation` in a variable. Bind `OnToken`, `OnComplete`, `OnError` on the conversation.
-5. From UI, when the player submits a message: `Send Message Async (UserText)`.
-6. In your `OnToken` handler: append `Chunk` to a UMG text widget. Use `IsStreamingInFlight` to keep the Send button disabled while the model is replying.
-7. In your `OnComplete` handler: the full text is also available as `FullText` (identical to the concatenation of all tokens).
+1. Add Component → **LiteRT-LM Agent** on any actor.
+2. In the details panel: expand **Model Config** and set `ModelFileName` (e.g. `gemma-4-E4B-it.litertlm`), `SystemMessage` (your agent's personality). Set **Voice Id** to your ElevenLabs voice.
+3. The model auto-downloads from Hugging Face on first Play if it isn't cached. Progress fires via `OnDownloadProgress`.
+4. Call **Send Message** from any trigger (key press, UI button, etc.).
+5. The model generates a response → `OnToken` fires per token → `OnSentence` fires per line (with raw + clean text) → ElevenLabs TTS dispatches per-sentence → audio plays from the actor's 3D position.
+6. Bind `OnSentence` for subtitles (use `CleanText`), `OnComplete` for the full response, `OnAudioFinished` when all audio has played.
+
+### 4b. Use it from Blueprint — the advanced path (subsystem directly)
+
+For full control without the agent component wrapper:
+
+1. `Get Game Instance → Get Subsystem (ULiteRtLmSubsystem)`.
+2. Build an `FLiteRtLmModelConfig` struct (Make node in Blueprint): set `ModelFileName`, `SystemMessage`, etc.
+3. Call `LoadModelAsync(Config, OnLoaded)`. The subsystem auto-downloads if the file isn't cached.
+4. In the `OnLoaded` handler: `CreateConversation` → bind `OnToken`, `OnSentence`, `OnComplete`, `OnError`.
+5. `SendMessageAsync(UserText)` to generate responses.
 
 ---
 
@@ -131,7 +140,7 @@ Game-instance-wide owner of the LiteRT-LM engine and tool registry. One instance
 
 | Function | Kind | Purpose |
 |---|---|---|
-| `LoadModelAsync(Config, OnLoaded)` | `BlueprintCallable` | Start an async engine load from a `ULiteRtLmModelConfig`. Returns immediately; `OnLoaded` fires on the game thread with `bSuccess` + `ErrorMessage`. |
+| `LoadModelAsync(Config, OnLoaded)` | `BlueprintCallable` | Start an async engine load from an `FLiteRtLmModelConfig` struct. Returns immediately. If the model file isn't on disk, auto-downloads from the URL configured in Project Settings. `OnLoaded` fires on the game thread with `bSuccess` + `ErrorMessage`. `OnDownloadProgress` fires during download. |
 | `IsModelLoaded()` | `BlueprintPure` | True after a successful `LoadModelAsync` completes, until `UnloadModel` is called. |
 | `UnloadModel()` | `BlueprintCallable` | Destroy the loaded engine. **Destroy all live conversations first** — they hold native pointers into the engine. |
 | `CreateConversation()` | `BlueprintCallable` | Construct a `ULiteRtLmConversation` bound to the currently loaded engine, with a snapshot of the currently registered tools. The caller owns the returned object (hold a UPROPERTY reference to keep it alive). |
@@ -157,20 +166,22 @@ Multicast delegates (all `BlueprintAssignable`, all fire on the game thread, all
 | Delegate | Params | Fires |
 |---|---|---|
 | `OnToken` | `(FString Chunk)` | Zero or more times per send, as the model streams the final text response. Tokens emitted during intermediate tool-call rounds are suppressed — you only see tokens from the final answer. |
-| `OnComplete` | `(FString FullText)` | Exactly once on success. `FullText` is the full accumulated text of the final round, equal to concatenating every `OnToken` `Chunk` for this send. |
+| `OnSentence` | `(FString RawText, FString CleanText)` | Zero or more times per send, once per newline-delimited line. `RawText` includes `[emotion]` tags for ElevenLabs TTS delivery; `CleanText` has all `[bracketed]` tags stripped for UI/subtitles. The TTS dialogue queue auto-binds to this for per-sentence audio dispatch. |
+| `OnNewLine` | *(no params)* | Fires at each newline boundary, right after the corresponding `OnSentence`. Used by the TTS dialogue queue to insert timed pauses between audio segments. |
+| `OnComplete` | `(FString FullText)` | Exactly once on success. `FullText` is the full accumulated text of the final round, equal to concatenating every `OnToken` `Chunk` for this send. Any trailing text not followed by a newline is flushed via a final `OnSentence` before `OnComplete` fires. |
 | `OnError` | `(FString ErrorMessage)` | Exactly once on failure. Mutually exclusive with `OnComplete`. |
 | `OnToolCalled` | `(FName ToolName, FString ArgumentsJson, FString ResultJson)` | Zero or more times per send, once per tool executed. Purely diagnostic — you never need to bind this for tool calling to work. Useful for debug UI and validation. |
 
-### `ULiteRtLmModelConfig` — designer asset
+### `FLiteRtLmModelConfig` — model configuration struct
 
-A `UDataAsset` subclass. Create one per model you want to use — right-click in the Content Browser → Miscellaneous → Data Asset → `LiteRtLmModelConfig`.
+A plain `USTRUCT` (not a data asset — no Content Browser asset needed). Set the fields directly on the agent component's details panel, or build one in Blueprint via a Make node and pass to `LoadModelAsync`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `ModelFileName` | `FString` | `"gemma-4-E2B-it.litertlm"` | Filename resolved relative to `Plugins/InoAgents/Models/`. The subsystem prepends `IPluginManager::FindPlugin("InoAgents")->GetBaseDir() + "/Models/"` at runtime so the config is portable across developer machines. |
-| `Backend` | `ELiteRtLmBackend` | `Cpu` | `Cpu` or `Gpu`. Current CPU-only Bazel build ignores `Gpu` — set it in advance of the GPU target being enabled. |
+| `ModelFileName` | `FString` | `"gemma-4-E4B-it.litertlm"` | Filename resolved at load time by checking `PersistentDownloadDir/InoAgents/Models/` first, then `Plugins/InoAgents/Models/` as a legacy fallback. If not found, auto-downloaded from the URL configured in Project Settings → Plugins → InoAgents → LiteRT-LM → Models. |
+| `Backend` | `ELiteRtLmBackend` | `Cpu` | `Cpu` or `Gpu`. Current CPU-only Bazel build ignores `Gpu`. |
 | `MaxNumTokens` | `int32` | `0` | Upper bound on decode-step tokens. `0` means "use engine default". |
-| `SystemMessage` | `FString` (MultiLine) | *(empty)* | Plain text. The subsystem wraps it in the `{"type":"text","text":"..."}` JSON shape internally — do not include JSON braces. |
+| `SystemMessage` | `FString` (MultiLine) | *(empty)* | Plain text system prompt. Passed as a raw string to the LiteRT-LM C API — do not include JSON braces. Supports ElevenLabs `[emotion]` tags in the model's output (see the agent component docs for expressive TTS). |
 
 ### `ILiteRtLmTool` — Blueprint interface
 

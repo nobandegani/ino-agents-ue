@@ -54,16 +54,16 @@ Phases 2 and 3 will reuse the same `UElevenLabsSettings` / `UElevenLabsSubsystem
 
 ## API surface
 
-### `UElevenLabsSettings` — Project Settings
+### Settings — Project Settings → Plugins → InoAgents → ElevenLabs
 
-A `UDeveloperSettings` subclass. Fields:
+ElevenLabs settings live on the unified `UInoAgentsSettings` class (shared with LiteRT-LM settings on the same page). Fields:
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `ApiKey` | `FString` (password-masked) | *(empty)* | xi-api-key for ElevenLabs. |
-| `BaseUrl` | `FString` | *(empty → `https://api.elevenlabs.io`)* | Override for regional routing (`api.us.elevenlabs.io`, `api.eu.residency.elevenlabs.io`, `api.in.residency.elevenlabs.io`). Trailing slashes are stripped automatically. |
-| `DefaultModelId` | `FString` | `eleven_v3` | Used when a per-call request leaves `ModelId` empty. |
-| `DefaultOutputFormat` | enum | `Mp3_44100_128` | Used when no explicit format is passed. |
+| `ElevenLabsApiKey` | `FString` (password-masked) | *(empty)* | xi-api-key for ElevenLabs. |
+| `ElevenLabsBaseUrl` | `FString` | *(empty → `https://api.elevenlabs.io`)* | Override for regional routing. Trailing slashes are stripped automatically. |
+| `ElevenLabsDefaultModelId` | `FString` | `eleven_v3` | Used when a per-call request leaves `ModelId` empty. |
+| `ElevenLabsDefaultOutputFormat` | enum | `Mp3_44100_128` | Used when no explicit format is passed. |
 
 ### `UElevenLabsSubsystem` — game instance subsystem
 
@@ -73,7 +73,7 @@ The subsystem caches settings at `Initialize()`, holds a UPROPERTY `TSet` of eve
 
 | Function | Kind | Purpose |
 |---|---|---|
-| `ReloadSettings()` | `BlueprintCallable` | Re-reads `UElevenLabsSettings` into the cached fields without restarting PIE. Also available as the `InoAgents.ElevenLabs.ReloadSettings` console command. |
+| `ReloadSettings()` | `BlueprintCallable` | Re-reads `UInoAgentsSettings` into the cached fields without restarting PIE. Also available as the `InoAgents.ElevenLabs.ReloadSettings` console command. |
 | `CancelAll()` | `BlueprintCallable` | Aborts every in-flight ElevenLabs request tracked by the subsystem. Each action receives `OnError("cancelled")` before being released. Called automatically at PIE end. |
 | `GetApiKey()` / `GetBaseUrl()` / `GetDefaultModelId()` / `GetDefaultOutputFormat()` | `(C++ only)` | Cached accessors used internally by the async actions. You usually don't need to call these — bind them via the async action's per-call override parameter instead. |
 
