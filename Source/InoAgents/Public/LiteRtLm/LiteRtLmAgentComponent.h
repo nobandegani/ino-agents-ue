@@ -67,12 +67,12 @@ public:
 
     /** PCM sample rate for the audio component. Must match the
      *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent",
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "8000", ClampMax = "192000"))
     int32 PcmSampleRate = 16000;
 
     /** PCM channel count. 1 = mono, 2 = stereo. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent",
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "1", ClampMax = "2"))
     int32 PcmNumChannels = 1;
 
