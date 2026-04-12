@@ -535,14 +535,38 @@ FString FLiteRtLmConversationWorker::ExecuteToolSynchronously(
                 // tool response message becomes malformed and the
                 // C API will fail to parse it.
                 //
+                // UE's FJsonSerializer only parses objects/arrays at
+                // the root. Bare JSON values (numbers, booleans, null,
+                // quoted strings) are also valid here, so we check
+                // those explicitly first.
+                //
                 // Common mistake: returning a plain string like
                 // "hello" instead of a quoted JSON string "\"hello\"".
                 // Safety net: if it doesn't parse as JSON, wrap it in
                 // quotes to produce a valid JSON string literal.
                 {
-                    const auto Reader = TJsonReaderFactory<>::Create(LocalResult);
-                    TSharedPtr<FJsonValue> Parsed;
-                    if (!FJsonSerializer::Deserialize(Reader, Parsed) || !Parsed.IsValid())
+                    const FString Trimmed = LocalResult.TrimStartAndEnd();
+                    const bool bIsBareNumber = Trimmed.IsNumeric()
+                        || (Trimmed.Len() > 0 && (Trimmed[0] == TEXT('-') || Trimmed[0] == TEXT('.'))
+                            && Trimmed.Mid(1).IsNumeric());
+                    const bool bIsBool = (Trimmed == TEXT("true") || Trimmed == TEXT("false"));
+                    const bool bIsNull = (Trimmed == TEXT("null"));
+                    const bool bIsQuotedString = (Trimmed.Len() >= 2
+                        && Trimmed[0] == TEXT('"')
+                        && Trimmed[Trimmed.Len() - 1] == TEXT('"'));
+                    const bool bIsObjectOrArray = (Trimmed.Len() >= 2
+                        && (Trimmed[0] == TEXT('{') || Trimmed[0] == TEXT('[')));
+
+                    bool bIsValidJson = bIsBareNumber || bIsBool || bIsNull || bIsQuotedString;
+                    if (!bIsValidJson && bIsObjectOrArray)
+                    {
+                        // Validate object/array with the full parser.
+                        const auto Reader = TJsonReaderFactory<>::Create(LocalResult);
+                        TSharedPtr<FJsonValue> Parsed;
+                        bIsValidJson = FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid();
+                    }
+
+                    if (!bIsValidJson)
                     {
                         UE_LOG(LogInoAgents, Warning,
                                TEXT("Tool '%s' returned invalid JSON: \"%s\". "
