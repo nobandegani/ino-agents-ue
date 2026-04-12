@@ -1,6 +1,6 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "Audio/InoAgentsTtsAudioQueue.h"
+#include "Audio/InoAgentsLiteRtLmDialogueQueue.h"
 
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
@@ -13,27 +13,27 @@
 // Slot observer — per-TTS-action trampoline
 // ======================================================================
 
-void UInoAgentsTtsSlotObserver::HandleAudioChunk(
+void UInoAgentsLiteRtLmDialogueSlotObserver::HandleAudioChunk(
     const TArray<uint8>& AudioBytes, int64 /*TotalBytesReceived*/)
 {
-    if (UInoAgentsTtsAudioQueue* Q = QueueWeak.Get())
+    if (UInoAgentsLiteRtLmDialogueQueue* Q = QueueWeak.Get())
     {
         Q->OnSlotChunk(SlotIndex, AudioBytes);
     }
 }
 
-void UInoAgentsTtsSlotObserver::HandleComplete(
+void UInoAgentsLiteRtLmDialogueSlotObserver::HandleComplete(
     const TArray<uint8>& /*FullAudioBytes*/, EElevenLabsOutputFormat /*OutputFormat*/)
 {
-    if (UInoAgentsTtsAudioQueue* Q = QueueWeak.Get())
+    if (UInoAgentsLiteRtLmDialogueQueue* Q = QueueWeak.Get())
     {
         Q->OnSlotComplete(SlotIndex);
     }
 }
 
-void UInoAgentsTtsSlotObserver::HandleError(FString ErrorMessage)
+void UInoAgentsLiteRtLmDialogueSlotObserver::HandleError(FString ErrorMessage)
 {
-    if (UInoAgentsTtsAudioQueue* Q = QueueWeak.Get())
+    if (UInoAgentsLiteRtLmDialogueQueue* Q = QueueWeak.Get())
     {
         Q->OnSlotError(SlotIndex, ErrorMessage);
     }
@@ -86,7 +86,7 @@ namespace
 // Queue — lifecycle
 // ======================================================================
 
-void UInoAgentsTtsAudioQueue::Initialize(
+void UInoAgentsLiteRtLmDialogueQueue::Initialize(
     UObject*                             WorldContextObject,
     UInoAgentsStreamingAudioComponent*   InAudioComponent,
     ULiteRtLmConversation*               InConversation,
@@ -117,13 +117,13 @@ void UInoAgentsTtsAudioQueue::Initialize(
     if (InConversation != nullptr)
     {
         InConversation->OnSentence.AddDynamic(
-            this, &UInoAgentsTtsAudioQueue::HandleSentenceFromConversation);
+            this, &UInoAgentsLiteRtLmDialogueQueue::HandleSentenceFromConversation);
         InConversation->OnNewLine.AddDynamic(
-            this, &UInoAgentsTtsAudioQueue::HandleNewLineFromConversation);
+            this, &UInoAgentsLiteRtLmDialogueQueue::HandleNewLineFromConversation);
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoAgentsTtsAudioQueue: initialized (voice=%s, model=%s, "
+           TEXT("UInoAgentsLiteRtLmDialogueQueue: initialized (voice=%s, model=%s, "
                 "outputFmt=%d, audioFeedFmt=%d, pauseMs=%d, conversation=%s)"),
            *DefaultVoiceId,
            *RequestTemplate.ModelId,
@@ -133,15 +133,15 @@ void UInoAgentsTtsAudioQueue::Initialize(
            InConversation ? *InConversation->GetName() : TEXT("none"));
 }
 
-void UInoAgentsTtsAudioQueue::Clear()
+void UInoAgentsLiteRtLmDialogueQueue::Clear()
 {
     // Unbind from the conversation if we're attached.
     if (ULiteRtLmConversation* Conv = BoundConversation.Get())
     {
         Conv->OnSentence.RemoveDynamic(
-            this, &UInoAgentsTtsAudioQueue::HandleSentenceFromConversation);
+            this, &UInoAgentsLiteRtLmDialogueQueue::HandleSentenceFromConversation);
         Conv->OnNewLine.RemoveDynamic(
-            this, &UInoAgentsTtsAudioQueue::HandleNewLineFromConversation);
+            this, &UInoAgentsLiteRtLmDialogueQueue::HandleNewLineFromConversation);
     }
     BoundConversation = nullptr;
 
@@ -161,12 +161,15 @@ void UInoAgentsTtsAudioQueue::Clear()
 // Auto-bound conversation handlers
 // ======================================================================
 
-void UInoAgentsTtsAudioQueue::HandleSentenceFromConversation(FString SentenceText)
+void UInoAgentsLiteRtLmDialogueQueue::HandleSentenceFromConversation(
+    FString RawText, FString /*CleanText*/)
 {
-    EnqueueSentenceInternal(SentenceText);
+    // Send RawText (with [emotion]/[audio] tags intact) to ElevenLabs.
+    // Tags are consumed as delivery instructions and not spoken aloud.
+    EnqueueSentenceInternal(RawText);
 }
 
-void UInoAgentsTtsAudioQueue::HandleNewLineFromConversation()
+void UInoAgentsLiteRtLmDialogueQueue::HandleNewLineFromConversation()
 {
     EnqueuePauseInternal();
 }
@@ -175,7 +178,7 @@ void UInoAgentsTtsAudioQueue::HandleNewLineFromConversation()
 // Internal sentence / pause dispatch
 // ======================================================================
 
-void UInoAgentsTtsAudioQueue::EnqueueSentenceInternal(const FString& SentenceText)
+void UInoAgentsLiteRtLmDialogueQueue::EnqueueSentenceInternal(const FString& SentenceText)
 {
     if (SentenceText.IsEmpty())
     {
@@ -186,7 +189,7 @@ void UInoAgentsTtsAudioQueue::EnqueueSentenceInternal(const FString& SentenceTex
     if (Ctx == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsTtsAudioQueue: world context is null"));
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: world context is null"));
         return;
     }
 
@@ -205,7 +208,7 @@ void UInoAgentsTtsAudioQueue::EnqueueSentenceInternal(const FString& SentenceTex
     if (Action == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsTtsAudioQueue: StreamTextToDialogue returned null for slot %d"),
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: StreamTextToDialogue returned null for slot %d"),
                SlotIndex);
         Slots[SlotIndex].bErrored  = true;
         Slots[SlotIndex].bComplete = true;
@@ -213,26 +216,26 @@ void UInoAgentsTtsAudioQueue::EnqueueSentenceInternal(const FString& SentenceTex
         return;
     }
 
-    UInoAgentsTtsSlotObserver* Observer = NewObject<UInoAgentsTtsSlotObserver>(this);
+    UInoAgentsLiteRtLmDialogueSlotObserver* Observer = NewObject<UInoAgentsLiteRtLmDialogueSlotObserver>(this);
     Observer->SlotIndex = SlotIndex;
     Observer->QueueWeak = this;
     Observers.Add(Observer);
 
     Action->OnAudioChunk.AddDynamic(
-        Observer, &UInoAgentsTtsSlotObserver::HandleAudioChunk);
+        Observer, &UInoAgentsLiteRtLmDialogueSlotObserver::HandleAudioChunk);
     Action->OnComplete.AddDynamic(
-        Observer, &UInoAgentsTtsSlotObserver::HandleComplete);
+        Observer, &UInoAgentsLiteRtLmDialogueSlotObserver::HandleComplete);
     Action->OnError.AddDynamic(
-        Observer, &UInoAgentsTtsSlotObserver::HandleError);
+        Observer, &UInoAgentsLiteRtLmDialogueSlotObserver::HandleError);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoAgentsTtsAudioQueue: slot %d dispatched (\"%s\")"),
+           TEXT("UInoAgentsLiteRtLmDialogueQueue: slot %d dispatched (\"%s\")"),
            SlotIndex, *SentenceText.Left(60));
 
     Action->Activate();
 }
 
-void UInoAgentsTtsAudioQueue::EnqueuePauseInternal()
+void UInoAgentsLiteRtLmDialogueQueue::EnqueuePauseInternal()
 {
     if (DefaultPauseDurationMs <= 0)
     {
@@ -245,7 +248,7 @@ void UInoAgentsTtsAudioQueue::EnqueuePauseInternal()
     Slot.bComplete       = true;
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("UInoAgentsTtsAudioQueue: slot %d is a %d-ms pause"),
+           TEXT("UInoAgentsLiteRtLmDialogueQueue: slot %d is a %d-ms pause"),
            Slots.Num() - 1, DefaultPauseDurationMs);
 
     DrainReadySlots();
@@ -255,7 +258,7 @@ void UInoAgentsTtsAudioQueue::EnqueuePauseInternal()
 // Slot callbacks
 // ======================================================================
 
-void UInoAgentsTtsAudioQueue::OnSlotChunk(
+void UInoAgentsLiteRtLmDialogueQueue::OnSlotChunk(
     int32 SlotIndex, const TArray<uint8>& Bytes)
 {
     if (!Slots.IsValidIndex(SlotIndex))
@@ -277,7 +280,7 @@ void UInoAgentsTtsAudioQueue::OnSlotChunk(
     }
 }
 
-void UInoAgentsTtsAudioQueue::OnSlotComplete(int32 SlotIndex)
+void UInoAgentsLiteRtLmDialogueQueue::OnSlotComplete(int32 SlotIndex)
 {
     if (!Slots.IsValidIndex(SlotIndex))
     {
@@ -285,14 +288,14 @@ void UInoAgentsTtsAudioQueue::OnSlotComplete(int32 SlotIndex)
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoAgentsTtsAudioQueue: slot %d complete (%d buffered bytes)"),
+           TEXT("UInoAgentsLiteRtLmDialogueQueue: slot %d complete (%d buffered bytes)"),
            SlotIndex, Slots[SlotIndex].BufferedBytes.Num());
 
     Slots[SlotIndex].bComplete = true;
     DrainReadySlots();
 }
 
-void UInoAgentsTtsAudioQueue::OnSlotError(int32 SlotIndex, const FString& ErrorMessage)
+void UInoAgentsLiteRtLmDialogueQueue::OnSlotError(int32 SlotIndex, const FString& ErrorMessage)
 {
     if (!Slots.IsValidIndex(SlotIndex))
     {
@@ -300,7 +303,7 @@ void UInoAgentsTtsAudioQueue::OnSlotError(int32 SlotIndex, const FString& ErrorM
     }
 
     UE_LOG(LogInoAgents, Warning,
-           TEXT("UInoAgentsTtsAudioQueue: slot %d error: %s"),
+           TEXT("UInoAgentsLiteRtLmDialogueQueue: slot %d error: %s"),
            SlotIndex, *ErrorMessage);
 
     Slots[SlotIndex].bErrored  = true;
@@ -312,7 +315,7 @@ void UInoAgentsTtsAudioQueue::OnSlotError(int32 SlotIndex, const FString& ErrorM
 // Drain — advance past completed slots, feeding buffered audio
 // ======================================================================
 
-void UInoAgentsTtsAudioQueue::DrainReadySlots()
+void UInoAgentsLiteRtLmDialogueQueue::DrainReadySlots()
 {
     // If a pause timer is counting down, don't advance — the timer
     // callback will clear the flag and re-enter DrainReadySlots when
@@ -350,12 +353,12 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
 
             bPauseTimerPending = true;
 
-            TWeakObjectPtr<UInoAgentsTtsAudioQueue> WeakSelf(this);
+            TWeakObjectPtr<UInoAgentsLiteRtLmDialogueQueue> WeakSelf(this);
             FTSTicker::GetCoreTicker().AddTicker(
                 FTickerDelegate::CreateLambda(
                     [WeakSelf](float) -> bool
                     {
-                        if (UInoAgentsTtsAudioQueue* Self = WeakSelf.Get())
+                        if (UInoAgentsLiteRtLmDialogueQueue* Self = WeakSelf.Get())
                         {
                             Self->bPauseTimerPending = false;
                             Self->CurrentPlayIndex++;
@@ -379,7 +382,7 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
         bCurrentSlotStreaming = false;
 
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("UInoAgentsTtsAudioQueue: advanced to slot %d"),
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: advanced to slot %d"),
                CurrentPlayIndex);
     }
 
@@ -391,7 +394,7 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
         }
 
         UE_LOG(LogInoAgents, Log,
-               TEXT("UInoAgentsTtsAudioQueue: all %d slot(s) played"),
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: all %d slot(s) played"),
                Slots.Num());
 
         OnAllComplete.Broadcast();

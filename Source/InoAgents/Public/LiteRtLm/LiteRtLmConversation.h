@@ -236,11 +236,11 @@ public:
 
     /**
      * Fires each time the accumulated streaming tokens cross a newline
-     * boundary (\n). SentenceText is the complete line trimmed of
-     * leading / trailing whitespace.
-     *
-     * Typical use: pipe each line to ElevenLabs TTS independently so
-     * audio generation starts before the full LLM response is done.
+     * boundary (\n). Delivers two strings:
+     *   RawText   — the line with [emotion] / [audio] tags intact
+     *               (send to ElevenLabs for expressive delivery)
+     *   CleanText — the line with all [bracketed] tags stripped
+     *               (use for subtitles, chat display, etc.)
      *
      * At OnComplete time, any remaining text that hasn't crossed a
      * newline is flushed as a final OnSentence broadcast, so the
@@ -253,7 +253,7 @@ public:
     /**
      * Fires at each newline boundary, right after the corresponding
      * OnSentence broadcast. Wire this to
-     * UInoAgentsTtsAudioQueue::EnqueuePause to insert timed silence
+     * UInoAgentsLiteRtLmDialogueQueue::EnqueuePause to insert timed silence
      * between audio segments.
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")

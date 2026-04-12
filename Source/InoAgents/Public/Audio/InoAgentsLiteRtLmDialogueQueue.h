@@ -8,10 +8,10 @@
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
 
-#include "InoAgentsTtsAudioQueue.generated.h"
+#include "InoAgentsLiteRtLmDialogueQueue.generated.h"
 
 class UInoAgentsStreamingAudioComponent;
-class UInoAgentsTtsAudioQueue;
+class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
 
 /**
@@ -22,13 +22,13 @@ class ULiteRtLmConversation;
  * Not intended for direct Blueprint use.
  */
 UCLASS()
-class UInoAgentsTtsSlotObserver : public UObject
+class UInoAgentsLiteRtLmDialogueSlotObserver : public UObject
 {
     GENERATED_BODY()
 
 public:
     int32 SlotIndex = 0;
-    TWeakObjectPtr<UInoAgentsTtsAudioQueue> QueueWeak;
+    TWeakObjectPtr<UInoAgentsLiteRtLmDialogueQueue> QueueWeak;
 
     UFUNCTION()
     void HandleAudioChunk(const TArray<uint8>& AudioBytes, int64 TotalBytesReceived);
@@ -51,7 +51,7 @@ public:
  *
  * Blueprint setup (two nodes total):
  *
- *   Queue = Construct Object From Class (UInoAgentsTtsAudioQueue)
+ *   Queue = Construct Object From Class (UInoAgentsLiteRtLmDialogueQueue)
  *   Queue.Initialize(self, AudioComp, Conversation, VoiceId,
  *                    RequestTemplate, PauseDurationMs)
  *
@@ -60,7 +60,7 @@ public:
  * once initialized.
  */
 UCLASS(BlueprintType)
-class INOAGENTS_API UInoAgentsTtsAudioQueue : public UObject
+class INOAGENTS_API UInoAgentsLiteRtLmDialogueQueue : public UObject
 {
     GENERATED_BODY()
 
@@ -107,7 +107,7 @@ public:
     FOnInoAgentsAudioFinished OnAllComplete;
 
     // -----------------------------------------------------------------
-    // Internal — called by UInoAgentsTtsSlotObserver
+    // Internal — called by UInoAgentsLiteRtLmDialogueSlotObserver
     // -----------------------------------------------------------------
     void OnSlotChunk(int32 SlotIndex, const TArray<uint8>& Bytes);
     void OnSlotComplete(int32 SlotIndex);
@@ -119,7 +119,7 @@ private:
     // -----------------------------------------------------------------
 
     UFUNCTION()
-    void HandleSentenceFromConversation(FString SentenceText);
+    void HandleSentenceFromConversation(FString RawText, FString CleanText);
 
     UFUNCTION()
     void HandleNewLineFromConversation();
@@ -153,7 +153,7 @@ private:
     TObjectPtr<ULiteRtLmConversation> BoundConversation;
 
     UPROPERTY()
-    TArray<TObjectPtr<UInoAgentsTtsSlotObserver>> Observers;
+    TArray<TObjectPtr<UInoAgentsLiteRtLmDialogueSlotObserver>> Observers;
 
     FString DefaultVoiceId;
     int32   DefaultPauseDurationMs = 500;

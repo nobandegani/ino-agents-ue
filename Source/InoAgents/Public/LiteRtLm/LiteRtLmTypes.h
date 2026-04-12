@@ -77,26 +77,32 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmError,
 
 /**
  * Fired each time the streaming token buffer crosses a newline boundary.
- * SentenceText is the accumulated line trimmed of whitespace — typically
- * a full sentence, a paragraph, or a numbered list item, depending on
- * how the model formats its response.
+ * Delivers two versions of the text:
  *
- * Fires zero or more times per send, between OnToken broadcasts and before
- * the terminal OnComplete. The concatenation of every SentenceText plus
- * any trailing fragment (delivered only via OnComplete) equals the full
- * assistant response.
+ *   RawText   — the line as the model produced it, including any
+ *               [emotion] or [audio] tags (e.g. "[cheerfully] Hello!").
+ *               Send this to ElevenLabs TTS — it consumes the tags as
+ *               delivery instructions and does not speak them aloud.
  *
- * Primary use case: pipe each line to ElevenLabs TTS independently so
- * audio generation starts before the full response is done.
+ *   CleanText — the same line with all [bracketed] tags stripped, for
+ *               use in subtitles, chat bubbles, or any display that
+ *               shouldn't show the raw tags (e.g. "Hello!").
+ *
+ * Fires zero or more times per send, between OnToken broadcasts and
+ * before the terminal OnComplete.
+ *
+ * Primary use case: pipe RawText to ElevenLabs for expressive TTS,
+ * display CleanText in the game's subtitle UI.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmSentence,
-    FString, SentenceText);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLiteRtLmSentence,
+    FString, RawText,
+    FString, CleanText);
 
 /**
  * Fired at each newline boundary in the streaming token stream, right
  * after the corresponding OnSentence broadcast. Use this to insert a
  * timed pause between TTS audio segments via
- * UInoAgentsTtsAudioQueue::EnqueuePause.
+ * UInoAgentsLiteRtLmDialogueQueue::EnqueuePause.
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLiteRtLmNewLine);
 

@@ -281,6 +281,37 @@ void ULiteRtLmConversation::BeginDestroy()
 // Sentence detection
 // ======================================================================
 
+namespace
+{
+    /** Strip all [bracketed] tags from a string.
+     *  "[cheerfully] Hello! [whispering] Come closer" → "Hello! Come closer"
+     *  Handles nested brackets gracefully (flattens to nothing). */
+    FString StripBracketedTags(const FString& Raw)
+    {
+        FString Clean;
+        Clean.Reserve(Raw.Len());
+        int32 Depth = 0;
+        for (const TCHAR Ch : Raw)
+        {
+            if (Ch == TEXT('['))
+            {
+                Depth++;
+                continue;
+            }
+            if (Ch == TEXT(']') && Depth > 0)
+            {
+                Depth--;
+                continue;
+            }
+            if (Depth == 0)
+            {
+                Clean.AppendChar(Ch);
+            }
+        }
+        return Clean.TrimStartAndEnd();
+    }
+}
+
 void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 {
     check(IsInGameThread());
@@ -288,10 +319,6 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
     SentenceBuffer += Chunk;
 
     // Split on newline only — each line becomes one OnSentence.
-    // Periods, exclamation marks, and question marks stay inside the
-    // line text so TTS speaks them with natural intonation rather than
-    // fragmenting "1." or "**Learn something new?**" into separate
-    // TTS calls.
     while (true)
     {
         const int32 NewlineIndex = SentenceBuffer.Find(TEXT("\n"));
@@ -300,12 +327,13 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             break;
         }
 
-        FString Line = SentenceBuffer.Left(NewlineIndex).TrimStartAndEnd();
+        FString RawLine = SentenceBuffer.Left(NewlineIndex).TrimStartAndEnd();
         SentenceBuffer.MidInline(NewlineIndex + 1);
 
-        if (!Line.IsEmpty())
+        if (!RawLine.IsEmpty())
         {
-            OnSentence.Broadcast(Line);
+            const FString CleanLine = StripBracketedTags(RawLine);
+            OnSentence.Broadcast(RawLine, CleanLine);
         }
         OnNewLine.Broadcast();
     }
@@ -320,6 +348,7 @@ void ULiteRtLmConversation::FlushSentenceBuffer()
 
     if (!Remainder.IsEmpty())
     {
-        OnSentence.Broadcast(Remainder);
+        const FString CleanRemainder = StripBracketedTags(Remainder);
+        OnSentence.Broadcast(Remainder, CleanRemainder);
     }
 }
