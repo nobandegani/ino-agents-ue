@@ -48,16 +48,20 @@ public:
 
     /** xi-api-key snapshotted from UElevenLabsSettings at Initialize /
      *  ReloadSettings time. Never logged verbatim. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|ElevenLabs")
     FString GetApiKey() const { return CachedApiKey; }
 
     /** Effective base URL (override or hardcoded default). Always a full
      *  https://... with no trailing slash. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|ElevenLabs")
     FString GetBaseUrl() const { return CachedBaseUrl; }
 
     /** Default model id used when a per-call request leaves ModelId empty. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|ElevenLabs")
     FString GetDefaultModelId() const { return CachedDefaultModelId; }
 
     /** Default audio format for callers that don't override it. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|ElevenLabs")
     EElevenLabsOutputFormat GetDefaultOutputFormat() const { return CachedDefaultOutputFormat; }
 
     /**

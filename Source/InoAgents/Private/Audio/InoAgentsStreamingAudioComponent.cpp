@@ -7,14 +7,10 @@
 
 #include "Sound/SoundWaveProcedural.h"
 
-namespace
-{
-    /** How much audio (in seconds) must be queued before Play() is
-     *  called. Lets ElevenLabs' jittery HTTP delivery catch up so the
-     *  queue doesn't underrun mid-stream. 250 ms is low enough that the
-     *  latency is imperceptible for conversational TTS. */
-    constexpr float kPreBufferSeconds = 0.25f;
-}
+// kPreBufferSeconds is now a UPROPERTY (PreBufferSeconds) on the
+// component, editable in the details panel and from Blueprint. The
+// old constexpr lived here in anonymous namespace; removed in favour
+// of the instance member so every component can tune its own latency.
 
 UInoAgentsStreamingAudioComponent::UInoAgentsStreamingAudioComponent(
     const FObjectInitializer& ObjectInitializer)
@@ -331,11 +327,12 @@ void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, i
     ActiveSampleRate  = SampleRate;
     ActiveNumChannels = NumChannels;
 
-    // Pre-buffer target: kPreBufferSeconds worth of int16 samples at
+    // Pre-buffer target: PreBufferSeconds worth of int16 samples at
     // the stream's rate and channel count. int16 = 2 bytes per sample
-    // per channel.
+    // per channel. PreBufferSeconds is a UPROPERTY on the component,
+    // editable per-instance in the details panel.
     PreBufferTargetBytes = static_cast<int32>(
-        static_cast<float>(SampleRate * NumChannels * 2) * kPreBufferSeconds);
+        static_cast<float>(SampleRate * NumChannels * 2) * PreBufferSeconds);
 
     // Drop any prior binding and bind the new wave. Play() is NOT
     // called here — TryStartPlayback handles it after enough audio

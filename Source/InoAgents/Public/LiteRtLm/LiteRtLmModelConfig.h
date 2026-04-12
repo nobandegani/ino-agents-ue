@@ -35,20 +35,20 @@ public:
      *   IPluginManager::FindPlugin("InoAgents")->GetBaseDir() + "/Models/".
      * This keeps configs portable across developer machines.
      */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="InoAgents|LiteRT-LM")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM")
     FString ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
 
     /**
      * Which backend the engine should use.
      */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="InoAgents|LiteRT-LM")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM")
     ELiteRtLmBackend Backend = ELiteRtLmBackend::Cpu;
 
     /**
      * Upper bound on tokens per decode step. Zero means "use engine default".
      * Only meaningful for some backends.
      */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="InoAgents|LiteRT-LM",
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
               meta=(ClampMin="0"))
     int32 MaxNumTokens = 0;
 
@@ -58,7 +58,7 @@ public:
      * {"type":"text","text":"..."} JSON shape before handing it to
      * LiteRT-LM — do not include JSON braces here.
      */
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="InoAgents|LiteRT-LM",
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
               meta=(MultiLine=true))
     FString SystemMessage;
 };
