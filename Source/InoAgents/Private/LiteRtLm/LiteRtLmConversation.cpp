@@ -6,10 +6,6 @@
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 #include "LiteRtLmConversationWorker.h"
 
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
-
 #include "litert/lm/engine.h"
 
 // Out-of-line ctors/dtor. These MUST live in this translation unit (not
@@ -250,7 +246,28 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
     // completing, the buffer may be non-empty.)
     SentenceBuffer.Empty();
 
-    Worker->EnqueueMessage(UserText, BuildMergedContext());
+    // Prepend context to the user message as plain text. The LiteRT-LM
+    // C API's extra_context parameter is injected as Jinja2 template
+    // variables, but the Gemma 4 chat template (embedded in the model
+    // file) does not reference any custom variables — only bos_token,
+    // messages, tools, add_generation_prompt, and enable_thinking.
+    // Verified by extracting the template from the .litertlm binary.
+    //
+    // Prepending to the user message is the reliable path: the model
+    // always sees message content. Context is wrapped in [Context] tags
+    // so the model can distinguish it from the user's actual request.
+    const FString ContextBlock = BuildMergedContext();
+    if (ContextBlock.IsEmpty())
+    {
+        Worker->EnqueueMessage(UserText);
+    }
+    else
+    {
+        const FString AugmentedText = FString::Printf(
+            TEXT("[Context]\n%s[/Context]\n\n%s"),
+            *ContextBlock, *UserText);
+        Worker->EnqueueMessage(AugmentedText);
+    }
 }
 
 void ULiteRtLmConversation::Cancel()
@@ -379,32 +396,36 @@ FString ULiteRtLmConversation::BuildMergedContext() const
         return FString();
     }
 
-    // Build a flat JSON object with ALL context key-value pairs at the
-    // top level. The LiteRT-LM C API passes extra_context to the Rust
-    // minijinja runtime, which iterates top-level keys and inserts each
-    // as a Jinja2 template variable. Whether the model's embedded chat
-    // template actually references these variables is model-dependent.
+    // Build a human-readable context block. Each key-value pair is
+    // rendered as "key: value" on its own line, grouped by source.
     //
-    // Shape: {"location":"Dragon's Peak Castle","time_of_day":"midnight",
-    //         "player_name":"Sir Lancelot","player_class":"knight"}
-    //
-    // Both system context and user context keys are merged into a single
-    // flat namespace. If a key exists in both maps, user context wins.
-    TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-
-    for (const auto& Pair : SystemContextMap)
-    {
-        Root->SetStringField(Pair.Key, Pair.Value);
-    }
-
-    for (const auto& Pair : UserContextMap)
-    {
-        Root->SetStringField(Pair.Key, Pair.Value);
-    }
-
+    // Shape:
+    //   Game state:
+    //   - location: Dragon's Peak Castle
+    //   - time_of_day: midnight
+    //   Player state:
+    //   - player_name: Sir Lancelot
+    //   - player_class: knight
     FString Result;
-    const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Result);
-    FJsonSerializer::Serialize(Root, Writer);
+
+    if (SystemContextMap.Num() > 0)
+    {
+        Result += TEXT("Game state:\n");
+        for (const auto& Pair : SystemContextMap)
+        {
+            Result += FString::Printf(TEXT("- %s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
+    if (UserContextMap.Num() > 0)
+    {
+        Result += TEXT("Player state:\n");
+        for (const auto& Pair : UserContextMap)
+        {
+            Result += FString::Printf(TEXT("- %s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
     return Result;
 }
 
