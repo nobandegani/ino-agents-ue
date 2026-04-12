@@ -383,10 +383,9 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         return;
     }
 
-    // Auto-register the set_emotion tool so the model can drive
-    // facial expressions. Must be registered BEFORE CreateConversation
-    // so the tool is included in the conversation's tools_json snapshot.
-    if (EmotionTool == nullptr)
+    // Auto-register the set_emotion tool if enabled. Must happen
+    // BEFORE CreateConversation so it's in the tools_json snapshot.
+    if (bEnableEmotionTool && EmotionTool == nullptr)
     {
         ULiteRtLmSetEmotionTool* Tool = NewObject<ULiteRtLmSetEmotionTool>();
         Tool->SetAgent(this);
