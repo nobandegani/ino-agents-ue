@@ -145,6 +145,86 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
 // Runtime API
 // ======================================================================
 
+// ======================================================================
+// Context
+// ======================================================================
+
+void UInoAgentsLiteRtLmAgentComponent::SetSystemContext(const FString& Key, const FString& Value)
+{
+    SystemContextMap.Add(Key, Value);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::SetUserContext(const FString& Key, const FString& Value)
+{
+    UserContextMap.Add(Key, Value);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::AddSystemContext(const FString& Key, const FString& Value)
+{
+    SystemContextMap.Add(Key, Value);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::AddUserContext(const FString& Key, const FString& Value)
+{
+    UserContextMap.Add(Key, Value);
+}
+
+FString UInoAgentsLiteRtLmAgentComponent::GetSystemContext(const FString& Key) const
+{
+    const FString* Found = SystemContextMap.Find(Key);
+    return Found ? *Found : FString();
+}
+
+FString UInoAgentsLiteRtLmAgentComponent::GetUserContext(const FString& Key) const
+{
+    const FString* Found = UserContextMap.Find(Key);
+    return Found ? *Found : FString();
+}
+
+void UInoAgentsLiteRtLmAgentComponent::ClearSystemContext()
+{
+    SystemContextMap.Reset();
+}
+
+void UInoAgentsLiteRtLmAgentComponent::ClearUserContext()
+{
+    UserContextMap.Reset();
+}
+
+FString UInoAgentsLiteRtLmAgentComponent::BuildMergedContext() const
+{
+    if (SystemContextMap.Num() == 0 && UserContextMap.Num() == 0)
+    {
+        return FString();
+    }
+
+    FString Result;
+
+    if (SystemContextMap.Num() > 0)
+    {
+        Result += TEXT("[System Context]\n");
+        for (const auto& Pair : SystemContextMap)
+        {
+            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
+    if (UserContextMap.Num() > 0)
+    {
+        Result += TEXT("[User Context]\n");
+        for (const auto& Pair : UserContextMap)
+        {
+            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
+    return Result;
+}
+
+// ======================================================================
+// Runtime API
+// ======================================================================
+
 void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
 {
     if (Conversation == nullptr)
@@ -152,7 +232,7 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
         OnError.Broadcast(TEXT("No conversation — call LoadModel first"));
         return;
     }
-    Conversation->SendMessageAsync(Text, ExtraContext);
+    Conversation->SendMessageAsync(Text, BuildMergedContext());
 }
 
 void UInoAgentsLiteRtLmAgentComponent::Cancel()
