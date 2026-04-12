@@ -115,7 +115,24 @@ void ULiteRtLmConversation::Initialize(
     }
 
     // Session config (sampler params + max output tokens).
-    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
+    //
+    // DISABLED for LiteRT-LM v0.10.1: passing ANY user-created
+    // SessionConfig (even with reasonable defaults like TopK=40,
+    // temp=0.8) causes Conversation::Create → engine.CreateSession()
+    // to fail for Gemma 4 models. Passing nullptr lets the C API use
+    // SessionConfig::CreateDefault() with TYPE_UNSPECIFIED, which
+    // defers to model metadata for sampler params and works.
+    //
+    // This is NOT related to the extra_context JSON bug (fixed
+    // separately). Verified by re-enabling session config after the
+    // JSON fix — conversation_create still returns NULL.
+    //
+    // TODO(litert-upgrade): re-enable when a future LiteRT-LM version
+    // supports user-provided session configs for Gemma 4.
+    LiteRtLmSessionConfig* SessionConfig = nullptr;
+
+#if 0  // Disabled — see comment above
+    SessionConfig = litert_lm_session_config_create();
     if (SessionConfig != nullptr)
     {
         LiteRtLmSamplerParams NativeSampler = {};
@@ -140,6 +157,7 @@ void ULiteRtLmConversation::Initialize(
                 SessionConfig, InConfig.MaxOutputTokens);
         }
     }
+#endif
 
     // Pre-populated conversation history (messages_json).
     const FTCHARToUTF8 MessagesJsonUtf8(*InConfig.InitialMessages);
