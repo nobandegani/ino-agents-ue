@@ -17,7 +17,9 @@
       "Bash(where python:*)",
       "Bash(python -c ':*)",
       "Bash(xargs grep:*)",
-      "Bash(find \"E:/Projects/InoAgentDemo/Plugins/InoAgents/LiteRtLm/vendor/LiteRT-LM/runtime/components/tool_use\" -name \"*_test.cc\" -exec grep -l \"ParseFcExpression\\\\|FormatToolAsFc\" {} \\\\;)"
+      "Bash(find \"E:/Projects/InoAgentDemo/Plugins/InoAgents/LiteRtLm/vendor/LiteRT-LM/runtime/components/tool_use\" -name \"*_test.cc\" -exec grep -l \"ParseFcExpression\\\\|FormatToolAsFc\" {} \\\\;)",
+      "WebSearch",
+      "WebFetch(domain:ai.google.dev)"
     ]
   }
 }
