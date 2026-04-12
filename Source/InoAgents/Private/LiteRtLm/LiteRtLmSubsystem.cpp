@@ -7,10 +7,13 @@
 #include "LiteRtLm/LiteRtLmModelConfig.h"
 #include "LiteRtLm/LiteRtLmTool.h"
 #include "LiteRtLm/LiteRtLmTypes.h"
+#include "UI/Slate/InoAgentsChatBridge.h"
+#include "UI/Slate/SInoAgentsChatPanel.h"
 
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Engine/GameViewportClient.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
@@ -18,6 +21,12 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/StrongObjectPtr.h"
+#include "Widgets/Layout/SBox.h"
+
+#if WITH_EDITOR
+    #include "Editor.h"
+#endif
 
 // The native C API. Only included in this .cpp — callers of the subsystem
 // never see LiteRT-LM types directly.
@@ -484,4 +493,174 @@ FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
     FJsonSerializer::Serialize(SchemaArray, Writer);
 
     return OutJson;
+}
+
+// ======================================================================
+// Chat panel (dev/debug UI)
+// ======================================================================
+//
+// File-scope state mirrors the console-command version in
+// InoAgentsLiteRtLmShowChatPanelTest.cpp. When ShowChatPanel is called
+// via the subsystem (Blueprint or C++), these statics are reused so
+// only one panel is ever live at a time — the subsystem path and the
+// console-command path share the same teardown logic in HideChatPanel.
+
+namespace ChatPanelState
+{
+    TStrongObjectPtr<UInoAgentsChatBridge> Bridge;
+    TSharedPtr<SInoAgentsChatPanel>        Panel;
+    TSharedPtr<SWidget>                    ViewportContent;
+    TWeakObjectPtr<UGameViewportClient>    HostViewport;
+
+#if WITH_EDITOR
+    FDelegateHandle PrePIEEndedHandle;
+#endif
+}
+
+static UGameViewportClient* FindGameViewportForChatPanel()
+{
+    if (GEngine == nullptr)
+    {
+        return nullptr;
+    }
+    for (const FWorldContext& Context : GEngine->GetWorldContexts())
+    {
+        if (Context.GameViewport != nullptr)
+        {
+            return Context.GameViewport;
+        }
+    }
+    return GEngine->GameViewport;
+}
+
+void ULiteRtLmSubsystem::HideChatPanel()
+{
+#if WITH_EDITOR
+    if (ChatPanelState::PrePIEEndedHandle.IsValid())
+    {
+        FEditorDelegates::PrePIEEnded.Remove(ChatPanelState::PrePIEEndedHandle);
+        ChatPanelState::PrePIEEndedHandle.Reset();
+    }
+#endif
+
+    if (ChatPanelState::Bridge.IsValid())
+    {
+        ChatPanelState::Bridge->Detach();
+    }
+
+    if (UGameViewportClient* VC = ChatPanelState::HostViewport.Get())
+    {
+        if (ChatPanelState::ViewportContent.IsValid())
+        {
+            VC->RemoveViewportWidgetContent(ChatPanelState::ViewportContent.ToSharedRef());
+        }
+    }
+    ChatPanelState::HostViewport.Reset();
+    ChatPanelState::ViewportContent.Reset();
+    ChatPanelState::Panel.Reset();
+    ChatPanelState::Bridge.Reset();
+
+    UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem::HideChatPanel: done"));
+}
+
+void ULiteRtLmSubsystem::ShowChatPanel(ULiteRtLmConversation* InConversation)
+{
+    // Tear down any prior panel first.
+    HideChatPanel();
+
+    // Locate a viewport.
+    UGameViewportClient* VC = FindGameViewportForChatPanel();
+    if (VC == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("ShowChatPanel: no GameViewport — start PIE first."));
+        return;
+    }
+
+    // Resolve the conversation: use the caller's if provided, otherwise
+    // create one ourselves (requires a loaded model).
+    ULiteRtLmConversation* Conv = InConversation;
+    if (Conv == nullptr)
+    {
+        if (!IsModelLoaded())
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("ShowChatPanel: no conversation provided and no model loaded — "
+                        "either pass a conversation or load a model first."));
+            return;
+        }
+        Conv = CreateConversation();
+        if (Conv == nullptr)
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("ShowChatPanel: CreateConversation returned null."));
+            return;
+        }
+    }
+
+    // Build the bridge and panel.
+    UInoAgentsChatBridge* Bridge = NewObject<UInoAgentsChatBridge>();
+    ChatPanelState::Bridge = TStrongObjectPtr<UInoAgentsChatBridge>(Bridge);
+
+    TSharedRef<SInoAgentsChatPanel> Panel = SNew(SInoAgentsChatPanel)
+        .OnMessageSubmitted(FOnInoAgentsChatPanelMessageSubmitted::CreateLambda(
+            [](const FString& Text)
+            {
+                if (ChatPanelState::Bridge.IsValid())
+                {
+                    ChatPanelState::Bridge->SendUserMessage(Text);
+                }
+            }))
+        .OnCancelRequested(FOnInoAgentsChatPanelCancelRequested::CreateLambda(
+            []()
+            {
+                if (ChatPanelState::Bridge.IsValid())
+                {
+                    ChatPanelState::Bridge->CancelStream();
+                }
+            }))
+        .OnDismissed(FOnInoAgentsChatPanelDismissed::CreateLambda(
+            [WeakThis = TWeakObjectPtr<ULiteRtLmSubsystem>(this)]()
+            {
+                if (ULiteRtLmSubsystem* Self = WeakThis.Get())
+                {
+                    Self->HideChatPanel();
+                }
+            }));
+    ChatPanelState::Panel = Panel;
+
+    // Position bottom-right with 24 px padding.
+    TSharedRef<SWidget> Anchor = SNew(SBox)
+        .HAlign(HAlign_Right)
+        .VAlign(VAlign_Bottom)
+        .Padding(FMargin(0.f, 0.f, 24.f, 24.f))
+        [
+            Panel
+        ];
+    ChatPanelState::ViewportContent = Anchor;
+    ChatPanelState::HostViewport    = VC;
+
+    VC->AddViewportWidgetContent(Anchor, /*ZOrder=*/100);
+
+    // Hand the bridge the conversation + panel.
+    Bridge->Attach(Panel, Conv);
+
+    // Focus the input on the next Slate tick.
+    Panel->FocusInput();
+
+#if WITH_EDITOR
+    ChatPanelState::PrePIEEndedHandle = FEditorDelegates::PrePIEEnded.AddLambda(
+        [WeakThis = TWeakObjectPtr<ULiteRtLmSubsystem>(this)](const bool /*bIsSimulating*/)
+        {
+            if (ULiteRtLmSubsystem* Self = WeakThis.Get())
+            {
+                Self->HideChatPanel();
+            }
+        });
+#endif
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("ShowChatPanel: ready (conversation=%s, external=%s)"),
+           *Conv->GetName(),
+           InConversation != nullptr ? TEXT("yes") : TEXT("no"));
 }

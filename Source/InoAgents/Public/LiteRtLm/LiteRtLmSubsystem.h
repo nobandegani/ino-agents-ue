@@ -155,6 +155,37 @@ public:
     ULiteRtLmConversation* CreateConversation();
 
     // ------------------------------------------------------------------
+    // Chat panel (dev/debug UI)
+    // ------------------------------------------------------------------
+
+    /**
+     * Show the in-PIE Slate chat panel, connected to a conversation the
+     * caller already owns. The panel uses the conversation's existing
+     * delegates (OnToken, OnComplete, OnError, OnToolCalled) to display
+     * streaming tokens, tool-call pills, and errors.
+     *
+     * If Conversation is null, the subsystem creates a new one internally
+     * (same behaviour as the InoAgents.LiteRtLm.ShowChatPanel console
+     * command). If a panel is already showing, it is torn down first.
+     *
+     * The subsystem does NOT take ownership of the conversation — the
+     * caller must keep it alive as long as the panel is visible. If the
+     * conversation is GC'd while the panel is open, the bridge's weak-
+     * ptr-based handlers silently no-op and the panel stays on screen
+     * in a "disconnected" state until HideChatPanel is called.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|LiteRT-LM|UI")
+    void ShowChatPanel(ULiteRtLmConversation* Conversation = nullptr);
+
+    /**
+     * Tear down the chat panel shown by ShowChatPanel. Safe to call when
+     * no panel is visible (no-op). Also called automatically at PIE end
+     * via the PrePIEEnded hook.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|LiteRT-LM|UI")
+    void HideChatPanel();
+
+    // ------------------------------------------------------------------
     // Tool registry (D.4)
     // ------------------------------------------------------------------
 
