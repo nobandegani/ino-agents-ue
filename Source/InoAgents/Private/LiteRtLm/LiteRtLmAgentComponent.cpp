@@ -69,19 +69,28 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     const FLiteRtLmModelConfig& InModelConfig,
     const FString& InVoiceId,
     const FElevenLabsDialogueRequest& InTtsRequestTemplate,
-    int32 InPauseDurationMs)
+    int32 InPauseDurationMs,
+    int32 InPcmSampleRate,
+    int32 InPcmNumChannels)
 {
     ModelConfig        = InModelConfig;
     VoiceId            = InVoiceId;
     TtsRequestTemplate = InTtsRequestTemplate;
     PauseDurationMs    = FMath::Max(InPauseDurationMs, 0);
+    PcmSampleRate      = FMath::Clamp(InPcmSampleRate, 8000, 192000);
+    PcmNumChannels     = FMath::Clamp(InPcmNumChannels, 1, 2);
+
+    if (AudioComp != nullptr)
+    {
+        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+    }
 
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsLiteRtLmAgentComponent::Initialize: model=%s, voice=%s, "
-                "outputFmt=%d, pauseMs=%d"),
+                "outputFmt=%d, pauseMs=%d, pcm=%dHz/%dch"),
            *ModelConfig.ModelFileName, *VoiceId,
            static_cast<int32>(TtsRequestTemplate.OutputFormat),
-           PauseDurationMs);
+           PauseDurationMs, PcmSampleRate, PcmNumChannels);
 }
 
 // ======================================================================
@@ -297,6 +306,13 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         this, &UInoAgentsLiteRtLmAgentComponent::HandleError);
     Conversation->OnToolCalled.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleToolCalled);
+
+    // Apply PCM format from config (handles the case where Initialize
+    // wasn't called and LoadModel uses details-panel defaults).
+    if (AudioComp != nullptr)
+    {
+        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+    }
 
     // Create and initialize the dialogue queue.
     DialogueQueue = NewObject<UInoAgentsLiteRtLmDialogueQueue>(this);
