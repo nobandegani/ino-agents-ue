@@ -6,6 +6,8 @@
 #include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
 
+#include "Containers/Ticker.h"
+
 // ======================================================================
 // Slot observer — per-TTS-action trampoline
 // ======================================================================
@@ -96,14 +98,16 @@ void UInoAgentsTtsAudioQueue::Initialize(
     UObject*                             WorldContextObject,
     UInoAgentsStreamingAudioComponent*   InAudioComponent,
     const FString&                       InDefaultVoiceId,
-    const FElevenLabsDialogueRequest&    InRequestTemplate)
+    const FElevenLabsDialogueRequest&    InRequestTemplate,
+    int32                                InDefaultPauseDurationMs)
 {
-    WorldContextWeak      = WorldContextObject;
-    AudioComponent        = InAudioComponent;
-    DefaultVoiceId        = InDefaultVoiceId;
-    RequestTemplate       = InRequestTemplate;
-    CurrentPlayIndex      = 0;
-    bCurrentSlotStreaming  = false;
+    WorldContextWeak        = WorldContextObject;
+    AudioComponent          = InAudioComponent;
+    DefaultVoiceId          = InDefaultVoiceId;
+    RequestTemplate         = InRequestTemplate;
+    DefaultPauseDurationMs  = FMath::Max(InDefaultPauseDurationMs, 0);
+    CurrentPlayIndex        = 0;
+    bCurrentSlotStreaming    = false;
     Slots.Reset();
     Observers.Reset();
 
@@ -194,6 +198,25 @@ void UInoAgentsTtsAudioQueue::EnqueueSentence(
            *VoiceId);
 
     Action->Activate();
+}
+
+void UInoAgentsTtsAudioQueue::EnqueuePause()
+{
+    if (DefaultPauseDurationMs <= 0)
+    {
+        return;  // 0 ms pause = skip entirely
+    }
+
+    FSlot& Slot        = Slots.AddDefaulted_GetRef();
+    Slot.bIsPause       = true;
+    Slot.PauseDurationMs = DefaultPauseDurationMs;
+    Slot.bComplete      = true;  // pause slots are instantly "complete"
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("UInoAgentsTtsAudioQueue: slot %d is a %d-ms pause"),
+           Slots.Num() - 1, DefaultPauseDurationMs);
+
+    DrainReadySlots();
 }
 
 void UInoAgentsTtsAudioQueue::Clear()
@@ -287,10 +310,36 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
             break;
         }
 
-        // If the current slot had been streaming directly (head-of-line
-        // path in OnSlotChunk), its bytes are already in the audio
-        // component's queue. If it was a FUTURE slot that completed
-        // before reaching head-of-line, flush its buffered bytes now.
+        // --- Pause slot: wait, then advance --------------------------
+        if (Slot.bIsPause && Slot.PauseDurationMs > 0)
+        {
+            // Mark the pause as "consumed" so we don't re-enter it
+            // when the timer fires and calls DrainReadySlots again.
+            Slot.PauseDurationMs = 0;
+
+            const float DelaySec =
+                static_cast<float>(Slots[CurrentPlayIndex].PauseDurationMs > 0
+                    ? Slots[CurrentPlayIndex].PauseDurationMs
+                    : DefaultPauseDurationMs) / 1000.0f;
+
+            TWeakObjectPtr<UInoAgentsTtsAudioQueue> WeakSelf(this);
+            FTSTicker::GetCoreTicker().AddTicker(
+                FTickerDelegate::CreateLambda(
+                    [WeakSelf](float) -> bool
+                    {
+                        if (UInoAgentsTtsAudioQueue* Self = WeakSelf.Get())
+                        {
+                            Self->CurrentPlayIndex++;
+                            Self->bCurrentSlotStreaming = false;
+                            Self->DrainReadySlots();
+                        }
+                        return false;  // one-shot
+                    }),
+                DelaySec);
+            return;  // stop draining until the timer fires
+        }
+
+        // --- Audio slot: flush buffered bytes if any -----------------
         if (!Slot.bErrored && Slot.BufferedBytes.Num() > 0 && AudioComponent != nullptr)
         {
             AudioComponent->FeedAudioBytes(Slot.BufferedBytes, DerivedAudioFormat);

@@ -102,10 +102,18 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
               meta = (WorldContext = "WorldContextObject"))
+    /**
+     * @param InDefaultPauseDurationMs  Duration of silence (in ms)
+     *                                  inserted by each EnqueuePause
+     *                                  call. 500 ms is a natural
+     *                                  conversational pause. 0 =
+     *                                  no delay (advance immediately).
+     */
     void Initialize(UObject* WorldContextObject,
                     UInoAgentsStreamingAudioComponent* InAudioComponent,
                     const FString& InDefaultVoiceId,
-                    const FElevenLabsDialogueRequest& InRequestTemplate);
+                    const FElevenLabsDialogueRequest& InRequestTemplate,
+                    int32 InDefaultPauseDurationMs);
 
     /**
      * Queue a sentence for TTS. The ElevenLabs request is dispatched
@@ -120,6 +128,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
     void EnqueueSentence(const FString& SentenceText,
                          const FString& VoiceIdOverride);
+
+    /**
+     * Insert a timed pause into the queue. When this slot reaches the
+     * playback head, the queue waits DefaultPauseDurationMs before
+     * advancing to the next slot. No bytes are fed to the audio
+     * component — the pause is pure silence via a time delay.
+     *
+     * Wire the conversation's OnNewLine delegate to this to get
+     * natural gaps between lines.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
+    void EnqueuePause();
 
     /**
      * Drop all queued (not yet started) AND in-flight slots. Calls
@@ -148,11 +168,18 @@ private:
          *  because those bytes go straight to the audio component. */
         TArray<uint8> BufferedBytes;
 
-        /** True once the TTS action's OnComplete has fired. */
+        /** True once the TTS action's OnComplete has fired (or the
+         *  slot is a pause, which is instantly complete). */
         bool bComplete = false;
 
         /** True if an error occurred (skipped on drain). */
         bool bErrored = false;
+
+        /** True if this slot is a timed pause, not a TTS segment. */
+        bool bIsPause = false;
+
+        /** Pause duration in ms (only meaningful when bIsPause). */
+        int32 PauseDurationMs = 0;
     };
 
     TWeakObjectPtr<UObject> WorldContextWeak;
@@ -166,6 +193,7 @@ private:
     TArray<TObjectPtr<UInoAgentsTtsSlotObserver>> Observers;
 
     FString DefaultVoiceId;
+    int32   DefaultPauseDurationMs = 500;
 
     /** Template request — all settings except Inputs are copied into
      *  every TTS call dispatched by EnqueueSentence. */

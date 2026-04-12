@@ -235,21 +235,29 @@ public:
     FOnLiteRtLmError OnError;
 
     /**
-     * Fires each time the accumulated streaming tokens cross a sentence
-     * boundary (., !, ?, or \n). SentenceText is the complete sentence
-     * including its trailing punctuation but trimmed of leading /
-     * trailing whitespace.
+     * Fires each time the accumulated streaming tokens cross a newline
+     * boundary (\n). SentenceText is the complete line trimmed of
+     * leading / trailing whitespace.
      *
-     * Typical use: pipe each sentence to ElevenLabs TTS independently
-     * so audio generation starts before the full LLM response is done.
+     * Typical use: pipe each line to ElevenLabs TTS independently so
+     * audio generation starts before the full LLM response is done.
      *
      * At OnComplete time, any remaining text that hasn't crossed a
-     * sentence boundary is flushed as a final OnSentence broadcast, so
-     * the concatenation of every OnSentence always equals the full
+     * newline is flushed as a final OnSentence broadcast, so the
+     * concatenation of every OnSentence always equals the full
      * assistant response.
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
     FOnLiteRtLmSentence OnSentence;
+
+    /**
+     * Fires at each newline boundary, right after the corresponding
+     * OnSentence broadcast. Wire this to
+     * UInoAgentsTtsAudioQueue::EnqueuePause to insert timed silence
+     * between audio segments.
+     */
+    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
+    FOnLiteRtLmNewLine OnNewLine;
 
     /**
      * Diagnostic event: fires AFTER a tool has been executed and its

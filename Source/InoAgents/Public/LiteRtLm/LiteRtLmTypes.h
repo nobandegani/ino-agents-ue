@@ -76,21 +76,29 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmError,
     FString, ErrorMessage);
 
 /**
- * Fired each time the streaming token buffer crosses a sentence boundary.
- * Sentence boundaries are: period (.), exclamation (!), question mark (?),
- * and newline (\n). The SentenceText delivered includes the trailing
- * punctuation but not the whitespace that follows it.
+ * Fired each time the streaming token buffer crosses a newline boundary.
+ * SentenceText is the accumulated line trimmed of whitespace — typically
+ * a full sentence, a paragraph, or a numbered list item, depending on
+ * how the model formats its response.
  *
  * Fires zero or more times per send, between OnToken broadcasts and before
  * the terminal OnComplete. The concatenation of every SentenceText plus
  * any trailing fragment (delivered only via OnComplete) equals the full
  * assistant response.
  *
- * Primary use case: pipe each sentence to ElevenLabs TTS independently so
+ * Primary use case: pipe each line to ElevenLabs TTS independently so
  * audio generation starts before the full response is done.
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmSentence,
     FString, SentenceText);
+
+/**
+ * Fired at each newline boundary in the streaming token stream, right
+ * after the corresponding OnSentence broadcast. Use this to insert a
+ * timed pause between TTS audio segments via
+ * UInoAgentsTtsAudioQueue::EnqueuePause.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLiteRtLmNewLine);
 
 /**
  * Diagnostic event fired after ULiteRtLmConversation has handled a tool call

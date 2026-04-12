@@ -276,36 +276,27 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 
     SentenceBuffer += Chunk;
 
-    // Scan for the FIRST sentence-ending delimiter. Emit the sentence,
-    // shift the buffer, and repeat until no more delimiters are found.
-    // This handles multi-sentence chunks like "Hello. How are you?"
-    // — each sentence fires separately.
+    // Split on newline only — each line becomes one OnSentence.
+    // Periods, exclamation marks, and question marks stay inside the
+    // line text so TTS speaks them with natural intonation rather than
+    // fragmenting "1." or "**Learn something new?**" into separate
+    // TTS calls.
     while (true)
     {
-        int32 SplitIndex = INDEX_NONE;
-        for (int32 i = 0; i < SentenceBuffer.Len(); ++i)
-        {
-            const TCHAR Ch = SentenceBuffer[i];
-            if (Ch == TEXT('.') || Ch == TEXT('!') || Ch == TEXT('?') || Ch == TEXT('\n'))
-            {
-                SplitIndex = i;
-                break;
-            }
-        }
-
-        if (SplitIndex == INDEX_NONE)
+        const int32 NewlineIndex = SentenceBuffer.Find(TEXT("\n"));
+        if (NewlineIndex == INDEX_NONE)
         {
             break;
         }
 
-        // Emit everything up to and including the delimiter, trimmed.
-        FString Sentence = SentenceBuffer.Left(SplitIndex + 1).TrimStartAndEnd();
-        SentenceBuffer.MidInline(SplitIndex + 1);
+        FString Line = SentenceBuffer.Left(NewlineIndex).TrimStartAndEnd();
+        SentenceBuffer.MidInline(NewlineIndex + 1);
 
-        if (!Sentence.IsEmpty())
+        if (!Line.IsEmpty())
         {
-            OnSentence.Broadcast(Sentence);
+            OnSentence.Broadcast(Line);
         }
+        OnNewLine.Broadcast();
     }
 }
 
