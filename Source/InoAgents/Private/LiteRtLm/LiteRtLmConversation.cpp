@@ -8,7 +8,7 @@
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"  // EscapeJsonString
+#include "Serialization/JsonWriter.h"
 
 #include "litert/lm/engine.h"
 
@@ -379,33 +379,27 @@ FString ULiteRtLmConversation::BuildMergedContext() const
         return FString();
     }
 
-    // Build a valid JSON object. The LiteRT-LM C API parses extra_context
-    // with nlohmann::json::parse(). If the string is NOT valid JSON, the
-    // parse returns a "discarded" value that passes the upstream null/empty
-    // guard (upstream bug: missing is_discarded() check) and propagates a
-    // corrupted JSON value into SendMessageAsync, causing error 13.
+    // Build a flat JSON object with ALL context key-value pairs at the
+    // top level. The LiteRT-LM C API passes extra_context to the Rust
+    // minijinja runtime, which iterates top-level keys and inserts each
+    // as a Jinja2 template variable. Whether the model's embedded chat
+    // template actually references these variables is model-dependent.
     //
-    // Shape: {"system_context":{"k":"v",...},"user_context":{"k":"v",...}}
+    // Shape: {"location":"Dragon's Peak Castle","time_of_day":"midnight",
+    //         "player_name":"Sir Lancelot","player_class":"knight"}
+    //
+    // Both system context and user context keys are merged into a single
+    // flat namespace. If a key exists in both maps, user context wins.
     TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 
-    if (SystemContextMap.Num() > 0)
+    for (const auto& Pair : SystemContextMap)
     {
-        TSharedRef<FJsonObject> SysObj = MakeShared<FJsonObject>();
-        for (const auto& Pair : SystemContextMap)
-        {
-            SysObj->SetStringField(Pair.Key, Pair.Value);
-        }
-        Root->SetObjectField(TEXT("system_context"), SysObj);
+        Root->SetStringField(Pair.Key, Pair.Value);
     }
 
-    if (UserContextMap.Num() > 0)
+    for (const auto& Pair : UserContextMap)
     {
-        TSharedRef<FJsonObject> UsrObj = MakeShared<FJsonObject>();
-        for (const auto& Pair : UserContextMap)
-        {
-            UsrObj->SetStringField(Pair.Key, Pair.Value);
-        }
-        Root->SetObjectField(TEXT("user_context"), UsrObj);
+        Root->SetStringField(Pair.Key, Pair.Value);
     }
 
     FString Result;
