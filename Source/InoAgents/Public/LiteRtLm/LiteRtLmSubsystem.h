@@ -161,7 +161,8 @@ public:
      * the conversation is created do not retroactively apply.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
-    ULiteRtLmConversation* CreateConversation();
+    ULiteRtLmConversation* CreateConversation(
+        const TArray<FLiteRtLmMessage>& InitialMessages = TArray<FLiteRtLmMessage>());
 
     // ------------------------------------------------------------------
     // Chat panel (dev/debug UI)

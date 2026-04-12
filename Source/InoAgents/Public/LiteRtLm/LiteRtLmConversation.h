@@ -326,7 +326,8 @@ public:
     void Initialize(
         ULiteRtLmSubsystem* InSubsystem,
         LiteRtLmEngine* InEngine,
-        const FLiteRtLmModelConfig& InConfig);
+        const FLiteRtLmModelConfig& InConfig,
+        const TArray<FLiteRtLmMessage>& InInitialMessages = TArray<FLiteRtLmMessage>());
 
     // ------------------------------------------------------------------
     // Sentence detection (called from worker's game-thread token path)

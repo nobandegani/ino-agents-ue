@@ -308,7 +308,8 @@ void ULiteRtLmSubsystem::UnloadModel()
     UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem: UnloadModel complete"));
 }
 
-ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
+ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation(
+    const TArray<FLiteRtLmMessage>& InitialMessages)
 {
     check(IsInGameThread());
 
@@ -347,7 +348,7 @@ ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
     ActiveConversation.Reset();
 
     ULiteRtLmConversation* Conv = NewObject<ULiteRtLmConversation>();
-    Conv->Initialize(this, Engine, LoadedConfig);
+    Conv->Initialize(this, Engine, LoadedConfig, InitialMessages);
     ActiveConversation = Conv;
     return Conv;
 }

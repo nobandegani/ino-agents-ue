@@ -83,6 +83,37 @@ enum class ELiteRtLmActivationType : uint8
 };
 
 // ============================================================================
+// Conversation history
+// ============================================================================
+
+/** Role in a conversation message. */
+UENUM(BlueprintType)
+enum class ELiteRtLmMessageRole : uint8
+{
+    User       UMETA(DisplayName = "User"),
+    Assistant  UMETA(DisplayName = "Assistant"),
+};
+
+/**
+ * One message in a conversation history. Used for pre-populating
+ * conversations with saved history or seeding backstory examples.
+ */
+USTRUCT(BlueprintType)
+struct FLiteRtLmMessage
+{
+    GENERATED_BODY()
+
+    /** Who sent this message. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    ELiteRtLmMessageRole Role = ELiteRtLmMessageRole::User;
+
+    /** Message text content. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (MultiLine = true))
+    FString Content;
+};
+
+// ============================================================================
 // Model config
 // ============================================================================
 
@@ -126,13 +157,6 @@ struct FLiteRtLmModelConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
               meta = (ClampMin = "0"))
     int32 MaxOutputTokens = 0;
-
-    /** Pre-populated conversation history as a JSON array. Empty = none.
-     *  Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
-     *  Useful for resuming saved conversations or seeding backstory. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
-              meta = (MultiLine = true))
-    FString InitialMessages;
 
     // ----- Engine optimization -----
 

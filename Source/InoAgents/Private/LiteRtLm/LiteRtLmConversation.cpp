@@ -28,7 +28,8 @@ ULiteRtLmConversation::~ULiteRtLmConversation() = default;
 void ULiteRtLmConversation::Initialize(
     ULiteRtLmSubsystem* InSubsystem,
     LiteRtLmEngine* InEngine,
-    const FLiteRtLmModelConfig& InConfig)
+    const FLiteRtLmModelConfig& InConfig,
+    const TArray<FLiteRtLmMessage>& InInitialMessages)
 {
     check(IsInGameThread());
 
@@ -156,9 +157,36 @@ void ULiteRtLmConversation::Initialize(
 #endif
 
     // Pre-populated conversation history (messages_json).
-    const FTCHARToUTF8 MessagesJsonUtf8(*InConfig.InitialMessages);
+    // Serialize the InitialMessages struct array into a JSON array:
+    // [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+    FString MessagesJsonString;
+    if (InInitialMessages.Num() > 0)
+    {
+        MessagesJsonString += TEXT("[");
+        for (int32 i = 0; i < InInitialMessages.Num(); ++i)
+        {
+            const FLiteRtLmMessage& Msg = InInitialMessages[i];
+            const TCHAR* RoleStr = (Msg.Role == ELiteRtLmMessageRole::Assistant)
+                ? TEXT("assistant") : TEXT("user");
+
+            // Escape content for JSON embedding.
+            const FString EscapedContent = Msg.Content
+                .Replace(TEXT("\\"), TEXT("\\\\"))
+                .Replace(TEXT("\""), TEXT("\\\""))
+                .Replace(TEXT("\n"), TEXT("\\n"))
+                .Replace(TEXT("\r"), TEXT("\\r"))
+                .Replace(TEXT("\t"), TEXT("\\t"));
+
+            if (i > 0) { MessagesJsonString += TEXT(","); }
+            MessagesJsonString += FString::Printf(
+                TEXT(R"({"role":"%s","content":"%s"})"),
+                RoleStr, *EscapedContent);
+        }
+        MessagesJsonString += TEXT("]");
+    }
+    const FTCHARToUTF8 MessagesJsonUtf8(*MessagesJsonString);
     const char* const MessagesCStr =
-        InConfig.InitialMessages.IsEmpty() ? nullptr : MessagesJsonUtf8.Get();
+        MessagesJsonString.IsEmpty() ? nullptr : MessagesJsonUtf8.Get();
 
     // Create the native conversation config.
     LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create(
