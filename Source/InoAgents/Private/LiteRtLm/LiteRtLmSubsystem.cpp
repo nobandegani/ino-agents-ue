@@ -206,6 +206,12 @@ void ULiteRtLmSubsystem::ProceedWithLoad(
             }
             if (ActivationType != ELiteRtLmActivationType::F32)
             {
+                // WARNING: LiteRT-LM v0.10.1 loads the engine with non-F32
+                // activations successfully, but conversation_send_message_stream
+                // returns error 13 at runtime. The setting IS applied here so
+                // that future versions that fix this will work without code
+                // changes — but callers should expect broken conversations
+                // until then. Default is F32 (see FLiteRtLmModelConfig).
                 litert_lm_engine_settings_set_activation_data_type(
                     NewSettings, static_cast<int>(ActivationType));
             }

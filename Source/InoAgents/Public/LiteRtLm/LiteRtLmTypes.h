@@ -136,9 +136,15 @@ struct FLiteRtLmModelConfig
 
     // ----- Engine optimization -----
 
-    /** Activation precision. Lower = faster + less RAM. */
+    /** Activation precision. Lower = faster + less RAM.
+     *
+     *  NOTE (LiteRT-LM v0.10.1): non-F32 activation types cause
+     *  send_message_stream to return error 13 even though the engine
+     *  loads successfully. Default is F32 until a future LiteRT-LM
+     *  release fixes this. The engine-level setting IS applied (the
+     *  model file loads), but the conversation streaming path fails. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
-    ELiteRtLmActivationType ActivationType = ELiteRtLmActivationType::F16;
+    ELiteRtLmActivationType ActivationType = ELiteRtLmActivationType::F32;
 
     /** Custom XNNPACK cache directory. Empty = default (next to model file). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")

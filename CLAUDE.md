@@ -25,6 +25,16 @@ Why LiteRT-LM and not llama.cpp, ONNX Runtime GenAI, MLX, or MediaPipe:
 
 Known caveat: LiteRT-LM is **pre-1.0** (v0.10.x). Expect upstream API churn — we pin to a specific tag via submodule, never track `main`.
 
+### Known LiteRT-LM v0.10.1 runtime limitations
+
+Two C API features are declared in the header and compile but fail at runtime with Gemma 4 models. Both are disabled in our code (with `#if 0` / default values) and marked with `TODO(litert-upgrade)` comments:
+
+1. **Session config (sampler params + max output tokens).** Passing a non-null `LiteRtLmSessionConfig*` to `litert_lm_conversation_config_create` causes `litert_lm_conversation_create` to return NULL. Worse, the failed attempt poisons the engine's internal state — subsequent conversation creations on the same engine produce objects where `send_message_stream` returns error 13. **Workaround:** pass `nullptr` for session config (uses engine defaults for all sampling). The `FLiteRtLmSamplerConfig` struct and `MaxOutputTokens` field exist in `FLiteRtLmModelConfig` for forward-compatibility but are not applied at runtime.
+
+2. **Activation data type (F16/I16/I8).** `litert_lm_engine_settings_set_activation_data_type` with non-F32 values loads the engine successfully (model file loads, XNNPACK cache regenerates), but `litert_lm_conversation_send_message_stream` returns error 13 at runtime. **Workaround:** default `ActivationType` to `F32`. The enum and field exist in `FLiteRtLmModelConfig` for forward-compatibility but should not be changed from F32 until a future LiteRT-LM release fixes this. If a user has previously loaded a model with F16 and gets error 13, deleting the XNNPACK cache (next to the model file, or in the custom CacheDir) forces regeneration with F32.
+
+Both limitations were discovered empirically during Milestone D+ development. When upgrading LiteRT-LM, re-test these two features first — they are the most impactful unlocks (lower RAM via F16, creative control via temperature).
+
 ## Integration approach: link, not subprocess
 
 We considered and rejected a subprocess-based integration (spawning `litert_lm_main --multi_turns` and piping stdin/stdout). Reasons:
