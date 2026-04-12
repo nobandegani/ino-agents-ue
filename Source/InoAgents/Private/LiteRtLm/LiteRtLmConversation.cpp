@@ -112,11 +112,26 @@ void ULiteRtLmConversation::Initialize(
         }
     }
 
-    // Build a session config with sampler params + max output tokens.
-    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
+    // Session config (sampler params + max output tokens).
+    //
+    // DISABLED for LiteRT-LM v0.10.1: passing a non-null session config
+    // to conversation_config_create causes conversation_create to return
+    // NULL for Gemma 4 models. The failed attempt also appears to poison
+    // the engine's internal state, making fallback retries produce broken
+    // conversations (send_message_stream returns error 13).
+    //
+    // The session_config API is declared in the header and compiles, but
+    // the runtime rejects it. When a future LiteRT-LM version supports
+    // it, uncomment this block and remove the nullptr below.
+    //
+    // TODO(litert-upgrade): re-enable when LiteRT-LM supports session
+    // configs for Gemma 4 conversation API.
+    LiteRtLmSessionConfig* SessionConfig = nullptr;
+
+#if 0  // Disabled until LiteRT-LM supports session configs
+    SessionConfig = litert_lm_session_config_create();
     if (SessionConfig != nullptr)
     {
-        // Sampler params.
         LiteRtLmSamplerParams NativeSampler = {};
         switch (InConfig.Sampler.Type)
         {
@@ -128,22 +143,18 @@ void ULiteRtLmConversation::Initialize(
         NativeSampler.top_k       = InConfig.Sampler.TopK;
         NativeSampler.top_p       = InConfig.Sampler.TopP;
         NativeSampler.temperature = InConfig.Sampler.Temperature;
-        // The native sampler uses std::default_random_engine(seed) —
-        // seed=0 is deterministic (same output every time). When the
-        // user wants non-deterministic output (Seed<0), pass a random
-        // value so each conversation gets a different sequence.
         NativeSampler.seed        = InConfig.Sampler.Seed >= 0
             ? InConfig.Sampler.Seed
             : FMath::Rand();
         litert_lm_session_config_set_sampler_params(SessionConfig, &NativeSampler);
 
-        // Max output tokens per response.
         if (InConfig.MaxOutputTokens > 0)
         {
             litert_lm_session_config_set_max_output_tokens(
                 SessionConfig, InConfig.MaxOutputTokens);
         }
     }
+#endif
 
     // Pre-populated conversation history (messages_json).
     const FTCHARToUTF8 MessagesJsonUtf8(*InConfig.InitialMessages);
@@ -179,49 +190,12 @@ void ULiteRtLmConversation::Initialize(
     // Create the native conversation.
     LiteRtLmConversation* NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
 
-    // Free session config — no longer needed.
-    if (SessionConfig != nullptr)
-    {
-        litert_lm_session_config_delete(SessionConfig);
-        SessionConfig = nullptr;
-    }
-
-    // If conversation_create failed with a session config, retry
-    // WITHOUT one (pass nullptr = LiteRT-LM's built-in defaults).
-    // Some model/engine/activation combinations reject custom session
-    // configs silently.
-    if (NativeConv == nullptr && NativeConvConfig != nullptr)
-    {
-        UE_LOG(LogInoAgents, Warning,
-               TEXT("ULiteRtLmConversation::Initialize: "
-                    "conversation_create failed with session config, "
-                    "retrying with defaults (sampler params will be ignored)"));
-
-        litert_lm_conversation_config_delete(NativeConvConfig);
-
-        NativeConvConfig = litert_lm_conversation_config_create(
-            InEngine,
-            /*session_config=*/              nullptr,
-            /*system_message_json=*/         SystemMessageCStr,
-            /*tools_json=*/                  ToolsJsonCStr,
-            /*messages_json=*/               MessagesCStr,
-            /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
-
-        if (NativeConvConfig != nullptr)
-        {
-            NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
-        }
-    }
-
     if (NativeConv == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
                TEXT("ULiteRtLmConversation::Initialize: "
                     "litert_lm_conversation_create returned NULL"));
-        if (NativeConvConfig != nullptr)
-        {
-            litert_lm_conversation_config_delete(NativeConvConfig);
-        }
+        litert_lm_conversation_config_delete(NativeConvConfig);
         return;
     }
 
