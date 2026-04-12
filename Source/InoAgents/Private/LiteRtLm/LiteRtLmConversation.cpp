@@ -272,11 +272,9 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
         return;
     }
 
-    // Clear any leftover sentence buffer from a prior send so it
-    // doesn't leak into this one. (FlushSentenceBuffer at OnComplete
-    // normally empties it, but if the prior send errored instead of
-    // completing, the buffer may be non-empty.)
+    // Clear per-send state from a prior send.
     SentenceBuffer.Empty();
+    TokenTagDepth = 0;
 
     // Record the user message in history (original text, not augmented).
     FLiteRtLmMessage UserMsg;
@@ -504,6 +502,36 @@ FString ULiteRtLmConversation::StripTags(const FString& Raw)
         }
     }
     return Clean.TrimStartAndEnd();
+}
+
+FString ULiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
+{
+    // Stateful per-character filter. TokenTagDepth persists across
+    // calls so a [tag] split across multiple tokens (e.g. "[cheer"
+    // then "fully]") is handled correctly. Characters inside brackets
+    // are suppressed; characters outside are emitted.
+    FString Clean;
+    Clean.Reserve(RawChunk.Len());
+
+    for (const TCHAR Ch : RawChunk)
+    {
+        if (Ch == TEXT('['))
+        {
+            TokenTagDepth++;
+            continue;
+        }
+        if (Ch == TEXT(']') && TokenTagDepth > 0)
+        {
+            TokenTagDepth--;
+            continue;
+        }
+        if (TokenTagDepth == 0)
+        {
+            Clean.AppendChar(Ch);
+        }
+    }
+
+    return Clean;
 }
 
 void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)

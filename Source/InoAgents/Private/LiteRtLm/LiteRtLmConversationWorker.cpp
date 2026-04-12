@@ -845,7 +845,7 @@ void FLiteRtLmConversationWorker::DispatchTokenOnGameThread(FString Chunk)
     {
         if (ULiteRtLmConversation* Conv = WeakOwnerCopy.Get())
         {
-            const FString CleanChunk = ULiteRtLmConversation::StripTags(Chunk);
+            const FString CleanChunk = Conv->FilterCleanToken(Chunk);
             Conv->OnToken.Broadcast(Chunk, CleanChunk);
             Conv->AccumulateTokenForSentence(Chunk);
         }
