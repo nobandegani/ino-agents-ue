@@ -110,9 +110,9 @@ void ULiteRtLmSubsystem::LoadModelAsync(
     }
 
     // Not on disk — look up the download URL in settings.
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
-    const FLiteRtLmModelEntry* Entry = Settings
-        ? Settings->FindModelByFileName(Config.ModelFileName)
+    const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get();
+    const FLiteRtLmModelEntry* Entry = AgentSettings
+        ? AgentSettings->FindModelByFileName(Config.ModelFileName)
         : nullptr;
 
     if (Entry == nullptr || Entry->DownloadUrl.IsEmpty())
