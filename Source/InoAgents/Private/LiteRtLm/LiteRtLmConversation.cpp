@@ -270,25 +270,6 @@ void ULiteRtLmConversation::BeginDestroy()
 // Sentence detection
 // ======================================================================
 
-namespace
-{
-    /** True if the string contains at least one letter or digit — i.e.
-     *  something a TTS engine would actually speak. Returns false for
-     *  bare punctuation (".", "!", "..."), whitespace, or newlines, so
-     *  we don't dispatch empty/garbage audio for those fragments. */
-    bool HasSpokenContent(const FString& Text)
-    {
-        for (const TCHAR Ch : Text)
-        {
-            if (FChar::IsAlnum(Ch))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-}
-
 void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 {
     check(IsInGameThread());
@@ -321,10 +302,7 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
         FString Sentence = SentenceBuffer.Left(SplitIndex + 1).TrimStartAndEnd();
         SentenceBuffer.MidInline(SplitIndex + 1);
 
-        // Skip fragments that have no actual spoken content — bare
-        // newlines, lone periods, "...", etc. These would produce
-        // empty or garbage TTS audio if dispatched to ElevenLabs.
-        if (HasSpokenContent(Sentence))
+        if (!Sentence.IsEmpty())
         {
             OnSentence.Broadcast(Sentence);
         }
@@ -338,7 +316,7 @@ void ULiteRtLmConversation::FlushSentenceBuffer()
     const FString Remainder = SentenceBuffer.TrimStartAndEnd();
     SentenceBuffer.Empty();
 
-    if (HasSpokenContent(Remainder))
+    if (!Remainder.IsEmpty())
     {
         OnSentence.Broadcast(Remainder);
     }
