@@ -115,23 +115,7 @@ void ULiteRtLmConversation::Initialize(
     }
 
     // Session config (sampler params + max output tokens).
-    //
-    // DISABLED for LiteRT-LM v0.10.1: passing a non-null session config
-    // to conversation_config_create causes conversation_create to return
-    // NULL for Gemma 4 models. The failed attempt also appears to poison
-    // the engine's internal state, making fallback retries produce broken
-    // conversations (send_message_stream returns error 13).
-    //
-    // The session_config API is declared in the header and compiles, but
-    // the runtime rejects it. When a future LiteRT-LM version supports
-    // it, uncomment this block and remove the nullptr below.
-    //
-    // TODO(litert-upgrade): re-enable when LiteRT-LM supports session
-    // configs for Gemma 4 conversation API.
-    LiteRtLmSessionConfig* SessionConfig = nullptr;
-
-#if 0  // Disabled until LiteRT-LM supports session configs
-    SessionConfig = litert_lm_session_config_create();
+    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
     if (SessionConfig != nullptr)
     {
         LiteRtLmSamplerParams NativeSampler = {};
@@ -156,7 +140,6 @@ void ULiteRtLmConversation::Initialize(
                 SessionConfig, InConfig.MaxOutputTokens);
         }
     }
-#endif
 
     // Pre-populated conversation history (messages_json).
     const FTCHARToUTF8 MessagesJsonUtf8(*InConfig.InitialMessages);
