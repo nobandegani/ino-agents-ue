@@ -238,9 +238,13 @@ void ULiteRtLmConversation::Initialize(
         NativeConv,
         NativeConvConfig);
 
+    // Seed history from initial messages if provided.
+    History = InInitialMessages;
+
     UE_LOG(LogInoAgents, Log,
-           TEXT("ULiteRtLmConversation: initialized (system_message=%s)"),
-           InConfig.SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"));
+           TEXT("ULiteRtLmConversation: initialized (system_message=%s, history=%d msgs)"),
+           InConfig.SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"),
+           History.Num());
 
     // Log the first 200 chars of the system message so we can verify
     // the right prompt is reaching the native layer. Truncated to
@@ -273,6 +277,12 @@ void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
     // normally empties it, but if the prior send errored instead of
     // completing, the buffer may be non-empty.)
     SentenceBuffer.Empty();
+
+    // Record the user message in history (original text, not augmented).
+    FLiteRtLmMessage UserMsg;
+    UserMsg.Role = ELiteRtLmMessageRole::User;
+    UserMsg.Content = UserText;
+    History.Add(MoveTemp(UserMsg));
 
     // Prepend context to the user message as plain text. The LiteRT-LM
     // C API's extra_context parameter is injected as Jinja2 template
@@ -455,6 +465,16 @@ FString ULiteRtLmConversation::BuildMergedContext() const
     }
 
     return Result;
+}
+
+void ULiteRtLmConversation::RecordAssistantMessage(const FString& Text)
+{
+    check(IsInGameThread());
+
+    FLiteRtLmMessage AssistantMsg;
+    AssistantMsg.Role = ELiteRtLmMessageRole::Assistant;
+    AssistantMsg.Content = Text;
+    History.Add(MoveTemp(AssistantMsg));
 }
 
 // ======================================================================

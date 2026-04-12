@@ -868,6 +868,7 @@ void FLiteRtLmConversationWorker::DispatchCompleteOnGameThread(FString FullText)
             // fires a final OnSentence so the concatenation of every
             // OnSentence always equals the full response.
             Conv->FlushSentenceBuffer();
+            Conv->RecordAssistantMessage(FullText);
             Conv->OnComplete.Broadcast(FullText);
         }
     });

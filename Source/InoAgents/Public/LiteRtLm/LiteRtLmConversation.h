@@ -108,6 +108,20 @@ public:
     void SendMessageAsync(const FString& UserText);
 
     // ------------------------------------------------------------------
+    // History
+    // ------------------------------------------------------------------
+
+    /** Get the full conversation history (user + assistant messages). */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category="InoAgents|LiteRT-LM")
+    const TArray<FLiteRtLmMessage>& GetHistory() const { return History; }
+
+    /** Clear the tracked history. Does NOT affect the native conversation's
+     *  KV cache — the model still remembers prior turns. This only clears
+     *  the UE-side record used for save/load. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    void ClearHistory() { History.Reset(); }
+
+    // ------------------------------------------------------------------
     // Context (per-turn injection, not stored in chat history)
     // ------------------------------------------------------------------
 
@@ -352,9 +366,19 @@ public:
      */
     void FlushSentenceBuffer();
 
+    /** Record an assistant response in the tracked history. Called by
+     *  the worker's DispatchCompleteOnGameThread, game thread only. */
+    void RecordAssistantMessage(const FString& Text);
+
 private:
     UPROPERTY()
     TWeakObjectPtr<ULiteRtLmSubsystem> Subsystem;
+
+    /** Tracked conversation history for save/load. Appended to in
+     *  SendMessageAsync (user) and the OnComplete handler (assistant).
+     *  Seeded from InitialMessages in Initialize if provided. */
+    UPROPERTY()
+    TArray<FLiteRtLmMessage> History;
 
     /** Context key-value maps. Merged on each SendMessageAsync. */
     TMap<FString, FString> SystemContextMap;
