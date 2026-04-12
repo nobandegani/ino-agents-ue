@@ -176,16 +176,41 @@ void ULiteRtLmConversation::Initialize(
         return;
     }
 
-    // Create the native conversation. The conversation config (and
-    // possibly the session config) must stay alive through this call —
-    // the C API may hold internal references rather than copying.
+    // Create the native conversation.
     LiteRtLmConversation* NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
 
-    // NOW safe to free the session config — conversation_create has
-    // consumed it.
+    // Free session config — no longer needed.
     if (SessionConfig != nullptr)
     {
         litert_lm_session_config_delete(SessionConfig);
+        SessionConfig = nullptr;
+    }
+
+    // If conversation_create failed with a session config, retry
+    // WITHOUT one (pass nullptr = LiteRT-LM's built-in defaults).
+    // Some model/engine/activation combinations reject custom session
+    // configs silently.
+    if (NativeConv == nullptr && NativeConvConfig != nullptr)
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("ULiteRtLmConversation::Initialize: "
+                    "conversation_create failed with session config, "
+                    "retrying with defaults (sampler params will be ignored)"));
+
+        litert_lm_conversation_config_delete(NativeConvConfig);
+
+        NativeConvConfig = litert_lm_conversation_config_create(
+            InEngine,
+            /*session_config=*/              nullptr,
+            /*system_message_json=*/         SystemMessageCStr,
+            /*tools_json=*/                  ToolsJsonCStr,
+            /*messages_json=*/               MessagesCStr,
+            /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
+
+        if (NativeConvConfig != nullptr)
+        {
+            NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
+        }
     }
 
     if (NativeConv == nullptr)
@@ -193,7 +218,10 @@ void ULiteRtLmConversation::Initialize(
         UE_LOG(LogInoAgents, Error,
                TEXT("ULiteRtLmConversation::Initialize: "
                     "litert_lm_conversation_create returned NULL"));
-        litert_lm_conversation_config_delete(NativeConvConfig);
+        if (NativeConvConfig != nullptr)
+        {
+            litert_lm_conversation_config_delete(NativeConvConfig);
+        }
         return;
     }
 
