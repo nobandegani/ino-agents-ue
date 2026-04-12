@@ -10,7 +10,6 @@
 #include "LiteRtLmConversation.generated.h"
 
 class ULiteRtLmSubsystem;
-class ULiteRtLmModelConfig;
 class FLiteRtLmConversationWorker;
 
 // Forward declarations of opaque native types from LiteRT-LM's C API.
@@ -292,7 +291,7 @@ public:
     void Initialize(
         ULiteRtLmSubsystem* InSubsystem,
         LiteRtLmEngine* InEngine,
-        const ULiteRtLmModelConfig* InConfig);
+        const FLiteRtLmModelConfig& InConfig);
 
     // ------------------------------------------------------------------
     // Sentence detection (called from worker's game-thread token path)

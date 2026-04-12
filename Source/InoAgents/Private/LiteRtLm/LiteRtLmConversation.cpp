@@ -3,7 +3,6 @@
 #include "LiteRtLm/LiteRtLmConversation.h"
 
 #include "InoAgentsLog.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 #include "LiteRtLmConversationWorker.h"
 
@@ -31,7 +30,7 @@ ULiteRtLmConversation::~ULiteRtLmConversation() = default;
 void ULiteRtLmConversation::Initialize(
     ULiteRtLmSubsystem* InSubsystem,
     LiteRtLmEngine* InEngine,
-    const ULiteRtLmModelConfig* InConfig)
+    const FLiteRtLmModelConfig& InConfig)
 {
     check(IsInGameThread());
 
@@ -41,7 +40,7 @@ void ULiteRtLmConversation::Initialize(
                TEXT("ULiteRtLmConversation::Initialize: engine is null"));
         return;
     }
-    if (InConfig == nullptr)
+    if (InConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
                TEXT("ULiteRtLmConversation::Initialize: config is null"));
@@ -66,9 +65,9 @@ void ULiteRtLmConversation::Initialize(
     // By passing the raw text (not valid JSON), the C API's parse
     // fails gracefully and uses the raw string as content, which is
     // exactly what Gemma's template expects.
-    const FTCHARToUTF8 SystemMessageUtf8(*InConfig->SystemMessage);
+    const FTCHARToUTF8 SystemMessageUtf8(*InConfig.SystemMessage);
     const char* const SystemMessageCStr =
-        InConfig->SystemMessage.IsEmpty() ? nullptr : SystemMessageUtf8.Get();
+        InConfig.SystemMessage.IsEmpty() ? nullptr : SystemMessageUtf8.Get();
 
     // Snapshot the subsystem's tool registry into a tools_json array
     // for this conversation. Tools registered AFTER this call do not
@@ -167,18 +166,18 @@ void ULiteRtLmConversation::Initialize(
 
     UE_LOG(LogInoAgents, Log,
            TEXT("ULiteRtLmConversation: initialized (system_message=%s)"),
-           InConfig->SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"));
+           InConfig.SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"));
 
     // Log the first 200 chars of the system message so we can verify
     // the right prompt is reaching the native layer. Truncated to
     // avoid flooding the log on very long prompts.
-    if (!InConfig->SystemMessage.IsEmpty())
+    if (!InConfig.SystemMessage.IsEmpty())
     {
-        const FString Preview = InConfig->SystemMessage.Left(200);
+        const FString Preview = InConfig.SystemMessage.Left(200);
         UE_LOG(LogInoAgents, Log,
                TEXT("ULiteRtLmConversation: system_message preview: \"%s%s\""),
                *Preview,
-               InConfig->SystemMessage.Len() > 200 ? TEXT("...") : TEXT(""));
+               InConfig.SystemMessage.Len() > 200 ? TEXT("...") : TEXT(""));
     }
 }
 

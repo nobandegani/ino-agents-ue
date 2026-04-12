@@ -10,7 +10,7 @@
 #include "InoAgentsLiteRtLmSubsystemLoadTest.generated.h"
 
 class ULiteRtLmSubsystem;
-class ULiteRtLmModelConfig;
+
 
 /**
  * One-shot observer for the InoAgents.LiteRtLm.SubsystemLoadTest console
@@ -30,11 +30,11 @@ class UInoAgentsLiteRtLmSubsystemLoadTestObserver : public UObject
 public:
     double StartTime = 0.0;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmSubsystem> Subsystem = nullptr;
 
-    UPROPERTY()
-    TObjectPtr<ULiteRtLmModelConfig> Config = nullptr;
+    
+    FLiteRtLmModelConfig Config;
 
     // NOTE: parameter types MUST exactly match the delegate's declaration
     // in LiteRtLmTypes.h (`bool, FString`). Dynamic delegate BindDynamic

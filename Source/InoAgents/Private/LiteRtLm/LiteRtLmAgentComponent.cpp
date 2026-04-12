@@ -6,11 +6,17 @@
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
+#include "LiteRtLm/LiteRtLmSettings.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/GameInstance.h"
 #include "GameFramework/Actor.h"
+#include "HAL/FileManager.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
     const FObjectInitializer& ObjectInitializer)
@@ -72,12 +78,12 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 
 void UInoAgentsLiteRtLmAgentComponent::LoadModel()
 {
-    if (ModelConfig == nullptr)
+    if (ModelConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: ModelConfig is null — "
-                    "assign a ULiteRtLmModelConfig data asset in the details panel."));
-        OnError.Broadcast(TEXT("ModelConfig is null"));
+               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: ModelConfig.ModelFileName "
+                    "is empty — set it in the details panel."));
+        OnError.Broadcast(TEXT("ModelConfig.ModelFileName is empty"));
         return;
     }
 
@@ -110,15 +116,54 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
         return;
     }
 
-    // Dispatch async load.
-    FOnLiteRtLmModelLoaded OnLoaded;
-    OnLoaded.BindDynamic(this, &UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded);
+    // Check if the model file exists locally (PersistentDownloadDir or
+    // plugin Models/ dir).
+    const FString ModelPath = LiteRtLmResolveModelPath(ModelConfig.ModelFileName);
+
+    if (!ModelPath.IsEmpty())
+    {
+        // Model found on disk — load directly.
+        UE_LOG(LogInoAgents, Log,
+               TEXT("UInoAgentsLiteRtLmAgentComponent: loading model from %s"),
+               *ModelPath);
+
+        FOnLiteRtLmModelLoaded OnLoaded;
+        OnLoaded.BindDynamic(this, &UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded);
+        Subsys->LoadModelAsync(ModelConfig, OnLoaded);
+        return;
+    }
+
+    // Model not on disk — look up the download URL in settings.
+    const ULiteRtLmSettings* Settings = ULiteRtLmSettings::Get();
+    const FLiteRtLmModelEntry* Entry = Settings != nullptr
+        ? Settings->FindModelByFileName(ModelConfig.ModelFileName)
+        : nullptr;
+
+    if (Entry == nullptr || Entry->DownloadUrl.IsEmpty())
+    {
+        const FString Err = FString::Printf(
+            TEXT("Model '%s' not found on disk and no download URL configured. "
+                 "Add an entry in Project Settings → Plugins → InoAgents LiteRT-LM → Models."),
+            *ModelConfig.ModelFileName);
+        UE_LOG(LogInoAgents, Error, TEXT("UInoAgentsLiteRtLmAgentComponent: %s"), *Err);
+        OnError.Broadcast(Err);
+        return;
+    }
+
+    // Download to PersistentDownloadDir.
+    const FString TargetDir = FPaths::Combine(
+        FPaths::ProjectPersistentDownloadDir(),
+        TEXT("InoAgents"), TEXT("Models"));
+    IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/true);
+
+    const FString TargetPath = FPaths::Combine(TargetDir, ModelConfig.ModelFileName);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoAgentsLiteRtLmAgentComponent: loading model from %s"),
-           *ModelConfig->ModelFileName);
+           TEXT("UInoAgentsLiteRtLmAgentComponent: model not found locally, "
+                "downloading from %s → %s"),
+           *Entry->DownloadUrl, *TargetPath);
 
-    Subsys->LoadModelAsync(ModelConfig, OnLoaded);
+    DownloadModel(Entry->DownloadUrl, TargetPath);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
@@ -279,4 +324,102 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsLiteRtLmAgentComponent: ready (conversation=%s, voice=%s)"),
            *Conversation->GetName(), *VoiceId);
+}
+
+// ======================================================================
+// Model download
+// ======================================================================
+
+void UInoAgentsLiteRtLmAgentComponent::DownloadModel(
+    const FString& Url, const FString& TargetPath)
+{
+    PendingDownloadTargetPath = TargetPath;
+
+    DownloadRequest = FHttpModule::Get().CreateRequest();
+    DownloadRequest->SetURL(Url);
+    DownloadRequest->SetVerb(TEXT("GET"));
+    DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
+
+    DownloadRequest->OnRequestProgress64().BindUObject(
+        this, &UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress);
+    DownloadRequest->OnProcessRequestComplete().BindUObject(
+        this, &UInoAgentsLiteRtLmAgentComponent::HandleDownloadComplete);
+
+    DownloadRequest->ProcessRequest();
+}
+
+void UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress(
+    FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
+{
+    // Content-Length may not always be available — derive total from
+    // the response header if we can, otherwise report -1.
+    int64 TotalBytes = -1;
+    if (DownloadRequest.IsValid())
+    {
+        if (const FHttpResponsePtr Resp = DownloadRequest->GetResponse())
+        {
+            const FString ContentLength = Resp->GetHeader(TEXT("Content-Length"));
+            if (!ContentLength.IsEmpty())
+            {
+                TotalBytes = FCString::Atoi64(*ContentLength);
+            }
+        }
+    }
+
+    const float Percent = (TotalBytes > 0)
+        ? (static_cast<float>(BytesReceived) / static_cast<float>(TotalBytes)) * 100.0f
+        : 0.0f;
+
+    OnDownloadProgress.Broadcast(Percent, static_cast<int64>(BytesReceived), TotalBytes);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::HandleDownloadComplete(
+    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
+{
+    DownloadRequest.Reset();
+
+    if (!bSucceeded || !Response.IsValid())
+    {
+        const FString Err = TEXT("Model download failed (network error)");
+        UE_LOG(LogInoAgents, Error, TEXT("UInoAgentsLiteRtLmAgentComponent: %s"), *Err);
+        OnError.Broadcast(Err);
+        return;
+    }
+
+    const int32 Code = Response->GetResponseCode();
+    if (Code < 200 || Code >= 300)
+    {
+        const FString Err = FString::Printf(
+            TEXT("Model download failed: HTTP %d"), Code);
+        UE_LOG(LogInoAgents, Error, TEXT("UInoAgentsLiteRtLmAgentComponent: %s"), *Err);
+        OnError.Broadcast(Err);
+        return;
+    }
+
+    // Save to disk.
+    const TArray<uint8>& Content = Response->GetContent();
+    if (!FFileHelper::SaveArrayToFile(Content, *PendingDownloadTargetPath))
+    {
+        const FString Err = FString::Printf(
+            TEXT("Failed to save model to %s"), *PendingDownloadTargetPath);
+        UE_LOG(LogInoAgents, Error, TEXT("UInoAgentsLiteRtLmAgentComponent: %s"), *Err);
+        OnError.Broadcast(Err);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("UInoAgentsLiteRtLmAgentComponent: model downloaded and saved to %s (%d bytes)"),
+           *PendingDownloadTargetPath, Content.Num());
+
+    // Now load the model normally.
+    ULiteRtLmSubsystem* Subsys = SubsystemWeak.Get();
+    if (Subsys == nullptr)
+    {
+        OnError.Broadcast(TEXT("Subsystem gone after download"));
+        return;
+    }
+
+    FOnLiteRtLmModelLoaded OnLoaded;
+    OnLoaded.BindDynamic(this, &UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded);
+    Subsys->LoadModelAsync(ModelConfig, OnLoaded);
 }

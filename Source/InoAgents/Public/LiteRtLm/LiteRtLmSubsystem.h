@@ -11,7 +11,6 @@
 
 #include "LiteRtLmSubsystem.generated.h"
 
-class ULiteRtLmModelConfig;
 class ULiteRtLmConversation;
 
 // Forward declarations of opaque native types from LiteRT-LM's C API.
@@ -97,7 +96,7 @@ public:
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM",
               meta=(AutoCreateRefTerm="OnLoaded"))
     void LoadModelAsync(
-        const ULiteRtLmModelConfig* Config,
+        const FLiteRtLmModelConfig& Config,
         const FOnLiteRtLmModelLoaded& OnLoaded);
 
     /**
@@ -251,10 +250,9 @@ private:
     LiteRtLmEngine*          Engine   = nullptr;
     LiteRtLmEngineSettings*  Settings = nullptr;
 
-    // Kept alive while the model is loaded so that GC does not reclaim
-    // the asset out from under us.
-    UPROPERTY()
-    TObjectPtr<const ULiteRtLmModelConfig> LoadedConfig;
+    /** Snapshot of the config used for the most recent successful load.
+     *  Used by CreateConversation to read SystemMessage, etc. */
+    FLiteRtLmModelConfig LoadedConfig;
 
     // True from the moment LoadModelAsync dispatches to the ThreadPool
     // until the OnLoaded callback fires back on the game thread.

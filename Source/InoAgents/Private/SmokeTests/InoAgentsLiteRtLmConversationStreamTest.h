@@ -10,7 +10,7 @@
 #include "InoAgentsLiteRtLmConversationStreamTest.generated.h"
 
 class ULiteRtLmSubsystem;
-class ULiteRtLmModelConfig;
+
 class ULiteRtLmConversation;
 
 /**
@@ -59,13 +59,13 @@ public:
 
     FString Prompt;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmSubsystem> Subsystem = nullptr;
 
-    UPROPERTY()
-    TObjectPtr<ULiteRtLmModelConfig> Config = nullptr;
+    
+    FLiteRtLmModelConfig Config;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmConversation> Conversation = nullptr;
 
     // Fires after LoadModelAsync (or directly if the model is already

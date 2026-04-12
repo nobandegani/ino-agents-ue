@@ -34,7 +34,7 @@
 
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
+// FLiteRtLmModelConfig struct is in LiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/Engine.h"
@@ -215,7 +215,7 @@ void UInoAgentsLiteRtLmConversationStreamTestObserver::Finish()
         Conversation->Shutdown();
     }
     Conversation = nullptr;
-    Config       = nullptr;
+    Config = FLiteRtLmModelConfig();
     Subsystem    = nullptr;
 
     RemoveFromRoot();
@@ -253,10 +253,10 @@ static void RunLiteRtLmConversationStreamTest(const TArray<FString>& Args)
     }
 
     // Build an inline config for the load. Same as the D.1 / D.2 tests.
-    ULiteRtLmModelConfig* Config = NewObject<ULiteRtLmModelConfig>();
-    Config->ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
-    Config->Backend       = ELiteRtLmBackend::Cpu;
-    Config->SystemMessage = TEXT("You are a helpful assistant. Answer concisely.");
+    FLiteRtLmModelConfig Config;
+    Config.ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
+    Config.Backend       = ELiteRtLmBackend::Cpu;
+    Config.SystemMessage = TEXT("You are a helpful assistant. Answer concisely.");
     Observer->Config = Config;
 
     FOnLiteRtLmModelLoaded OnLoaded;

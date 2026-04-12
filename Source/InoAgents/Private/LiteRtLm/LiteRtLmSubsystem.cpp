@@ -4,7 +4,8 @@
 
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
+// ULiteRtLmModelConfig (the old UDataAsset) is gone — FLiteRtLmModelConfig
+// struct lives in LiteRtLmTypes.h which is already included via the subsystem header.
 #include "LiteRtLm/LiteRtLmTool.h"
 #include "LiteRtLm/LiteRtLmTypes.h"
 #include "UI/Slate/InoAgentsChatBridge.h"
@@ -41,7 +42,7 @@ void ULiteRtLmSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // engine loading is lazy via LoadModelAsync.
     Engine       = nullptr;
     Settings     = nullptr;
-    LoadedConfig = nullptr;
+    LoadedConfig = FLiteRtLmModelConfig();
     bLoadInFlight = false;
 
     UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem: Initialize"));
@@ -71,7 +72,7 @@ void ULiteRtLmSubsystem::Deinitialize()
 }
 
 void ULiteRtLmSubsystem::LoadModelAsync(
-    const ULiteRtLmModelConfig* Config,
+    const FLiteRtLmModelConfig& Config,
     const FOnLiteRtLmModelLoaded& OnLoaded)
 {
     check(IsInGameThread());
@@ -92,29 +93,17 @@ void ULiteRtLmSubsystem::LoadModelAsync(
         return;
     }
 
-    if (Config == nullptr)
-    {
-        OnLoaded.ExecuteIfBound(false, TEXT("Config is null"));
-        return;
-    }
+    // Resolve the model file path. Checks PersistentDownloadDir first
+    // (downloaded/cached), then the plugin's Models/ dir (legacy dev).
+    const FString ModelPath = LiteRtLmResolveModelPath(Config.ModelFileName);
 
-    // Resolve the model file path via IPluginManager. Done on the game
-    // thread because IPluginManager access patterns assume game thread.
-    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
-    if (!Plugin.IsValid())
-    {
-        OnLoaded.ExecuteIfBound(false, TEXT("IPluginManager could not locate the InoAgents plugin"));
-        return;
-    }
-
-    const FString BaseDir = Plugin->GetBaseDir();
-    const FString ModelPath = FPaths::Combine(BaseDir, TEXT("Models"), Config->ModelFileName);
-
-    if (!IFileManager::Get().FileExists(*ModelPath))
+    if (ModelPath.IsEmpty())
     {
         const FString Err = FString::Printf(
-            TEXT("Model file not found at %s. Expected to find %s under Plugins/InoAgents/Models/."),
-            *ModelPath, *Config->ModelFileName);
+            TEXT("Model file '%s' not found. Download it first or place it in "
+                 "Plugins/InoAgents/Models/. The agent component can auto-download "
+                 "from a URL configured in Project Settings → Plugins → InoAgents LiteRT-LM."),
+            *Config.ModelFileName);
         UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;
@@ -129,7 +118,7 @@ void ULiteRtLmSubsystem::LoadModelAsync(
     // subsystem or config is gone by the time the load completes.
     TWeakObjectPtr<ULiteRtLmSubsystem> WeakThis(this);
     const FString                     ModelPathCopy = ModelPath;
-    const ELiteRtLmBackend            BackendCopy   = Config->Backend;
+    const ELiteRtLmBackend            BackendCopy   = Config.Backend;
     const double                      TStart        = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
@@ -200,7 +189,7 @@ void ULiteRtLmSubsystem::LoadModelAsync(
             {
                 // Load failed. Clear the config reference so a subsequent
                 // retry can succeed.
-                Subsys->LoadedConfig = nullptr;
+                Subsys->LoadedConfig = FLiteRtLmModelConfig();
                 UE_LOG(LogInoAgents, Error,
                        TEXT("LoadModelAsync: FAILED after %.2f s: %s"),
                        Elapsed, *LocalError);
@@ -249,7 +238,7 @@ void ULiteRtLmSubsystem::UnloadModel()
         litert_lm_engine_settings_delete(Settings);
         Settings = nullptr;
     }
-    LoadedConfig = nullptr;
+    LoadedConfig = FLiteRtLmModelConfig();
 
     UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem: UnloadModel complete"));
 }
@@ -268,7 +257,7 @@ ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
     // LoadedConfig is guaranteed non-null whenever Engine is non-null
     // (see the success path of LoadModelAsync's completion lambda), but
     // defensively check anyway.
-    if (LoadedConfig == nullptr)
+    if (LoadedConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
                TEXT("CreateConversation: LoadedConfig is null despite Engine being "

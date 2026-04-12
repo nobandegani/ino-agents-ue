@@ -10,7 +10,7 @@
 #include "InoAgentsLiteRtLmConversationToolTest.generated.h"
 
 class ULiteRtLmSubsystem;
-class ULiteRtLmModelConfig;
+
 class ULiteRtLmConversation;
 class ULiteRtLmAddNumbersTool;
 
@@ -63,16 +63,16 @@ public:
      *  HandleConversationComplete to flag the test PASS/FAIL. */
     bool bSawExpectedAddNumbersCall = false;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmSubsystem> Subsystem = nullptr;
 
-    UPROPERTY()
-    TObjectPtr<ULiteRtLmModelConfig> Config = nullptr;
+    
+    FLiteRtLmModelConfig Config;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmConversation> Conversation = nullptr;
 
-    UPROPERTY()
+    
     TObjectPtr<ULiteRtLmAddNumbersTool> Tool = nullptr;
 
     UFUNCTION()

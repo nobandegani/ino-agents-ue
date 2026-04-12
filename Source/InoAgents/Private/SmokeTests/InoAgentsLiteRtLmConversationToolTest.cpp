@@ -37,7 +37,7 @@
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmAddNumbersTool.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
+// FLiteRtLmModelConfig struct is in LiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 #include "LiteRtLm/LiteRtLmTool.h"
 
@@ -237,7 +237,7 @@ void UInoAgentsLiteRtLmConversationToolTestObserver::Finish()
     }
 
     Conversation = nullptr;
-    Config       = nullptr;
+    Config = FLiteRtLmModelConfig();
     Tool         = nullptr;
     Subsystem    = nullptr;
 
@@ -279,10 +279,10 @@ static void RunLiteRtLmConversationToolTest(const TArray<FString>& Args)
     // instead of computing inline. "You MUST call the add_numbers
     // tool to compute it" is significantly stronger than just
     // telling the model the tool exists.
-    ULiteRtLmModelConfig* Config = NewObject<ULiteRtLmModelConfig>();
-    Config->ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
-    Config->Backend       = ELiteRtLmBackend::Cpu;
-    Config->SystemMessage = TEXT(
+    FLiteRtLmModelConfig Config;
+    Config.ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
+    Config.Backend       = ELiteRtLmBackend::Cpu;
+    Config.SystemMessage = TEXT(
         "You are a helpful assistant with access to tools. When a user "
         "asks you to perform arithmetic, you MUST call the add_numbers "
         "tool to compute it rather than calculating in your head. When "

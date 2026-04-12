@@ -26,6 +26,74 @@ enum class ELiteRtLmBackend : uint8
 INOAGENTS_API const char* LiteRtLmBackendToString(ELiteRtLmBackend Backend);
 
 // ============================================================================
+// Model config (USTRUCT — replaces the old ULiteRtLmModelConfig UDataAsset)
+// ============================================================================
+
+/**
+ * Configuration for a LiteRT-LM model. Plain struct — no data asset
+ * needed. Set the fields directly on the agent component or pass to
+ * ULiteRtLmSubsystem::LoadModelAsync.
+ */
+USTRUCT(BlueprintType)
+struct FLiteRtLmModelConfig
+{
+    GENERATED_BODY()
+
+    /** Filename of the .litertlm model file. Resolved at load time by
+     *  checking PersistentDownloadDir/InoAgents/Models/ first, then
+     *  the plugin's Models/ directory as a legacy fallback. If not
+     *  found anywhere, the agent component downloads it from the URL
+     *  configured in Project Settings → Plugins → InoAgents LiteRT-LM. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    FString ModelFileName = TEXT("gemma-4-E4B-it.litertlm");
+
+    /** Which backend the engine should use. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    ELiteRtLmBackend Backend = ELiteRtLmBackend::Cpu;
+
+    /** Upper bound on tokens per decode step. 0 = engine default. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (ClampMin = "0"))
+    int32 MaxNumTokens = 0;
+
+    /** System message applied to conversations. Plain text — the
+     *  subsystem wraps it for the native API internally. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (MultiLine = true))
+    FString SystemMessage;
+};
+
+/**
+ * One entry in the model registry (Project Settings → Plugins →
+ * InoAgents LiteRT-LM → Models). Maps a model filename to a download
+ * URL so the agent component can auto-download on first use.
+ */
+USTRUCT(BlueprintType)
+struct FLiteRtLmModelEntry
+{
+    GENERATED_BODY()
+
+    /** Human-readable name (for editor display). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    FString DisplayName;
+
+    /** Filename on disk (must match FLiteRtLmModelConfig::ModelFileName). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    FString ModelFileName;
+
+    /** Direct download URL. For Hugging Face:
+     *  https://huggingface.co/<org>/<repo>/resolve/main/<file> */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    FString DownloadUrl;
+};
+
+/** Resolve the on-disk path for a model filename. Checks:
+ *  1. PersistentDownloadDir/InoAgents/Models/ (downloaded/cached)
+ *  2. Plugins/InoAgents/Models/ (legacy dev path)
+ *  Returns empty string if not found anywhere. */
+INOAGENTS_API FString LiteRtLmResolveModelPath(const FString& ModelFileName);
+
+// ============================================================================
 // Delegates
 // ============================================================================
 //
@@ -119,3 +187,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnLiteRtLmToolCalled,
     FName, ToolName,
     FString, ArgumentsJson,
     FString, ResultJson);
+
+/** Fired during model file download. Percent is 0..100 based on
+ *  Content-Length. TotalBytes is -1 if the server didn't send
+ *  Content-Length (rare for Hugging Face). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoAgentsModelDownloadProgress,
+    float, Percent,
+    int64, BytesReceived,
+    int64, TotalBytes);

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "Interfaces/IHttpRequest.h"
 
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
@@ -14,7 +15,6 @@
 class UInoAgentsStreamingAudioComponent;
 class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
-class ULiteRtLmModelConfig;
 class ULiteRtLmSubsystem;
 
 /** Multicast version of FOnLiteRtLmModelLoaded for BlueprintAssignable. */
@@ -56,11 +56,10 @@ public:
     // Configuration (editable in details panel)
     // =============================================================
 
-    /** Model config asset — set ModelFileName, Backend, SystemMessage.
-     *  Create one via Content Browser → Miscellaneous → Data Asset →
-     *  LiteRtLmModelConfig. */
+    /** Model configuration — set ModelFileName, Backend, SystemMessage
+     *  directly in the details panel. No data asset needed. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
-    TObjectPtr<ULiteRtLmModelConfig> ModelConfig;
+    FLiteRtLmModelConfig ModelConfig;
 
     /** ElevenLabs voice ID for TTS. Find yours at
      *  https://elevenlabs.io/app/voice-lab. */
@@ -145,6 +144,12 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnInoAgentsAudioFinished OnAudioFinished;
 
+    /** Fires during model download with progress info. Use for
+     *  loading screens / progress bars. Only fires when the model
+     *  isn't cached locally and needs to be downloaded. */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
+    FOnInoAgentsModelDownloadProgress OnDownloadProgress;
+
     // =============================================================
     // Read-only state
     // =============================================================
@@ -196,4 +201,12 @@ private:
     UFUNCTION() void HandleAudioFinished();
 
     void CreateConversationAndQueue();
+
+    // Model download.
+    void DownloadModel(const FString& Url, const FString& TargetPath);
+    void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
+    void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+
+    FString PendingDownloadTargetPath;
+    FHttpRequestPtr DownloadRequest;
 };

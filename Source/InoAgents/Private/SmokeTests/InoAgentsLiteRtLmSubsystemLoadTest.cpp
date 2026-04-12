@@ -25,7 +25,7 @@
 #include "InoAgentsLiteRtLmSubsystemLoadTest.h"
 
 #include "InoAgentsLog.h"
-#include "LiteRtLm/LiteRtLmModelConfig.h"
+// FLiteRtLmModelConfig struct is in LiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/Engine.h"
@@ -121,10 +121,10 @@ static void RunLiteRtLmSubsystemLoadTest(const TArray<FString>& /*Args*/)
     // Build the config inline. Using NewObject instead of a Content Browser
     // asset makes the test entirely self-contained — there is no asset to
     // create before running.
-    ULiteRtLmModelConfig* Config = NewObject<ULiteRtLmModelConfig>();
-    Config->ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
-    Config->Backend       = ELiteRtLmBackend::Cpu;
-    Config->SystemMessage = TEXT("You are a helpful assistant.");
+    FLiteRtLmModelConfig Config;
+    Config.ModelFileName = TEXT("gemma-4-E2B-it.litertlm");
+    Config.Backend       = ELiteRtLmBackend::Cpu;
+    Config.SystemMessage = TEXT("You are a helpful assistant.");
 
     // Observer holds the async continuation. Must outlive the delegate
     // callback, so root it.
