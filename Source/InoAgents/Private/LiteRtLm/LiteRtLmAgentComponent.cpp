@@ -21,13 +21,12 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
     PrimaryComponentTick.bStartWithTickEnabled = false;
     bAutoActivate = false;
 
-    // Child audio component for spatialised playback.
+    // Create the audio component as a default subobject. It will be
+    // attached to the actor's root (or a custom parent) in BeginPlay.
     AudioComp = ObjectInitializer.CreateDefaultSubobject<UInoAgentsStreamingAudioComponent>(
         this, TEXT("StreamingAudio"));
     if (AudioComp != nullptr)
     {
-        AudioComp->SetupAttachment(this);
-        // Match the default ElevenLabs PCM output: 16 kHz mono.
         AudioComp->SetPcmFormat(16000, 1);
     }
 
@@ -43,6 +42,25 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
 void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    // Attach the audio component to the specified parent (or actor
+    // root if none set). This gives 3D spatialization at the right
+    // position — e.g. a head socket on a skeletal mesh.
+    if (AudioComp != nullptr && GetOwner() != nullptr)
+    {
+        USceneComponent* AttachTarget = AudioAttachParent;
+        if (AttachTarget == nullptr)
+        {
+            AttachTarget = GetOwner()->GetRootComponent();
+        }
+        if (AttachTarget != nullptr)
+        {
+            AudioComp->AttachToComponent(
+                AttachTarget,
+                FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+                AudioAttachSocket);
+        }
+    }
 }
 
 void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)

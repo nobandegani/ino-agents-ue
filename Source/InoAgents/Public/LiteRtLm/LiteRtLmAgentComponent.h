@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/SceneComponent.h"
+#include "Components/ActorComponent.h"
 
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
@@ -56,7 +56,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoAgentsAgentStatusChanged,
  */
 UCLASS(ClassGroup = (InoAgents),
        meta = (BlueprintSpawnableComponent, DisplayName = "LiteRT-LM Agent"))
-class INOAGENTS_API UInoAgentsLiteRtLmAgentComponent : public USceneComponent
+class INOAGENTS_API UInoAgentsLiteRtLmAgentComponent : public UActorComponent
 {
     GENERATED_BODY()
 
@@ -97,6 +97,17 @@ public:
     UPROPERTY(BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "0", ClampMax = "2000"))
     int32 PreBufferMs = 250;
+
+    /** Scene component to attach the audio component to. If None,
+     *  attaches to the actor's root component. Use this to position
+     *  the audio source on a specific bone or socket (e.g. a head
+     *  mesh socket for 3D spatialization). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio")
+    TObjectPtr<USceneComponent> AudioAttachParent;
+
+    /** Socket name on AudioAttachParent to attach to. Empty = no socket. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio")
+    FName AudioAttachSocket;
 
     /** PCM sample rate for the audio component. Must match the
      *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
@@ -252,10 +263,10 @@ public:
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     UInoAgentsLiteRtLmDialogueQueue* GetDialogueQueue() const { return DialogueQueue; }
 
-    //~ USceneComponent interface
+    //~ UActorComponent interface
     virtual void BeginPlay() override;
     virtual void EndPlay(EEndPlayReason::Type Reason) override;
-    //~ End USceneComponent interface
+    //~ End UActorComponent interface
 
 private:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "InoAgents|Agent",
