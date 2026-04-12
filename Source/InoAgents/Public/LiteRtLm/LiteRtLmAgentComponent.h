@@ -269,7 +269,7 @@ private:
 
     // Delegate trampolines.
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
-    UFUNCTION() void HandleToken(FString Chunk);
+    UFUNCTION() void HandleToken(FString RawText, FString CleanText);
     UFUNCTION() void HandleSentence(FString RawText, FString CleanText);
     UFUNCTION() void HandleNewLine();
     UFUNCTION() void HandleComplete(FString FullText);

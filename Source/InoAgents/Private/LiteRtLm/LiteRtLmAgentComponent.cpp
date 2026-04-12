@@ -258,9 +258,9 @@ void UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded(
     OnModelLoaded.Broadcast(true, FString());
 }
 
-void UInoAgentsLiteRtLmAgentComponent::HandleToken(FString Chunk)
+void UInoAgentsLiteRtLmAgentComponent::HandleToken(FString RawText, FString CleanText)
 {
-    OnToken.Broadcast(Chunk);
+    OnToken.Broadcast(RawText, CleanText);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::HandleSentence(FString RawText, FString CleanText)

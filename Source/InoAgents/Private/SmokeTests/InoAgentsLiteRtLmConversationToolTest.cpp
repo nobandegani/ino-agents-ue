@@ -123,7 +123,7 @@ void UInoAgentsLiteRtLmConversationToolTestObserver::HandleModelLoaded(
     Conversation->SendMessageAsync(Prompt);
 }
 
-void UInoAgentsLiteRtLmConversationToolTestObserver::HandleToken(FString Chunk)
+void UInoAgentsLiteRtLmConversationToolTestObserver::HandleToken(FString RawText, FString CleanText)
 {
     const double Now = FPlatformTime::Seconds();
 
@@ -136,11 +136,11 @@ void UInoAgentsLiteRtLmConversationToolTestObserver::HandleToken(FString Chunk)
     }
 
     NumTokens += 1;
-    AccumulatedText += Chunk;
+    AccumulatedText += RawText;
 
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationToolTest: token %3d (+%.3f s) \"%s\""),
-           NumTokens, Now - FirstTokenTime, *Chunk);
+           NumTokens, Now - FirstTokenTime, *RawText);
 }
 
 void UInoAgentsLiteRtLmConversationToolTestObserver::HandleToolCalled(

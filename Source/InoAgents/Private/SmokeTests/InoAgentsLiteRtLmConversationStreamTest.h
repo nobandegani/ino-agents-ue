@@ -75,7 +75,7 @@ public:
 
     // Fires for every streamed chunk on the game thread.
     UFUNCTION()
-    void HandleToken(FString Chunk);
+    void HandleToken(FString RawText, FString CleanText);
 
     // Fires once on clean stream completion.
     UFUNCTION()

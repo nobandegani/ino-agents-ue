@@ -107,6 +107,11 @@ public:
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void SendMessageAsync(const FString& UserText);
 
+    /** Strip all [bracketed] tags from a string.
+     *  "[cheerfully] Hello!" → "Hello!" */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
+    static FString StripTags(const FString& Raw);
+
     // ------------------------------------------------------------------
     // History
     // ------------------------------------------------------------------
@@ -254,12 +259,13 @@ public:
 
     /**
      * Fires zero or more times per SendMessageAsync call as the model
-     * streams out its response. Each broadcast delivers one chunk of
-     * assistant text, in order. Always on the game thread. The
-     * accumulated concatenation of every Chunk that OnToken emits for
-     * a single send is identical to the FullText that OnComplete
-     * delivers at the end — callers only need to listen to one or
-     * the other, not both.
+     * streams out its response. Each broadcast delivers two strings:
+     *
+     *   RawText   — the chunk as the model produced it, including any
+     *               [emotion] or [audio] tags.
+     *   CleanText — the same chunk with all [bracketed] tags stripped.
+     *
+     * Always on the game thread, in order.
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
     FOnLiteRtLmToken OnToken;

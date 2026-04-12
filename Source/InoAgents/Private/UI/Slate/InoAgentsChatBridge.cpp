@@ -70,11 +70,11 @@ void UInoAgentsChatBridge::CancelStream()
     }
 }
 
-void UInoAgentsChatBridge::HandleToken(FString Chunk)
+void UInoAgentsChatBridge::HandleToken(FString RawText, FString CleanText)
 {
     if (TSharedPtr<SInoAgentsChatPanel> Panel = PanelWeak.Pin())
     {
-        Panel->AppendAssistantToken(Chunk);
+        Panel->AppendAssistantToken(CleanText);
     }
 }
 

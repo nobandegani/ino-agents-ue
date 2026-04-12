@@ -122,14 +122,10 @@ void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleModelLoaded(
     Conversation->SendMessageAsync(Prompt);
 }
 
-void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleToken(FString Chunk)
+void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleToken(FString RawText, FString CleanText)
 {
     const double Now = FPlatformTime::Seconds();
 
-    // Capture the wall-clock time of the first token, so per-chunk
-    // elapsed times are relative to when the model actually started
-    // emitting (not when LoadModelAsync was called or when the user
-    // ran the console command).
     if (NumTokens == 0)
     {
         FirstTokenTime = Now;
@@ -139,11 +135,11 @@ void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleToken(FString Chunk
     }
 
     NumTokens += 1;
-    AccumulatedText += Chunk;
+    AccumulatedText += RawText;
 
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationStreamTest: token %3d (+%.3f s) \"%s\""),
-           NumTokens, Now - FirstTokenTime, *Chunk);
+           NumTokens, Now - FirstTokenTime, *RawText);
 }
 
 void UInoAgentsLiteRtLmConversationStreamTestObserver::HandleConversationComplete(

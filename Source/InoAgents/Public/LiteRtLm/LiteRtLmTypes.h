@@ -230,8 +230,9 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnLiteRtLmModelLoaded,
  * Multicast so multiple observers (UI + logger + metrics panel, etc.) can
  * all watch.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLiteRtLmToken,
-    FString, Chunk);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLiteRtLmToken,
+    FString, RawText,
+    FString, CleanText);
 
 /**
  * Fired exactly once per successful SendMessageAsync call, after all tokens

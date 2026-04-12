@@ -481,35 +481,29 @@ void ULiteRtLmConversation::RecordAssistantMessage(const FString& Text)
 // Sentence detection
 // ======================================================================
 
-namespace
+FString ULiteRtLmConversation::StripTags(const FString& Raw)
 {
-    /** Strip all [bracketed] tags from a string.
-     *  "[cheerfully] Hello! [whispering] Come closer" → "Hello! Come closer"
-     *  Handles nested brackets gracefully (flattens to nothing). */
-    FString StripBracketedTags(const FString& Raw)
+    FString Clean;
+    Clean.Reserve(Raw.Len());
+    int32 Depth = 0;
+    for (const TCHAR Ch : Raw)
     {
-        FString Clean;
-        Clean.Reserve(Raw.Len());
-        int32 Depth = 0;
-        for (const TCHAR Ch : Raw)
+        if (Ch == TEXT('['))
         {
-            if (Ch == TEXT('['))
-            {
-                Depth++;
-                continue;
-            }
-            if (Ch == TEXT(']') && Depth > 0)
-            {
-                Depth--;
-                continue;
-            }
-            if (Depth == 0)
-            {
-                Clean.AppendChar(Ch);
-            }
+            Depth++;
+            continue;
         }
-        return Clean.TrimStartAndEnd();
+        if (Ch == TEXT(']') && Depth > 0)
+        {
+            Depth--;
+            continue;
+        }
+        if (Depth == 0)
+        {
+            Clean.AppendChar(Ch);
+        }
     }
+    return Clean.TrimStartAndEnd();
 }
 
 void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
@@ -532,7 +526,7 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 
         if (!RawLine.IsEmpty())
         {
-            const FString CleanLine = StripBracketedTags(RawLine);
+            const FString CleanLine = StripTags(RawLine);
             OnSentence.Broadcast(RawLine, CleanLine);
         }
         OnNewLine.Broadcast();
@@ -548,7 +542,7 @@ void ULiteRtLmConversation::FlushSentenceBuffer()
 
     if (!Remainder.IsEmpty())
     {
-        const FString CleanRemainder = StripBracketedTags(Remainder);
+        const FString CleanRemainder = StripTags(Remainder);
         OnSentence.Broadcast(Remainder, CleanRemainder);
     }
 }

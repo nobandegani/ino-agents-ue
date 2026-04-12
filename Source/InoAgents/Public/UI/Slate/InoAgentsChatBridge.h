@@ -52,7 +52,7 @@ public:
     void CancelStream();
 
     UFUNCTION()
-    void HandleToken(FString Chunk);
+    void HandleToken(FString RawText, FString CleanText);
 
     UFUNCTION()
     void HandleComplete(FString FullText);

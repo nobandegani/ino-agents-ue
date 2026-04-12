@@ -79,7 +79,7 @@ public:
     void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
 
     UFUNCTION()
-    void HandleToken(FString Chunk);
+    void HandleToken(FString RawText, FString CleanText);
 
     UFUNCTION()
     void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
