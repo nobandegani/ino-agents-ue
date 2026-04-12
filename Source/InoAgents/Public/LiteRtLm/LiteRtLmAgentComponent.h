@@ -15,6 +15,25 @@ class UInoAgentsStreamingAudioComponent;
 class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
 class ULiteRtLmSubsystem;
+class ULiteRtLmToolBase;
+
+/** Agent emotional state. Driven by the set_emotion tool. */
+UENUM(BlueprintType)
+enum class EInoAgentsEmotion : uint8
+{
+    Neutral     UMETA(DisplayName = "Neutral"),
+    Happy       UMETA(DisplayName = "Happy"),
+    Sad         UMETA(DisplayName = "Sad"),
+    Disgust     UMETA(DisplayName = "Disgust"),
+    Anger       UMETA(DisplayName = "Anger"),
+    Surprise    UMETA(DisplayName = "Surprise"),
+    Fear        UMETA(DisplayName = "Fear"),
+    Confident   UMETA(DisplayName = "Confident"),
+    Excited     UMETA(DisplayName = "Excited"),
+    Bored       UMETA(DisplayName = "Bored"),
+    Playful     UMETA(DisplayName = "Playful"),
+    Confused    UMETA(DisplayName = "Confused"),
+};
 
 /** Agent activity state. */
 UENUM(BlueprintType)
@@ -39,6 +58,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoAgentsAgentModelLoaded,
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoAgentsAgentStatusChanged,
     EInoAgentsAgentStatus, NewStatus);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoAgentsEmotionChanged,
+    EInoAgentsEmotion, NewEmotion);
 
 /**
  * All-in-one LiteRT-LM + ElevenLabs agent component.
@@ -218,13 +240,17 @@ public:
     FOnInoAgentsModelDownloadProgress OnDownloadProgress;
 
     // =============================================================
-    // Delegates — status
+    // Delegates — status & emotion
     // =============================================================
 
-    /** Fires whenever the agent's status changes (Idle, Thinking,
-     *  Talking, Interrupted, Listening). */
+    /** Fires whenever the agent's status changes. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnInoAgentsAgentStatusChanged OnStatusChanged;
+
+    /** Fires whenever the agent's emotion changes (driven by the
+     *  set_emotion tool during conversation). */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
+    FOnInoAgentsEmotionChanged OnEmotionChanged;
 
     // =============================================================
     // Read-only state
@@ -233,6 +259,15 @@ public:
     /** Current agent status. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     EInoAgentsAgentStatus GetStatus() const { return Status; }
+
+    /** Current agent emotion. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
+    EInoAgentsEmotion GetEmotion() const { return Emotion; }
+
+    /** Set emotion and broadcast OnEmotionChanged. Called by the
+     *  set_emotion tool — can also be called directly from Blueprint. */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
+    void SetEmotion(EInoAgentsEmotion NewEmotion);
 
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     bool IsModelLoaded() const;
@@ -270,9 +305,14 @@ private:
     TWeakObjectPtr<ULiteRtLmSubsystem> SubsystemWeak;
 
     EInoAgentsAgentStatus Status = EInoAgentsAgentStatus::Idle;
+    EInoAgentsEmotion Emotion = EInoAgentsEmotion::Neutral;
 
     /** Set status and broadcast OnStatusChanged if it actually changed. */
     void SetStatus(EInoAgentsAgentStatus NewStatus);
+
+    /** The auto-registered set_emotion tool. Kept alive via UPROPERTY. */
+    UPROPERTY()
+    TObjectPtr<ULiteRtLmToolBase> EmotionTool;
 
     /** Pending message held during interruption delay. */
     FString PendingInterruptMessage;

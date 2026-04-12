@@ -6,6 +6,7 @@
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
+#include "LiteRtLm/LiteRtLmSetEmotionTool.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/GameInstance.h"
@@ -167,6 +168,15 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
 // ======================================================================
 // Runtime API
 // ======================================================================
+
+void UInoAgentsLiteRtLmAgentComponent::SetEmotion(EInoAgentsEmotion NewEmotion)
+{
+    if (Emotion != NewEmotion)
+    {
+        Emotion = NewEmotion;
+        OnEmotionChanged.Broadcast(NewEmotion);
+    }
+}
 
 void UInoAgentsLiteRtLmAgentComponent::SetStatus(EInoAgentsAgentStatus NewStatus)
 {
@@ -371,6 +381,17 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         UE_LOG(LogInoAgents, Error,
                TEXT("UInoAgentsLiteRtLmAgentComponent: subsystem gone"));
         return;
+    }
+
+    // Auto-register the set_emotion tool so the model can drive
+    // facial expressions. Must be registered BEFORE CreateConversation
+    // so the tool is included in the conversation's tools_json snapshot.
+    if (EmotionTool == nullptr)
+    {
+        ULiteRtLmSetEmotionTool* Tool = NewObject<ULiteRtLmSetEmotionTool>();
+        Tool->SetAgent(this);
+        Subsys->RegisterTool(Tool);
+        EmotionTool = Tool;
     }
 
     // Create conversation.
