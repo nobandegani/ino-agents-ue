@@ -177,7 +177,7 @@ public:
      *  Changes only take effect on the next stream (not mid-stream). */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "InoAgents|Audio",
               meta = (ClampMin = "0", ClampMax = "16384"))
-    int32 NumVisualizationSamples = 0;
+    int32 NumVisualizationSamples = 160;
 
     //~ UActorComponent interface
     virtual void TickComponent(float DeltaTime, ELevelTick TickType,
