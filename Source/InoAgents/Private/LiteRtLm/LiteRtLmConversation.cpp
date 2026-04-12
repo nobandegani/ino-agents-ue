@@ -159,12 +159,6 @@ void ULiteRtLmConversation::Initialize(
         /*messages_json=*/               MessagesCStr,
         /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
 
-    // Session config can be freed after conversation_config_create.
-    if (SessionConfig != nullptr)
-    {
-        litert_lm_session_config_delete(SessionConfig);
-    }
-
     // Free the heap UTF-8 converter — the C API has already read
     // the string by the time conversation_config_create returns.
     if (ToolsJsonUtf8Ptr != nullptr)
@@ -175,15 +169,25 @@ void ULiteRtLmConversation::Initialize(
 
     if (NativeConvConfig == nullptr)
     {
+        if (SessionConfig != nullptr) litert_lm_session_config_delete(SessionConfig);
         UE_LOG(LogInoAgents, Error,
                TEXT("ULiteRtLmConversation::Initialize: "
                     "litert_lm_conversation_config_create returned NULL"));
         return;
     }
 
-    // Create the native conversation. On failure, clean up the config we
-    // just built so we don't leak it.
+    // Create the native conversation. The conversation config (and
+    // possibly the session config) must stay alive through this call —
+    // the C API may hold internal references rather than copying.
     LiteRtLmConversation* NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
+
+    // NOW safe to free the session config — conversation_create has
+    // consumed it.
+    if (SessionConfig != nullptr)
+    {
+        litert_lm_session_config_delete(SessionConfig);
+    }
+
     if (NativeConv == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
