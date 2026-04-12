@@ -5,6 +5,7 @@
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
+#include "LiteRtLm/LiteRtLmConversation.h"
 
 #include "Containers/Ticker.h"
 
@@ -24,9 +25,6 @@ void UInoAgentsTtsSlotObserver::HandleAudioChunk(
 void UInoAgentsTtsSlotObserver::HandleComplete(
     const TArray<uint8>& /*FullAudioBytes*/, EElevenLabsOutputFormat /*OutputFormat*/)
 {
-    // We don't use FullAudioBytes here — we've already accumulated
-    // everything via HandleAudioChunk. This callback just signals
-    // "slot is done".
     if (UInoAgentsTtsAudioQueue* Q = QueueWeak.Get())
     {
         Q->OnSlotComplete(SlotIndex);
@@ -42,13 +40,11 @@ void UInoAgentsTtsSlotObserver::HandleError(FString ErrorMessage)
 }
 
 // ======================================================================
-// Queue
+// Audio format derivation
 // ======================================================================
 
 namespace
 {
-    /** Map an ElevenLabs output format to the audio component's feed
-     *  format and PCM sample rate (ignored for MP3). */
     void DeriveAudioFormat(
         EElevenLabsOutputFormat ElevenLabsFmt,
         EInoAgentsAudioFormat&  OutFeedFormat,
@@ -60,7 +56,7 @@ namespace
             case EElevenLabsOutputFormat::Mp3_44100_64:
             case EElevenLabsOutputFormat::Mp3_22050_32:
                 OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
-                OutPcmSampleRate = 0;  // unused for MP3
+                OutPcmSampleRate = 0;
                 return;
 
             case EElevenLabsOutputFormat::Pcm_16000:
@@ -78,14 +74,6 @@ namespace
                 OutPcmSampleRate = 44100;
                 return;
 
-            case EElevenLabsOutputFormat::Ulaw_8000:
-                // u-law is not decoded by the audio component today;
-                // fall back to MP3 and let the caller notice the
-                // mismatch. A future phase can add u-law decoding.
-                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
-                OutPcmSampleRate = 0;
-                return;
-
             default:
                 OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
                 OutPcmSampleRate = 0;
@@ -94,26 +82,28 @@ namespace
     }
 }
 
+// ======================================================================
+// Queue — lifecycle
+// ======================================================================
+
 void UInoAgentsTtsAudioQueue::Initialize(
     UObject*                             WorldContextObject,
     UInoAgentsStreamingAudioComponent*   InAudioComponent,
+    ULiteRtLmConversation*               InConversation,
     const FString&                       InDefaultVoiceId,
     const FElevenLabsDialogueRequest&    InRequestTemplate,
     int32                                InDefaultPauseDurationMs)
 {
+    // Unbind from any prior conversation.
+    Clear();
+
     WorldContextWeak        = WorldContextObject;
     AudioComponent          = InAudioComponent;
     DefaultVoiceId          = InDefaultVoiceId;
     RequestTemplate         = InRequestTemplate;
     DefaultPauseDurationMs  = FMath::Max(InDefaultPauseDurationMs, 0);
-    CurrentPlayIndex        = 0;
-    bCurrentSlotStreaming    = false;
-    Slots.Reset();
-    Observers.Reset();
 
-    // Derive the audio format + PCM sample rate from the ElevenLabs
-    // output format so the queue feeds the right bytes to the audio
-    // component without the caller having to specify it twice.
+    // Derive audio feed format from the ElevenLabs output format.
     int32 PcmRate = 0;
     DeriveAudioFormat(RequestTemplate.OutputFormat, DerivedAudioFormat, PcmRate);
 
@@ -122,18 +112,69 @@ void UInoAgentsTtsAudioQueue::Initialize(
         AudioComponent->SetPcmFormat(PcmRate, /*NumChannels=*/1);
     }
 
+    // Bind to the conversation's OnSentence and OnNewLine.
+    BoundConversation = InConversation;
+    if (InConversation != nullptr)
+    {
+        InConversation->OnSentence.AddDynamic(
+            this, &UInoAgentsTtsAudioQueue::HandleSentenceFromConversation);
+        InConversation->OnNewLine.AddDynamic(
+            this, &UInoAgentsTtsAudioQueue::HandleNewLineFromConversation);
+    }
+
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsTtsAudioQueue: initialized (voice=%s, model=%s, "
-                "outputFmt=%d, audioFeedFmt=%d)"),
+                "outputFmt=%d, audioFeedFmt=%d, pauseMs=%d, conversation=%s)"),
            *DefaultVoiceId,
            *RequestTemplate.ModelId,
            static_cast<int32>(RequestTemplate.OutputFormat),
-           static_cast<int32>(DerivedAudioFormat));
+           static_cast<int32>(DerivedAudioFormat),
+           DefaultPauseDurationMs,
+           InConversation ? *InConversation->GetName() : TEXT("none"));
 }
 
-void UInoAgentsTtsAudioQueue::EnqueueSentence(
-    const FString& SentenceText,
-    const FString& VoiceIdOverride)
+void UInoAgentsTtsAudioQueue::Clear()
+{
+    // Unbind from the conversation if we're attached.
+    if (ULiteRtLmConversation* Conv = BoundConversation.Get())
+    {
+        Conv->OnSentence.RemoveDynamic(
+            this, &UInoAgentsTtsAudioQueue::HandleSentenceFromConversation);
+        Conv->OnNewLine.RemoveDynamic(
+            this, &UInoAgentsTtsAudioQueue::HandleNewLineFromConversation);
+    }
+    BoundConversation = nullptr;
+
+    Slots.Reset();
+    Observers.Reset();
+    CurrentPlayIndex      = 0;
+    bCurrentSlotStreaming  = false;
+
+    if (AudioComponent != nullptr)
+    {
+        AudioComponent->StopAndReset();
+    }
+}
+
+// ======================================================================
+// Auto-bound conversation handlers
+// ======================================================================
+
+void UInoAgentsTtsAudioQueue::HandleSentenceFromConversation(FString SentenceText)
+{
+    EnqueueSentenceInternal(SentenceText);
+}
+
+void UInoAgentsTtsAudioQueue::HandleNewLineFromConversation()
+{
+    EnqueuePauseInternal();
+}
+
+// ======================================================================
+// Internal sentence / pause dispatch
+// ======================================================================
+
+void UInoAgentsTtsAudioQueue::EnqueueSentenceInternal(const FString& SentenceText)
 {
     if (SentenceText.IsEmpty())
     {
@@ -144,24 +185,19 @@ void UInoAgentsTtsAudioQueue::EnqueueSentence(
     if (Ctx == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsTtsAudioQueue::EnqueueSentence: world context is null"));
+               TEXT("UInoAgentsTtsAudioQueue: world context is null"));
         return;
     }
 
-    // Allocate a slot.
     const int32 SlotIndex = Slots.Num();
     Slots.AddDefaulted();
 
-    // Build the TTS request from the stored template — copy all
-    // settings (ModelId, OutputFormat, Stability, Seed, etc.) and
-    // replace only the Inputs array with this sentence's text + voice.
-    const FString& VoiceId = VoiceIdOverride.IsEmpty() ? DefaultVoiceId : VoiceIdOverride;
+    const FString& VoiceId = DefaultVoiceId;
 
     FElevenLabsDialogueRequest Req = RequestTemplate;
     Req.Inputs.Reset();
     Req.Inputs.Add({ SentenceText, VoiceId });
 
-    // Create the async action.
     UElevenLabsTextToDialogueStream* Action =
         UElevenLabsTextToDialogueStream::StreamTextToDialogue(
             Ctx, Req, /*ApiKeyOverride=*/FString());
@@ -176,9 +212,6 @@ void UInoAgentsTtsAudioQueue::EnqueueSentence(
         return;
     }
 
-    // Create a per-slot observer so the delegate trampoline knows
-    // which slot's bytes are arriving. Held alive by our Observers
-    // UPROPERTY array.
     UInoAgentsTtsSlotObserver* Observer = NewObject<UInoAgentsTtsSlotObserver>(this);
     Observer->SlotIndex = SlotIndex;
     Observer->QueueWeak = this;
@@ -192,44 +225,29 @@ void UInoAgentsTtsAudioQueue::EnqueueSentence(
         Observer, &UInoAgentsTtsSlotObserver::HandleError);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoAgentsTtsAudioQueue: slot %d dispatched (\"%s\", voice=%s)"),
-           SlotIndex,
-           *SentenceText.Left(40),
-           *VoiceId);
+           TEXT("UInoAgentsTtsAudioQueue: slot %d dispatched (\"%s\")"),
+           SlotIndex, *SentenceText.Left(60));
 
     Action->Activate();
 }
 
-void UInoAgentsTtsAudioQueue::EnqueuePause()
+void UInoAgentsTtsAudioQueue::EnqueuePauseInternal()
 {
     if (DefaultPauseDurationMs <= 0)
     {
-        return;  // 0 ms pause = skip entirely
+        return;
     }
 
-    FSlot& Slot        = Slots.AddDefaulted_GetRef();
-    Slot.bIsPause       = true;
+    FSlot& Slot          = Slots.AddDefaulted_GetRef();
+    Slot.bIsPause        = true;
     Slot.PauseDurationMs = DefaultPauseDurationMs;
-    Slot.bComplete      = true;  // pause slots are instantly "complete"
+    Slot.bComplete       = true;
 
     UE_LOG(LogInoAgents, Verbose,
            TEXT("UInoAgentsTtsAudioQueue: slot %d is a %d-ms pause"),
            Slots.Num() - 1, DefaultPauseDurationMs);
 
     DrainReadySlots();
-}
-
-void UInoAgentsTtsAudioQueue::Clear()
-{
-    Slots.Reset();
-    Observers.Reset();
-    CurrentPlayIndex      = 0;
-    bCurrentSlotStreaming  = false;
-
-    if (AudioComponent != nullptr)
-    {
-        AudioComponent->StopAndReset();
-    }
 }
 
 // ======================================================================
@@ -246,8 +264,6 @@ void UInoAgentsTtsAudioQueue::OnSlotChunk(
 
     if (SlotIndex == CurrentPlayIndex)
     {
-        // This is the head-of-line slot — stream its bytes directly
-        // to the audio component for minimum latency. No buffering.
         if (AudioComponent != nullptr)
         {
             AudioComponent->FeedAudioBytes(Bytes, DerivedAudioFormat);
@@ -256,7 +272,6 @@ void UInoAgentsTtsAudioQueue::OnSlotChunk(
     }
     else
     {
-        // Future slot — buffer until it becomes the current one.
         Slots[SlotIndex].BufferedBytes.Append(Bytes);
     }
 }
@@ -304,23 +319,17 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
 
         if (!Slot.bComplete)
         {
-            // Current slot is still receiving bytes from ElevenLabs.
-            // Nothing to advance past — we'll come back when
-            // OnSlotComplete fires for this slot.
             break;
         }
 
         // --- Pause slot: wait, then advance --------------------------
         if (Slot.bIsPause && Slot.PauseDurationMs > 0)
         {
-            // Mark the pause as "consumed" so we don't re-enter it
-            // when the timer fires and calls DrainReadySlots again.
-            Slot.PauseDurationMs = 0;
-
             const float DelaySec =
-                static_cast<float>(Slots[CurrentPlayIndex].PauseDurationMs > 0
-                    ? Slots[CurrentPlayIndex].PauseDurationMs
-                    : DefaultPauseDurationMs) / 1000.0f;
+                static_cast<float>(Slot.PauseDurationMs) / 1000.0f;
+
+            // Mark consumed so re-entry doesn't re-start the timer.
+            Slot.PauseDurationMs = 0;
 
             TWeakObjectPtr<UInoAgentsTtsAudioQueue> WeakSelf(this);
             FTSTicker::GetCoreTicker().AddTicker(
@@ -333,10 +342,10 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
                             Self->bCurrentSlotStreaming = false;
                             Self->DrainReadySlots();
                         }
-                        return false;  // one-shot
+                        return false;
                     }),
                 DelaySec);
-            return;  // stop draining until the timer fires
+            return;
         }
 
         // --- Audio slot: flush buffered bytes if any -----------------
@@ -345,10 +354,7 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
             AudioComponent->FeedAudioBytes(Slot.BufferedBytes, DerivedAudioFormat);
         }
 
-        // Free the buffer — bytes are in the audio component now.
         Slot.BufferedBytes.Reset();
-
-        // Advance to the next slot.
         CurrentPlayIndex++;
         bCurrentSlotStreaming = false;
 
@@ -357,8 +363,6 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
                CurrentPlayIndex);
     }
 
-    // If we've played every slot, finalize the audio stream and
-    // broadcast OnAllComplete.
     if (CurrentPlayIndex >= Slots.Num() && Slots.Num() > 0)
     {
         if (AudioComponent != nullptr)

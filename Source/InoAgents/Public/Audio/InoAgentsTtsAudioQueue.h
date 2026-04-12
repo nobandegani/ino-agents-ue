@@ -12,17 +12,14 @@
 
 class UInoAgentsStreamingAudioComponent;
 class UInoAgentsTtsAudioQueue;
+class ULiteRtLmConversation;
 
 /**
  * Internal per-slot observer that binds to a single ElevenLabs TTS
  * action's delegates and forwards audio bytes / completion / error
- * back to the parent queue with the slot's sequence index. One
- * instance per EnqueueSentence call.
+ * back to the parent queue with the slot's sequence index.
  *
- * Uses UFUNCTION handlers because ElevenLabs' delegates are
- * DECLARE_DYNAMIC_MULTICAST_DELEGATE which only supports AddDynamic.
- *
- * Not intended for direct Blueprint use — create the queue instead.
+ * Not intended for direct Blueprint use.
  */
 UCLASS()
 class UInoAgentsTtsSlotObserver : public UObject
@@ -44,34 +41,23 @@ public:
 };
 
 /**
- * Ordered TTS audio queue.
+ * Ordered TTS audio queue — fully automatic.
  *
- * Fires ALL ElevenLabs TTS requests in parallel for lowest latency,
- * but plays the resulting audio back through a
- * UInoAgentsStreamingAudioComponent in strict sentence order. If
- * sentence 3 finishes before sentence 2, its bytes are buffered until
- * sentence 2 has been fully drained.
+ * Pass a ULiteRtLmConversation to Initialize and the queue self-wires
+ * to the conversation's OnSentence and OnNewLine delegates. Each line
+ * the LLM produces is dispatched to ElevenLabs TTS in parallel, and
+ * the resulting audio plays back through a streaming audio component
+ * in strict sentence order with configurable pauses between lines.
  *
- * The "current" slot (the one whose turn it is to play) streams its
- * chunks directly to the audio component as they arrive — no extra
- * buffering latency for the head-of-line sentence. Future slots
- * accumulate their chunks in a private buffer.
+ * Blueprint setup (two nodes total):
  *
- * Typical Blueprint wiring:
+ *   Queue = Construct Object From Class (UInoAgentsTtsAudioQueue)
+ *   Queue.Initialize(self, AudioComp, Conversation, VoiceId,
+ *                    RequestTemplate, PauseDurationMs)
  *
- *   BeginPlay:
- *     Queue = Construct Object From Class (UInoAgentsTtsAudioQueue)
- *     Queue.Initialize(WorldContext, AudioComponent, DefaultVoiceId)
- *
- *   OnSentence(Text):
- *     Queue.EnqueueSentence(Text)
- *
- * That's it — the queue dispatches the TTS, collects the bytes,
- * orders them, and feeds the audio component. No manual slot tracking
- * needed.
- *
- * Does NOT own the audio component — the caller must keep both the
- * queue and the component alive for the duration of the playback.
+ * No manual wiring of OnSentence / OnNewLine / EnqueueSentence /
+ * EnqueuePause needed — the queue handles everything internally
+ * once initialized.
  */
 UCLASS(BlueprintType)
 class INOAGENTS_API UInoAgentsTtsAudioQueue : public UObject
@@ -80,71 +66,38 @@ class INOAGENTS_API UInoAgentsTtsAudioQueue : public UObject
 
 public:
     /**
-     * Set up the queue. Must be called before EnqueueSentence.
+     * Set up the queue and bind to the conversation's delegates.
      *
-     * @param WorldContextObject  Any UObject with a World — used to
-     *                            resolve the ElevenLabs subsystem and
-     *                            to pass to StreamTextToDialogue.
-     * @param InAudioComponent    The streaming audio component that
-     *                            will play the ordered audio.
-     * @param InDefaultVoiceId    ElevenLabs voice ID used for every
-     *                            sentence unless overridden per-call.
-     * @param InRequestTemplate   ElevenLabs request settings (ModelId,
-     *                            OutputFormat, Stability, Seed, etc.)
-     *                            applied to every TTS call. The Inputs
-     *                            array is ignored — EnqueueSentence
-     *                            fills that in per-sentence. Leave
-     *                            fields at their defaults to use the
-     *                            subsystem's Project Settings values.
-     *                            The audio component's feed format and
-     *                            PCM sample rate are auto-derived from
-     *                            the template's OutputFormat.
+     * @param WorldContextObject       Any UObject with a World.
+     * @param InAudioComponent         Streaming audio component for
+     *                                  ordered playback.
+     * @param InConversation           The conversation to listen to.
+     *                                  The queue binds to OnSentence
+     *                                  and OnNewLine automatically.
+     * @param InDefaultVoiceId         ElevenLabs voice ID for all
+     *                                  sentences.
+     * @param InRequestTemplate        ElevenLabs settings (ModelId,
+     *                                  OutputFormat, Stability, etc.).
+     *                                  Inputs array is ignored. Audio
+     *                                  feed format is auto-derived
+     *                                  from OutputFormat.
+     * @param InDefaultPauseDurationMs Silence in ms between lines.
+     *                                  500 = natural conversational
+     *                                  pause. 0 = no pause.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
               meta = (WorldContext = "WorldContextObject"))
-    /**
-     * @param InDefaultPauseDurationMs  Duration of silence (in ms)
-     *                                  inserted by each EnqueuePause
-     *                                  call. 500 ms is a natural
-     *                                  conversational pause. 0 =
-     *                                  no delay (advance immediately).
-     */
     void Initialize(UObject* WorldContextObject,
                     UInoAgentsStreamingAudioComponent* InAudioComponent,
+                    ULiteRtLmConversation* InConversation,
                     const FString& InDefaultVoiceId,
                     const FElevenLabsDialogueRequest& InRequestTemplate,
                     int32 InDefaultPauseDurationMs);
 
     /**
-     * Queue a sentence for TTS. The ElevenLabs request is dispatched
-     * immediately (in parallel with any other in-flight sentences).
-     * Audio bytes are buffered per-slot and fed to the audio component
-     * in strict sentence order.
-     *
-     * @param SentenceText   The text to synthesise.
-     * @param VoiceIdOverride  If non-empty, overrides the default
-     *                         voice ID for this sentence only.
-     */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
-    void EnqueueSentence(const FString& SentenceText,
-                         const FString& VoiceIdOverride);
-
-    /**
-     * Insert a timed pause into the queue. When this slot reaches the
-     * playback head, the queue waits DefaultPauseDurationMs before
-     * advancing to the next slot. No bytes are fed to the audio
-     * component — the pause is pure silence via a time delay.
-     *
-     * Wire the conversation's OnNewLine delegate to this to get
-     * natural gaps between lines.
-     */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
-    void EnqueuePause();
-
-    /**
-     * Drop all queued (not yet started) AND in-flight slots. Calls
-     * StopAndReset on the audio component. After Clear() the queue
-     * is ready for a new conversation.
+     * Drop all slots, unbind from the conversation, and stop audio.
+     * After Clear() the queue can be re-initialized with a new
+     * conversation.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
     void Clear();
@@ -161,24 +114,33 @@ public:
     void OnSlotError(int32 SlotIndex, const FString& ErrorMessage);
 
 private:
+    // -----------------------------------------------------------------
+    // Auto-bound conversation handlers
+    // -----------------------------------------------------------------
+
+    UFUNCTION()
+    void HandleSentenceFromConversation(FString SentenceText);
+
+    UFUNCTION()
+    void HandleNewLineFromConversation();
+
+    // -----------------------------------------------------------------
+    // Internal sentence / pause dispatch
+    // -----------------------------------------------------------------
+
+    void EnqueueSentenceInternal(const FString& SentenceText);
+    void EnqueuePauseInternal();
+
+    // -----------------------------------------------------------------
+    // Types + state
+    // -----------------------------------------------------------------
+
     struct FSlot
     {
-        /** Bytes accumulated from OnAudioChunk while this slot is NOT
-         *  the current playback head. Empty for the current slot
-         *  because those bytes go straight to the audio component. */
         TArray<uint8> BufferedBytes;
-
-        /** True once the TTS action's OnComplete has fired (or the
-         *  slot is a pause, which is instantly complete). */
-        bool bComplete = false;
-
-        /** True if an error occurred (skipped on drain). */
-        bool bErrored = false;
-
-        /** True if this slot is a timed pause, not a TTS segment. */
-        bool bIsPause = false;
-
-        /** Pause duration in ms (only meaningful when bIsPause). */
+        bool bComplete      = false;
+        bool bErrored       = false;
+        bool bIsPause       = false;
         int32 PauseDurationMs = 0;
     };
 
@@ -187,32 +149,21 @@ private:
     UPROPERTY()
     TObjectPtr<UInoAgentsStreamingAudioComponent> AudioComponent;
 
-    /** Per-slot observers kept alive via UPROPERTY so GC doesn't
-     *  collect them while their TTS action is in flight. */
+    UPROPERTY()
+    TObjectPtr<ULiteRtLmConversation> BoundConversation;
+
     UPROPERTY()
     TArray<TObjectPtr<UInoAgentsTtsSlotObserver>> Observers;
 
     FString DefaultVoiceId;
     int32   DefaultPauseDurationMs = 500;
 
-    /** Template request — all settings except Inputs are copied into
-     *  every TTS call dispatched by EnqueueSentence. */
     FElevenLabsDialogueRequest RequestTemplate;
-
-    /** Audio format derived from RequestTemplate.OutputFormat at
-     *  Initialize time. Used in FeedAudioBytes calls. */
-    EInoAgentsAudioFormat DerivedAudioFormat = EInoAgentsAudioFormat::Mp3;
+    EInoAgentsAudioFormat      DerivedAudioFormat = EInoAgentsAudioFormat::Mp3;
 
     TArray<FSlot> Slots;
-
-    /** Index of the slot currently feeding the audio component.
-     *  Slots with index < CurrentPlayIndex have already been played. */
-    int32 CurrentPlayIndex = 0;
-
-    /** True if we've already called FeedAudioBytes for the current slot
-     *  (so subsequent chunks for this slot go directly to the component
-     *  rather than buffering). */
-    bool bCurrentSlotStreaming = false;
+    int32 CurrentPlayIndex    = 0;
+    bool  bCurrentSlotStreaming = false;
 
     void DrainReadySlots();
 };
