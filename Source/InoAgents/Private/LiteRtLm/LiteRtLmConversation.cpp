@@ -169,6 +169,18 @@ void ULiteRtLmConversation::Initialize(
     UE_LOG(LogInoAgents, Log,
            TEXT("ULiteRtLmConversation: initialized (system_message=%s)"),
            InConfig->SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"));
+
+    // Log the first 200 chars of the system message so we can verify
+    // the right prompt is reaching the native layer. Truncated to
+    // avoid flooding the log on very long prompts.
+    if (!InConfig->SystemMessage.IsEmpty())
+    {
+        const FString Preview = InConfig->SystemMessage.Left(200);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("ULiteRtLmConversation: system_message preview: \"%s%s\""),
+               *Preview,
+               InConfig->SystemMessage.Len() > 200 ? TEXT("...") : TEXT(""));
+    }
 }
 
 void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
