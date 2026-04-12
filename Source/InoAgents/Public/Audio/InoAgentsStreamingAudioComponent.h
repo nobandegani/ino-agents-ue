@@ -151,7 +151,7 @@ public:
      * the next FeedAudioBytes / PlayAudio call.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Audio",
-              meta = (ClampMin = "0", ClampMax = "5000", Units = "ms"))
+              meta = (ClampMin = "0", ClampMax = "5000"))
     int32 PreBufferMs = 250;
 
     // -----------------------------------------------------------------
