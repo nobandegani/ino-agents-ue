@@ -3,9 +3,8 @@
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 
 #include "InoAgentsAudioMp3Decoder.h"
+#include "InoAgentsProceduralWave.h"
 #include "InoAgentsLog.h"
-
-#include "Sound/SoundWaveProcedural.h"
 
 // Pre-buffer duration is now a UPROPERTY (PreBufferMs) on the
 // component, editable in the details panel and from Blueprint.
@@ -317,7 +316,8 @@ void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, i
                 "%d Hz / %d ch"),
            SampleRate, NumChannels);
 
-    ProceduralWave = NewObject<USoundWaveProcedural>(this);
+    ProceduralWave = NewObject<UInoAgentsProceduralWave>(this);
+    ProceduralWave->SetOwnerAndBatchSize(this, NumVisualizationSamples);
     ProceduralWave->SetSampleRate(static_cast<uint32>(SampleRate));
     ProceduralWave->NumChannels = NumChannels;
     ProceduralWave->Duration    = INDEFINITELY_LOOPING_DURATION;
@@ -329,11 +329,12 @@ void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, i
 
     // Pre-buffer target: PreBufferMs worth of int16 samples at the
     // stream's rate and channel count. int16 = 2 bytes per sample
-    // per channel. PreBufferMs is a UPROPERTY on the component,
-    // editable per-instance in the details panel (integer ms).
+    // per channel. Use float arithmetic to avoid int32 overflow at
+    // high sample rates (e.g. 192 kHz stereo * 5 s = 3.84 GB).
+    const float BytesPerSec = static_cast<float>(SampleRate) * static_cast<float>(NumChannels) * 2.0f;
     const float Seconds = static_cast<float>(FMath::Max(PreBufferMs, 0)) / 1000.0f;
-    PreBufferTargetBytes = static_cast<int32>(
-        static_cast<float>(SampleRate * NumChannels * 2) * Seconds);
+    PreBufferTargetBytes = static_cast<int32>(FMath::Clamp(
+        BytesPerSec * Seconds, 0.0f, static_cast<float>(MAX_int32)));
 
     // Drop any prior binding and bind the new wave. Play() is NOT
     // called here — TryStartPlayback handles it after enough audio
@@ -433,6 +434,7 @@ void UInoAgentsStreamingAudioComponent::ResetInternalState()
     if (ProceduralWave != nullptr)
     {
         ProceduralWave->ResetAudio();
+        ProceduralWave->ResetVisualization();
     }
 
     SetComponentTickEnabled(false);

@@ -69,3 +69,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsAudioFinished);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
     FOnInoAgentsAudioError,
     FString, ErrorMessage);
+
+/** Fires during audio playback with PCM sample data as normalized
+ *  floats (-1.0 to 1.0). Use for visualizations (waveform, lip sync,
+ *  VU meter, etc.). Batch size controlled by NumVisualizationSamples
+ *  on the audio component. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsGeneratePCMData,
+    const TArray<float>&, PCMData);

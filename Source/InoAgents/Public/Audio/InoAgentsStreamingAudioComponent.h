@@ -10,7 +10,7 @@
 
 #include "InoAgentsStreamingAudioComponent.generated.h"
 
-class USoundWaveProcedural;
+class UInoAgentsProceduralWave;
 
 // Forward declaration of the MP3 decoder state held via TPimplPtr. The
 // full definition lives in Private/Audio/InoAgentsAudioMp3Decoder.h and
@@ -167,6 +167,18 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
     FOnInoAgentsAudioError OnError;
 
+    /** Fires during playback with batches of PCM float samples.
+     *  Batch size is controlled by NumVisualizationSamples. */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
+    FOnInoAgentsGeneratePCMData OnGeneratePCMData;
+
+    /** How many samples per OnGeneratePCMData broadcast. Higher =
+     *  fewer broadcasts, lower = more granular. 0 = disabled.
+     *  Changes only take effect on the next stream (not mid-stream). */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "InoAgents|Audio",
+              meta = (ClampMin = "0", ClampMax = "16384"))
+    int32 NumVisualizationSamples = 0;
+
     //~ UActorComponent interface
     virtual void TickComponent(float DeltaTime, ELevelTick TickType,
                                FActorComponentTickFunction* ThisTickFunction) override;
@@ -182,7 +194,7 @@ private:
      * changes — we build a new one).
      */
     UPROPERTY(Transient)
-    TObjectPtr<USoundWaveProcedural> ProceduralWave;
+    TObjectPtr<UInoAgentsProceduralWave> ProceduralWave;
 
     /**
      * MP3 decoder state. Allocated lazily on the first MP3 stream
