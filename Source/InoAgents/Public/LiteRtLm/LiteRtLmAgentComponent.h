@@ -16,10 +16,29 @@ class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
 class ULiteRtLmSubsystem;
 
+/** Agent activity state. */
+UENUM(BlueprintType)
+enum class EInoAgentsAgentStatus : uint8
+{
+    /** No active request. Ready for input. */
+    Idle        UMETA(DisplayName = "Idle"),
+    /** Model is generating a response. */
+    Thinking    UMETA(DisplayName = "Thinking"),
+    /** TTS audio is playing the response. */
+    Talking     UMETA(DisplayName = "Talking"),
+    /** User sent a new message while the agent was talking. */
+    Interrupted UMETA(DisplayName = "Interrupted"),
+    /** Reserved for future STT / voice input. */
+    Listening   UMETA(DisplayName = "Listening"),
+};
+
 /** Multicast version of FOnLiteRtLmModelLoaded for BlueprintAssignable. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoAgentsAgentModelLoaded,
     bool, bSuccess,
     FString, ErrorMessage);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoAgentsAgentStatusChanged,
+    EInoAgentsAgentStatus, NewStatus);
 
 /**
  * All-in-one LiteRT-LM + ElevenLabs agent component.
@@ -183,8 +202,21 @@ public:
     FOnInoAgentsModelDownloadProgress OnDownloadProgress;
 
     // =============================================================
+    // Delegates — status
+    // =============================================================
+
+    /** Fires whenever the agent's status changes (Idle, Thinking,
+     *  Talking, Interrupted, Listening). */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
+    FOnInoAgentsAgentStatusChanged OnStatusChanged;
+
+    // =============================================================
     // Read-only state
     // =============================================================
+
+    /** Current agent status. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
+    EInoAgentsAgentStatus GetStatus() const { return Status; }
 
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     bool IsModelLoaded() const;
@@ -221,6 +253,11 @@ private:
     TObjectPtr<UInoAgentsLiteRtLmDialogueQueue> DialogueQueue;
 
     TWeakObjectPtr<ULiteRtLmSubsystem> SubsystemWeak;
+
+    EInoAgentsAgentStatus Status = EInoAgentsAgentStatus::Idle;
+
+    /** Set status and broadcast OnStatusChanged if it actually changed. */
+    void SetStatus(EInoAgentsAgentStatus NewStatus);
 
     // Delegate trampolines.
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);

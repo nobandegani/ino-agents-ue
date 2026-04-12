@@ -145,6 +145,15 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
 // Runtime API
 // ======================================================================
 
+void UInoAgentsLiteRtLmAgentComponent::SetStatus(EInoAgentsAgentStatus NewStatus)
+{
+    if (Status != NewStatus)
+    {
+        Status = NewStatus;
+        OnStatusChanged.Broadcast(NewStatus);
+    }
+}
+
 void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
 {
     if (Conversation == nullptr)
@@ -153,16 +162,22 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
         return;
     }
 
-    // Stop any in-progress audio from the previous response so the
-    // user doesn't hear stale TTS while the model is generating a
-    // new answer. StopAndReset clears slots and stops playback but
-    // keeps the conversation binding so the queue picks up the new
-    // response's OnSentence events automatically.
+    // If the agent was talking, mark as interrupted before transitioning
+    // to thinking. The Interrupted state is transient — it fires as a
+    // broadcast so listeners can react (e.g. play an interruption sound),
+    // then immediately transitions to Thinking.
+    if (Status == EInoAgentsAgentStatus::Talking)
+    {
+        SetStatus(EInoAgentsAgentStatus::Interrupted);
+    }
+
+    // Stop any in-progress audio from the previous response.
     if (DialogueQueue != nullptr)
     {
         DialogueQueue->StopAndReset();
     }
 
+    SetStatus(EInoAgentsAgentStatus::Thinking);
     Conversation->SendMessageAsync(Text);
 }
 
@@ -247,6 +262,11 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToken(FString Chunk)
 
 void UInoAgentsLiteRtLmAgentComponent::HandleSentence(FString RawText, FString CleanText)
 {
+    // First sentence arriving means TTS will start — transition to Talking.
+    if (Status == EInoAgentsAgentStatus::Thinking)
+    {
+        SetStatus(EInoAgentsAgentStatus::Talking);
+    }
     OnSentence.Broadcast(RawText, CleanText);
 }
 
@@ -262,6 +282,7 @@ void UInoAgentsLiteRtLmAgentComponent::HandleComplete(FString FullText)
 
 void UInoAgentsLiteRtLmAgentComponent::HandleError(FString ErrorMessage)
 {
+    SetStatus(EInoAgentsAgentStatus::Idle);
     OnError.Broadcast(ErrorMessage);
 }
 
@@ -273,6 +294,7 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToolCalled(
 
 void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
 {
+    SetStatus(EInoAgentsAgentStatus::Idle);
     OnAudioFinished.Broadcast();
 }
 
