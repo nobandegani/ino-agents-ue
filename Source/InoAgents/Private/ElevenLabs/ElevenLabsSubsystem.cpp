@@ -2,9 +2,9 @@
 
 #include "ElevenLabs/ElevenLabsSubsystem.h"
 
-#include "ElevenLabs/ElevenLabsSettings.h"
 #include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
+#include "InoAgentsSettings.h"
 
 #include "Kismet/BlueprintAsyncActionBase.h"
 
@@ -34,11 +34,11 @@ void UElevenLabsSubsystem::Deinitialize()
 
 void UElevenLabsSubsystem::ReloadSettings()
 {
-    const UElevenLabsSettings* Settings = UElevenLabsSettings::Get();
+    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
     if (Settings == nullptr)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("UElevenLabsSubsystem::ReloadSettings: UElevenLabsSettings::Get() "
+               TEXT("UElevenLabsSubsystem::ReloadSettings: UInoAgentsSettings::Get() "
                     "returned null; using built-in defaults"));
         CachedApiKey.Empty();
         CachedBaseUrl               = TEXT("https://api.elevenlabs.io");
@@ -47,10 +47,10 @@ void UElevenLabsSubsystem::ReloadSettings()
         return;
     }
 
-    CachedApiKey                = Settings->ApiKey;
-    CachedBaseUrl               = Settings->GetEffectiveBaseUrl();
-    CachedDefaultModelId        = Settings->DefaultModelId;
-    CachedDefaultOutputFormat   = Settings->DefaultOutputFormat;
+    CachedApiKey                = Settings->ElevenLabsApiKey;
+    CachedBaseUrl               = Settings->GetEffectiveElevenLabsBaseUrl();
+    CachedDefaultModelId        = Settings->ElevenLabsDefaultModelId;
+    CachedDefaultOutputFormat   = Settings->ElevenLabsDefaultOutputFormat;
 
     UE_LOG(LogInoAgents, Log,
            TEXT("UElevenLabsSubsystem::ReloadSettings: ApiKey=%s, BaseUrl=%s"),

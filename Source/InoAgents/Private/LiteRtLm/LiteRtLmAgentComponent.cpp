@@ -5,8 +5,8 @@
 #include "Audio/InoAgentsLiteRtLmDialogueQueue.h"
 #include "Audio/InoAgentsStreamingAudioComponent.h"
 #include "InoAgentsLog.h"
+#include "InoAgentsSettings.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-#include "LiteRtLm/LiteRtLmSettings.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
 #include "Engine/GameInstance.h"
@@ -134,7 +134,7 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
     }
 
     // Model not on disk — look up the download URL in settings.
-    const ULiteRtLmSettings* Settings = ULiteRtLmSettings::Get();
+    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
     const FLiteRtLmModelEntry* Entry = Settings != nullptr
         ? Settings->FindModelByFileName(ModelConfig.ModelFileName)
         : nullptr;

@@ -1,11 +1,10 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "LiteRtLm/LiteRtLmSettings.h"
+#include "InoAgentsSettings.h"
 
-ULiteRtLmSettings::ULiteRtLmSettings()
+UInoAgentsSettings::UInoAgentsSettings()
 {
     // Default model entries — public Hugging Face repos, no auth needed.
-    // Users can add/remove/override in Project Settings.
     Models.Add({
         TEXT("Gemma 4 E2B"),
         TEXT("gemma-4-E2B-it.litertlm"),
@@ -18,7 +17,20 @@ ULiteRtLmSettings::ULiteRtLmSettings()
     });
 }
 
-const FLiteRtLmModelEntry* ULiteRtLmSettings::FindModelByFileName(
+FString UInoAgentsSettings::GetEffectiveElevenLabsBaseUrl() const
+{
+    FString Result = ElevenLabsBaseUrl.IsEmpty()
+        ? FString(TEXT("https://api.elevenlabs.io"))
+        : ElevenLabsBaseUrl;
+
+    while (Result.EndsWith(TEXT("/")))
+    {
+        Result.LeftChopInline(1);
+    }
+    return Result;
+}
+
+const FLiteRtLmModelEntry* UInoAgentsSettings::FindModelByFileName(
     const FString& FileName) const
 {
     for (const FLiteRtLmModelEntry& Entry : Models)
