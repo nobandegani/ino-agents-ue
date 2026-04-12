@@ -4,14 +4,17 @@
 
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
-// ULiteRtLmModelConfig (the old UDataAsset) is gone — FLiteRtLmModelConfig
-// struct lives in LiteRtLmTypes.h which is already included via the subsystem header.
+#include "InoAgentsSettings.h"
 #include "LiteRtLm/LiteRtLmTool.h"
 #include "LiteRtLm/LiteRtLmTypes.h"
 #include "UI/Slate/InoAgentsChatBridge.h"
 #include "UI/Slate/SInoAgentsChatPanel.h"
 
 #include "Async/Async.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
+#include "Misc/FileHelper.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/GameViewportClient.h"
@@ -97,28 +100,57 @@ void ULiteRtLmSubsystem::LoadModelAsync(
     // (downloaded/cached), then the plugin's Models/ dir (legacy dev).
     const FString ModelPath = LiteRtLmResolveModelPath(Config.ModelFileName);
 
-    if (ModelPath.IsEmpty())
+    if (!ModelPath.IsEmpty())
+    {
+        // Found on disk — proceed to load.
+        bLoadInFlight = true;
+        LoadedConfig  = Config;
+        ProceedWithLoad(ModelPath, OnLoaded);
+        return;
+    }
+
+    // Not on disk — look up the download URL in settings.
+    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const FLiteRtLmModelEntry* Entry = Settings
+        ? Settings->FindModelByFileName(Config.ModelFileName)
+        : nullptr;
+
+    if (Entry == nullptr || Entry->DownloadUrl.IsEmpty())
     {
         const FString Err = FString::Printf(
-            TEXT("Model file '%s' not found. Download it first or place it in "
-                 "Plugins/InoAgents/Models/. The agent component can auto-download "
-                 "from a URL configured in Project Settings → Plugins → InoAgents LiteRT-LM."),
+            TEXT("Model '%s' not found on disk and no download URL configured. "
+                 "Add an entry in Project Settings → Plugins → InoAgents → "
+                 "LiteRT-LM → Models."),
             *Config.ModelFileName);
         UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;
     }
 
-    // From here on we're committed to an async load. Transition state.
+    // Download, then load.
     bLoadInFlight = true;
     LoadedConfig  = Config;
 
-    // Capture-by-value what the worker needs. Do NOT capture `this` or
-    // `Config` directly — a TWeakObjectPtr lets us safely no-op if the
-    // subsystem or config is gone by the time the load completes.
+    const FString TargetDir = FPaths::Combine(
+        FPaths::ProjectPersistentDownloadDir(),
+        TEXT("InoAgents"), TEXT("Models"));
+    IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/true);
+
+    const FString TargetPath = FPaths::Combine(TargetDir, Config.ModelFileName);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LoadModelAsync: model not found locally, downloading from %s"),
+           *Entry->DownloadUrl);
+
+    StartDownload(Entry->DownloadUrl, TargetPath, OnLoaded);
+}
+
+void ULiteRtLmSubsystem::ProceedWithLoad(
+    const FString& ModelPath, const FOnLiteRtLmModelLoaded& OnLoaded)
+{
     TWeakObjectPtr<ULiteRtLmSubsystem> WeakThis(this);
     const FString                     ModelPathCopy = ModelPath;
-    const ELiteRtLmBackend            BackendCopy   = Config.Backend;
+    const ELiteRtLmBackend            BackendCopy   = LoadedConfig.Backend;
     const double                      TStart        = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
@@ -482,6 +514,99 @@ FString ULiteRtLmSubsystem::BuildToolsJsonForConversation() const
     FJsonSerializer::Serialize(SchemaArray, Writer);
 
     return OutJson;
+}
+
+// ======================================================================
+// Model download
+// ======================================================================
+
+void ULiteRtLmSubsystem::StartDownload(
+    const FString& Url, const FString& TargetPath,
+    const FOnLiteRtLmModelLoaded& OnLoaded)
+{
+    PendingDownloadTargetPath = TargetPath;
+    PendingOnLoaded           = OnLoaded;
+
+    DownloadRequest = FHttpModule::Get().CreateRequest();
+    DownloadRequest->SetURL(Url);
+    DownloadRequest->SetVerb(TEXT("GET"));
+    DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
+
+    DownloadRequest->OnRequestProgress64().BindUObject(
+        this, &ULiteRtLmSubsystem::HandleDownloadProgress);
+    DownloadRequest->OnProcessRequestComplete().BindUObject(
+        this, &ULiteRtLmSubsystem::HandleDownloadComplete);
+
+    DownloadRequest->ProcessRequest();
+}
+
+void ULiteRtLmSubsystem::HandleDownloadProgress(
+    FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
+{
+    int64 TotalBytes = -1;
+    if (DownloadRequest.IsValid())
+    {
+        if (const FHttpResponsePtr Resp = DownloadRequest->GetResponse())
+        {
+            const FString ContentLength = Resp->GetHeader(TEXT("Content-Length"));
+            if (!ContentLength.IsEmpty())
+            {
+                TotalBytes = FCString::Atoi64(*ContentLength);
+            }
+        }
+    }
+
+    const float Percent = (TotalBytes > 0)
+        ? (static_cast<float>(BytesReceived) / static_cast<float>(TotalBytes)) * 100.0f
+        : 0.0f;
+
+    OnDownloadProgress.Broadcast(Percent, static_cast<int64>(BytesReceived), TotalBytes);
+}
+
+void ULiteRtLmSubsystem::HandleDownloadComplete(
+    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
+{
+    DownloadRequest.Reset();
+
+    if (!bSucceeded || !Response.IsValid())
+    {
+        bLoadInFlight = false;
+        LoadedConfig  = FLiteRtLmModelConfig();
+        const FString Err = TEXT("Model download failed (network error)");
+        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
+        PendingOnLoaded.ExecuteIfBound(false, Err);
+        return;
+    }
+
+    const int32 Code = Response->GetResponseCode();
+    if (Code < 200 || Code >= 300)
+    {
+        bLoadInFlight = false;
+        LoadedConfig  = FLiteRtLmModelConfig();
+        const FString Err = FString::Printf(TEXT("Model download failed: HTTP %d"), Code);
+        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
+        PendingOnLoaded.ExecuteIfBound(false, Err);
+        return;
+    }
+
+    const TArray<uint8>& Content = Response->GetContent();
+    if (!FFileHelper::SaveArrayToFile(Content, *PendingDownloadTargetPath))
+    {
+        bLoadInFlight = false;
+        LoadedConfig  = FLiteRtLmModelConfig();
+        const FString Err = FString::Printf(
+            TEXT("Failed to save model to %s"), *PendingDownloadTargetPath);
+        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
+        PendingOnLoaded.ExecuteIfBound(false, Err);
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LoadModelAsync: model downloaded and saved to %s (%d bytes)"),
+           *PendingDownloadTargetPath, Content.Num());
+
+    // Now load normally.
+    ProceedWithLoad(PendingDownloadTargetPath, PendingOnLoaded);
 }
 
 // ======================================================================

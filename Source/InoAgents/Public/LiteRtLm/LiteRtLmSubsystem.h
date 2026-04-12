@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Interfaces/IHttpRequest.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UObject/ScriptInterface.h"
 
@@ -93,6 +94,14 @@ public:
      * MUST be called on the game thread. The actual engine construction
      * runs on a ThreadPool worker; the OnLoaded callback marshals back.
      */
+    /**
+     * Fires during model download with progress info. Only fires when
+     * the model file isn't cached locally and needs to be downloaded
+     * from the URL configured in Project Settings. Bind this to show
+     * a loading screen / progress bar. */
+    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
+    FOnInoAgentsModelDownloadProgress OnDownloadProgress;
+
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM",
               meta=(AutoCreateRefTerm="OnLoaded"))
     void LoadModelAsync(
@@ -257,6 +266,17 @@ private:
     // True from the moment LoadModelAsync dispatches to the ThreadPool
     // until the OnLoaded callback fires back on the game thread.
     bool bLoadInFlight = false;
+
+    // Download state — used when LoadModelAsync needs to fetch the model.
+    FHttpRequestPtr DownloadRequest;
+    FString         PendingDownloadTargetPath;
+    FOnLiteRtLmModelLoaded PendingOnLoaded;
+
+    void StartDownload(const FString& Url, const FString& TargetPath,
+                       const FOnLiteRtLmModelLoaded& OnLoaded);
+    void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
+    void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void ProceedWithLoad(const FString& ModelPath, const FOnLiteRtLmModelLoaded& OnLoaded);
 
     // Weak ref to the most recently created conversation. Used to enforce
     // the single-conversation invariant and to tear the conversation down

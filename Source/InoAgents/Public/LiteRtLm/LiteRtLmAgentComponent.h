@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
-#include "Interfaces/IHttpRequest.h"
 
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
@@ -202,11 +201,7 @@ private:
 
     void CreateConversationAndQueue();
 
-    // Model download.
-    void DownloadModel(const FString& Url, const FString& TargetPath);
-    void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
-    void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
-
-    FString PendingDownloadTargetPath;
-    FHttpRequestPtr DownloadRequest;
+    // Download progress trampoline from subsystem → component delegate.
+    UFUNCTION()
+    void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 };
