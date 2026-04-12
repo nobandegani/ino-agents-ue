@@ -376,6 +376,11 @@ public:
      *  the worker's DispatchCompleteOnGameThread, game thread only. */
     void RecordAssistantMessage(const FString& Text);
 
+    /** Filter a raw token chunk through the bracket-tag state machine.
+     *  Returns the clean portion (characters outside [tags]). Handles
+     *  tags that span multiple tokens. Game thread only. */
+    FString FilterCleanToken(const FString& RawChunk);
+
 private:
     UPROPERTY()
     TWeakObjectPtr<ULiteRtLmSubsystem> Subsystem;
@@ -391,15 +396,7 @@ private:
     TMap<FString, FString> UserContextMap;
     FString BuildMergedContext() const;
 
-    /** Bracket depth for per-token tag filtering. Tracks whether
-     *  we're inside a [tag] across token boundaries. Reset at the
-     *  start of each SendMessageAsync. */
     int32 TokenTagDepth = 0;
-
-    /** Filter a raw token chunk through the bracket-tag state machine.
-     *  Returns the clean portion (characters outside [tags]). Handles
-     *  tags that span multiple tokens. */
-    FString FilterCleanToken(const FString& RawChunk);
 
     /** Rolling buffer for sentence detection. Accumulates tokens until
      *  a sentence-ending delimiter is found, at which point the complete
