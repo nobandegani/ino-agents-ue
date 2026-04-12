@@ -77,17 +77,19 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     const FString& InVoiceId,
     const FElevenLabsDialogueRequest& InTtsRequestTemplate,
     int32 InPauseDurationMs,
+    float InInterruptionDelaySec,
     int32 InPreBufferMs,
     int32 InPcmSampleRate,
     int32 InPcmNumChannels)
 {
-    ModelConfig        = InModelConfig;
-    VoiceId            = InVoiceId;
-    TtsRequestTemplate = InTtsRequestTemplate;
-    PauseDurationMs    = FMath::Max(InPauseDurationMs, 0);
-    PreBufferMs        = FMath::Clamp(InPreBufferMs, 0, 2000);
-    PcmSampleRate      = FMath::Clamp(InPcmSampleRate, 8000, 192000);
-    PcmNumChannels     = FMath::Clamp(InPcmNumChannels, 1, 2);
+    ModelConfig            = InModelConfig;
+    VoiceId                = InVoiceId;
+    TtsRequestTemplate     = InTtsRequestTemplate;
+    PauseDurationMs        = FMath::Max(InPauseDurationMs, 0);
+    InterruptionDelaySec   = FMath::Clamp(InInterruptionDelaySec, 0.0f, 5.0f);
+    PreBufferMs            = FMath::Clamp(InPreBufferMs, 0, 2000);
+    PcmSampleRate          = FMath::Clamp(InPcmSampleRate, 8000, 192000);
+    PcmNumChannels         = FMath::Clamp(InPcmNumChannels, 1, 2);
 
     if (AudioComp != nullptr)
     {

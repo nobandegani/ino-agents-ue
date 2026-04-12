@@ -127,6 +127,7 @@ public:
         const FString& InVoiceId,
         const FElevenLabsDialogueRequest& InTtsRequestTemplate,
         int32 InPauseDurationMs,
+        float InInterruptionDelaySec,
         int32 InPreBufferMs,
         int32 InPcmSampleRate,
         int32 InPcmNumChannels);
