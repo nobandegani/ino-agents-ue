@@ -121,13 +121,6 @@ public:
     //~ End UBlueprintAsyncActionBase interface
 
 private:
-    // UE 5.4+ uses the 64-bit progress delegate; the old int32 version is
-    // deprecated. The byte counters are passed as uint64 but we clamp and
-    // cast internally since our slicing arithmetic uses int32.
-    void HandleRequestProgress(FHttpRequestPtr  Request,
-                               uint64           BytesSent,
-                               uint64           BytesReceived);
-
     void HandleRequestComplete(FHttpRequestPtr  Request,
                                FHttpResponsePtr Response,
                                bool             bSucceeded);
@@ -165,9 +158,6 @@ private:
 
     /** In-flight HTTP request. Null after Finish. */
     FHttpRequestPtr HttpRequest;
-
-    /** Bytes-read high-water mark for incremental chunk slicing. */
-    int32 LastReadOffset = 0;
 
     /** Set once any terminal delegate fires so CancelStream is a no-op. */
     bool bFinished = false;

@@ -283,56 +283,22 @@ void UElevenLabsTextToDialogueStream::Activate()
     HttpRequest->SetHeader(TEXT("Accept"),       TEXT("*/*"));
     HttpRequest->SetContentAsString(Body);
 
-    HttpRequest->OnRequestProgress64().BindUObject(
-        this, &UElevenLabsTextToDialogueStream::HandleRequestProgress);
+    // NOTE: we deliberately do NOT use OnRequestProgress64 here.
+    // Calling Response->GetContent() mid-stream triggers UE's internal
+    // "Payload is incomplete" warning on every progress tick, spamming
+    // the log. TTS responses are small (<200 KB) so there's no benefit
+    // to incremental chunk delivery — the audio component's pre-buffer
+    // handles playback latency regardless. The full buffer is delivered
+    // as a single OnAudioChunk + OnComplete at request completion.
     HttpRequest->OnProcessRequestComplete().BindUObject(
         this, &UElevenLabsTextToDialogueStream::HandleRequestComplete);
 
-    LastReadOffset = 0;
     HttpRequest->ProcessRequest();
 }
 
 // ---------------------------------------------------------------------------
 // HTTP callbacks
 // ---------------------------------------------------------------------------
-
-void UElevenLabsTextToDialogueStream::HandleRequestProgress(
-    FHttpRequestPtr Request, uint64 /*BytesSent*/, uint64 BytesReceivedU64)
-{
-    if (bFinished)
-    {
-        return;
-    }
-    if (!Request.IsValid())
-    {
-        return;
-    }
-
-    const FHttpResponsePtr Response = Request->GetResponse();
-    if (!Response.IsValid())
-    {
-        return;
-    }
-
-    // UE's IHttpResponse::GetContent() returns the FULL accumulated buffer
-    // received so far, not just the delta since the last progress tick.
-    // Slice from LastReadOffset forward to compute the incremental chunk.
-    const TArray<uint8>& All = Response->GetContent();
-    const int32 BytesReceived = static_cast<int32>(
-        FMath::Min<uint64>(BytesReceivedU64, static_cast<uint64>(All.Num())));
-
-    if (BytesReceived <= LastReadOffset)
-    {
-        return;
-    }
-
-    const int32 NewCount = BytesReceived - LastReadOffset;
-    TArray<uint8> Chunk;
-    Chunk.Append(All.GetData() + LastReadOffset, NewCount);
-    LastReadOffset = BytesReceived;
-
-    OnAudioChunk.Broadcast(Chunk, static_cast<int64>(BytesReceived));
-}
 
 void UElevenLabsTextToDialogueStream::HandleRequestComplete(
     FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded)
@@ -377,17 +343,14 @@ void UElevenLabsTextToDialogueStream::HandleRequestComplete(
         return;
     }
 
-    // Successful 2xx: emit any trailing bytes that landed after the last
-    // progress tick (shouldn't happen often but the HTTP module can batch
-    // the final chunk with the complete callback on some backends), then
-    // fire OnComplete with the full buffer.
+    // Deliver the full buffer as a single OnAudioChunk so callers that
+    // bind OnAudioChunk (like the TTS queue) still receive the data.
+    // Then fire OnComplete with the same buffer.
     const TArray<uint8>& Full = Response->GetContent();
-    if (Full.Num() > LastReadOffset)
+
+    if (Full.Num() > 0)
     {
-        TArray<uint8> Tail;
-        Tail.Append(Full.GetData() + LastReadOffset, Full.Num() - LastReadOffset);
-        LastReadOffset = Full.Num();
-        OnAudioChunk.Broadcast(Tail, static_cast<int64>(Full.Num()));
+        OnAudioChunk.Broadcast(Full, static_cast<int64>(Full.Num()));
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -439,10 +402,9 @@ void UElevenLabsTextToDialogueStream::FinishCleanly()
     }
     bFinished = true;
 
-    // Drop the HTTP delegates so a late progress tick can't re-enter us.
+    // Drop the HTTP delegate so a late callback can't re-enter us.
     if (HttpRequest.IsValid())
     {
-        HttpRequest->OnRequestProgress64().Unbind();
         HttpRequest->OnProcessRequestComplete().Unbind();
         HttpRequest.Reset();
     }
