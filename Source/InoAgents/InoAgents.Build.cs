@@ -90,8 +90,8 @@ public class InoAgents : ModuleRules
 				"SlateCore",
 
 				// UInoAgentsProceduralWave subclasses USoundWaveProcedural which
-				// depends on IAudioProxyDataFactory from AudioMixer.
-				"AudioMixer",
+				// inherits IAudioProxyDataFactory from AudioExtensions.
+				"AudioExtensions",
 
 				// Required for EKeys::Enter / EKeys::Escape constants used by the
 				// chat input's Enter-to-send and ESC-to-dismiss handling. Forgetting
