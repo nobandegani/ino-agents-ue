@@ -137,19 +137,22 @@ public:
     // -----------------------------------------------------------------
 
     /**
-     * How many seconds of audio to buffer before calling Play(). Higher
-     * values give the audio engine more cushion against network jitter
-     * (fewer gaps) at the cost of higher latency before the user hears
-     * anything. 0.25 s is good for conversational TTS; raise to 0.5–1.0
-     * for unreliable connections; lower to 0.05–0.1 for low-latency
-     * playback where gaps are acceptable.
+     * How many milliseconds of audio to buffer before starting playback.
+     * Higher values give the audio engine more cushion against network
+     * jitter (fewer gaps) at the cost of higher latency before the user
+     * hears anything.
+     *
+     *   250 ms — good for conversational TTS (default)
+     *   500–1000 ms — bullet-proof for unreliable connections
+     *   50–100 ms — low-latency, accepts occasional gaps
+     *   0 ms — no pre-buffer, play immediately (may glitch on streaming)
      *
      * Applies per-stream — changing it mid-stream has no effect until
      * the next FeedAudioBytes / PlayAudio call.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Audio",
-              meta = (ClampMin = "0.0", ClampMax = "5.0"))
-    float PreBufferSeconds = 0.25f;
+              meta = (ClampMin = "0", ClampMax = "5000", Units = "ms"))
+    int32 PreBufferMs = 250;
 
     // -----------------------------------------------------------------
     // Events
@@ -208,7 +211,7 @@ private:
 
     /**
      * Pre-buffer target in bytes. Computed from
-     * ActiveSampleRate * ActiveNumChannels * 2 (int16) * PreBufferSeconds
+     * ActiveSampleRate * ActiveNumChannels * 2 (int16) * PreBufferMs / 1000
      * whenever EnsureProceduralWave (re)builds the procedural wave.
      *
      * Play() is not called until the procedural wave's queue has at
