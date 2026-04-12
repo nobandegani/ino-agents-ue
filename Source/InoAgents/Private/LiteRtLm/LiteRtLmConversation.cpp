@@ -222,8 +222,7 @@ void ULiteRtLmConversation::Initialize(
     }
 }
 
-void ULiteRtLmConversation::SendMessageAsync(
-    const FString& UserText, const FString& ExtraContext)
+void ULiteRtLmConversation::SendMessageAsync(const FString& UserText)
 {
     check(IsInGameThread());
 
@@ -242,7 +241,7 @@ void ULiteRtLmConversation::SendMessageAsync(
     // completing, the buffer may be non-empty.)
     SentenceBuffer.Empty();
 
-    Worker->EnqueueMessage(UserText, ExtraContext);
+    Worker->EnqueueMessage(UserText, BuildMergedContext());
 }
 
 void ULiteRtLmConversation::Cancel()
@@ -316,6 +315,82 @@ void ULiteRtLmConversation::BeginDestroy()
     Worker.Reset();
 
     Super::BeginDestroy();
+}
+
+// ======================================================================
+// Context
+// ======================================================================
+
+void ULiteRtLmConversation::SetSystemContext(const FString& Key, const FString& Value)
+{
+    SystemContextMap.Add(Key, Value);
+}
+
+void ULiteRtLmConversation::SetUserContext(const FString& Key, const FString& Value)
+{
+    UserContextMap.Add(Key, Value);
+}
+
+void ULiteRtLmConversation::AddSystemContext(const FString& Key, const FString& Value)
+{
+    SystemContextMap.Add(Key, Value);
+}
+
+void ULiteRtLmConversation::AddUserContext(const FString& Key, const FString& Value)
+{
+    UserContextMap.Add(Key, Value);
+}
+
+FString ULiteRtLmConversation::GetSystemContext(const FString& Key) const
+{
+    const FString* Found = SystemContextMap.Find(Key);
+    return Found ? *Found : FString();
+}
+
+FString ULiteRtLmConversation::GetUserContext(const FString& Key) const
+{
+    const FString* Found = UserContextMap.Find(Key);
+    return Found ? *Found : FString();
+}
+
+void ULiteRtLmConversation::ClearSystemContext()
+{
+    SystemContextMap.Reset();
+}
+
+void ULiteRtLmConversation::ClearUserContext()
+{
+    UserContextMap.Reset();
+}
+
+FString ULiteRtLmConversation::BuildMergedContext() const
+{
+    if (SystemContextMap.Num() == 0 && UserContextMap.Num() == 0)
+    {
+        return FString();
+    }
+
+    FString Result;
+
+    if (SystemContextMap.Num() > 0)
+    {
+        Result += TEXT("[System Context]\n");
+        for (const auto& Pair : SystemContextMap)
+        {
+            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
+    if (UserContextMap.Num() > 0)
+    {
+        Result += TEXT("[User Context]\n");
+        for (const auto& Pair : UserContextMap)
+        {
+            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+        }
+    }
+
+    return Result;
 }
 
 // ======================================================================

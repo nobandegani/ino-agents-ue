@@ -105,8 +105,43 @@ public:
      * Blueprint or C++ never see off-thread delegates.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
-    void SendMessageAsync(const FString& UserText,
-                          const FString& ExtraContext);
+    void SendMessageAsync(const FString& UserText);
+
+    // ------------------------------------------------------------------
+    // Context (per-turn injection, not stored in chat history)
+    // ------------------------------------------------------------------
+
+    /** Set a system context value (game/world state). */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void SetSystemContext(const FString& Key, const FString& Value);
+
+    /** Set a user context value (player state). */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void SetUserContext(const FString& Key, const FString& Value);
+
+    /** Add a system context value. Same as SetSystemContext. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void AddSystemContext(const FString& Key, const FString& Value);
+
+    /** Add a user context value. Same as SetUserContext. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void AddUserContext(const FString& Key, const FString& Value);
+
+    /** Get a system context value. Empty if not found. */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM|Context")
+    FString GetSystemContext(const FString& Key) const;
+
+    /** Get a user context value. Empty if not found. */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM|Context")
+    FString GetUserContext(const FString& Key) const;
+
+    /** Clear all system context. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void ClearSystemContext();
+
+    /** Clear all user context. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM|Context")
+    void ClearUserContext();
 
     /**
      * Cancel the in-flight stream, if any. Safe to call at any time
@@ -320,6 +355,11 @@ public:
 private:
     UPROPERTY()
     TWeakObjectPtr<ULiteRtLmSubsystem> Subsystem;
+
+    /** Context key-value maps. Merged on each SendMessageAsync. */
+    TMap<FString, FString> SystemContextMap;
+    TMap<FString, FString> UserContextMap;
+    FString BuildMergedContext() const;
 
     /** Rolling buffer for sentence detection. Accumulates tokens until
      *  a sentence-ending delimiter is found, at which point the complete

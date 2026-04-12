@@ -112,7 +112,7 @@ void UInoAgentsLiteRtLmConversationSendTestObserver::HandleModelLoaded(
            TEXT("ConversationSendTest: sending prompt: \"%s\""),
            *Prompt);
 
-    Conversation->SendMessageAsync(Prompt, FString());
+    Conversation->SendMessageAsync(Prompt);
 }
 
 void UInoAgentsLiteRtLmConversationSendTestObserver::HandleConversationComplete(

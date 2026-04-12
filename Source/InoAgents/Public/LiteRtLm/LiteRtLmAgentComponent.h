@@ -112,50 +112,12 @@ public:
     // =============================================================
 
     // =============================================================
-    // Context (injected with every SendMessage, not stored in history)
-    // =============================================================
-
-    /** Set a system context value (game/world state: time, weather,
-     *  quest, nearby NPCs). Overwrites if key exists. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void SetSystemContext(const FString& Key, const FString& Value);
-
-    /** Set a user context value (player state: hp, ammo, location).
-     *  Overwrites if key exists. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void SetUserContext(const FString& Key, const FString& Value);
-
-    /** Add a system context value. Same as SetSystemContext. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void AddSystemContext(const FString& Key, const FString& Value);
-
-    /** Add a user context value. Same as SetUserContext. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void AddUserContext(const FString& Key, const FString& Value);
-
-    /** Get a system context value. Empty if key not found. */
-    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent|Context")
-    FString GetSystemContext(const FString& Key) const;
-
-    /** Get a user context value. Empty if key not found. */
-    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent|Context")
-    FString GetUserContext(const FString& Key) const;
-
-    /** Clear all system context. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void ClearSystemContext();
-
-    /** Clear all user context. */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent|Context")
-    void ClearUserContext();
-
-    // =============================================================
     // Runtime API
     // =============================================================
 
-    /** Send a user message. Automatically merges system + user
-     *  context and passes it to the model. The model sees the context
-     *  but it doesn't become part of chat history. */
+    /** Send a user message. Context set on the conversation via
+     *  SetSystemContext / SetUserContext is automatically merged
+     *  and passed to the model. */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void SendMessage(const FString& Text);
 
@@ -259,14 +221,6 @@ private:
     TObjectPtr<UInoAgentsLiteRtLmDialogueQueue> DialogueQueue;
 
     TWeakObjectPtr<ULiteRtLmSubsystem> SubsystemWeak;
-
-    /** Key-value context maps. Merged into a single string on each
-     *  SendMessage and passed as extra_context to the native API. */
-    TMap<FString, FString> SystemContextMap;
-    TMap<FString, FString> UserContextMap;
-
-    /** Build the merged context string from both maps. */
-    FString BuildMergedContext() const;
 
     // Delegate trampolines.
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
