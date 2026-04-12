@@ -204,17 +204,10 @@ void ULiteRtLmSubsystem::ProceedWithLoad(
             {
                 litert_lm_engine_settings_set_max_num_tokens(NewSettings, MaxNumTokens);
             }
-            if (ActivationType != ELiteRtLmActivationType::F32)
-            {
-                // WARNING: LiteRT-LM v0.10.1 loads the engine with non-F32
-                // activations successfully, but conversation_send_message_stream
-                // returns error 13 at runtime. The setting IS applied here so
-                // that future versions that fix this will work without code
-                // changes — but callers should expect broken conversations
-                // until then. Default is F32 (see FLiteRtLmModelConfig).
-                litert_lm_engine_settings_set_activation_data_type(
-                    NewSettings, static_cast<int>(ActivationType));
-            }
+            // Set activation precision (F32, F16, I16, I8). F16 halves
+            // runtime memory with minimal quality loss on Gemma 4.
+            litert_lm_engine_settings_set_activation_data_type(
+                NewSettings, static_cast<int>(ActivationType));
             if (!CacheDirCopy.IsEmpty())
             {
                 const FTCHARToUTF8 CacheDirUtf8(*CacheDirCopy);
