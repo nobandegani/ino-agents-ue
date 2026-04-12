@@ -181,57 +181,75 @@ The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and sh
 The UE-facing API lives under `Source/InoAgents/Public/LiteRtLm/` and `Private/LiteRtLm/`. Names are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin will host multiple backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit.
 
 ```
-Blueprint ─┬─ ULiteRtLmSubsystem       (UGameInstanceSubsystem)
-           │     owns LiteRtLmEngine*, tool registry, async LoadModelAsync,
-           │     CreateConversation, RegisterTool / UnregisterTool /
-           │     FindTool / BuildToolsJsonForConversation
+Blueprint ─┬─ UInoAgentsLiteRtLmAgentComponent  (USceneComponent, all-in-one)
+           │     THE primary entry point. Drop on actor, set ModelConfig +
+           │     VoiceId, call SendMessage. Internally owns + wires:
+           │       child UInoAgentsStreamingAudioComponent (3D audio)
+           │       UInoAgentsLiteRtLmDialogueQueue (ordered TTS)
+           │       ULiteRtLmConversation (LLM chat)
+           │     Delegates (pass-through): OnModelLoaded, OnToken,
+           │       OnSentence(RawText,CleanText), OnComplete, OnError,
+           │       OnAudioFinished, OnDownloadProgress
+           │     Config: ModelConfig (FLiteRtLmModelConfig struct),
+           │       VoiceId, TtsRequestTemplate, PauseDurationMs
+           │
+           ├─ ULiteRtLmSubsystem       (UGameInstanceSubsystem)
+           │     owns LiteRtLmEngine*, tool registry, ShowChatPanel/
+           │     HideChatPanel. LoadModelAsync auto-downloads models
+           │     from URLs configured in UInoAgentsSettings.
+           │     OnDownloadProgress fires during download.
            │
            ├─ ULiteRtLmConversation    (UObject, BlueprintType)
            │     owns one native LiteRtLmConversation* plus a pinned
-           │     worker thread. Public surface:
-           │       SendMessageAsync(UserText)
-           │       Cancel()
-           │       Shutdown()                 — deterministic teardown
-           │       IsStreamingInFlight()      — BlueprintPure
-           │       SubmitDeferredToolResult() — stubbed for future
-           │     Multicast delegates:
+           │     worker thread. Multicast delegates:
            │       OnToken(Chunk)
+           │       OnSentence(RawText, CleanText)  — per newline
+           │       OnNewLine()                     — pause signal
            │       OnComplete(FullText)
            │       OnError(ErrorMessage)
            │       OnToolCalled(Name, ArgsJson, ResultJson)
            │
-           ├─ ULiteRtLmModelConfig     (UDataAsset, BlueprintType)
-           │     designer-editable asset. Fields:
-           │       ModelFileName (relative to Plugins/InoAgents/Models/)
-           │       Backend       (ELiteRtLmBackend::Cpu / Gpu)
-           │       MaxNumTokens
-           │       SystemMessage (plain text, wrapped into JSON internally)
+           ├─ FLiteRtLmModelConfig     (USTRUCT, BlueprintType)
+           │     plain struct (NOT a UDataAsset). Fields:
+           │       ModelFileName — resolved via LiteRtLmResolveModelPath:
+           │         1. PersistentDownloadDir/InoAgents/Models/ (cached)
+           │         2. Plugins/InoAgents/Models/ (legacy dev)
+           │         3. auto-download from UInoAgentsSettings URL
+           │       Backend (Cpu / Gpu), MaxNumTokens, SystemMessage
+           │
+           ├─ UInoAgentsSettings       (UDeveloperSettings)
+           │     unified Project Settings page under Plugins → InoAgents.
+           │     Two sections:
+           │       ElevenLabs: ApiKey, BaseUrl, DefaultModelId, OutputFormat
+           │       LiteRT-LM → Models: array of {DisplayName, FileName, URL}
            │
            ├─ ILiteRtLmTool            (Blueprintable UInterface)
-           │     Three BlueprintNativeEvents that both C++ and
-           │     Blueprint classes can implement:
-           │       GetToolName() → FName
-           │       GetToolSchemaJson() → FString (OpenAI function-call schema)
-           │       Execute(ArgumentsJson) → FString (result JSON literal)
            │
-           └─ ULiteRtLmAddNumbersTool  (UCLASS, reference implementation)
-                 Adds two integers. Doubles as the smoke-test fixture
-                 for InoAgents.LiteRtLm.ConversationToolTest and as a
-                 cargo-cult template for plugin consumers who want to
-                 author their own tools in C++.
+           ├─ UInoAgentsStreamingAudioComponent  (UAudioComponent subclass)
+           │     plays PCM int16 / PCM float32 / MP3 bytes at runtime.
+           │     FeedAudioBytes + FinalizeStream + PlayAudio + StopAndReset.
+           │     Pre-buffer before Play (configurable PreBufferMs).
+           │     MP3 decoded via bundled minimp3 (CC0, single-header).
+           │
+           ├─ UInoAgentsLiteRtLmDialogueQueue    (UObject)
+           │     auto-binds to conversation OnSentence + OnNewLine.
+           │     Dispatches ElevenLabs TTS in parallel per-sentence,
+           │     plays audio back in strict order via the streaming
+           │     audio component. Pause slots between lines.
+           │
+           ├─ UElevenLabsSubsystem     (UGameInstanceSubsystem)
+           │     caches settings, anchors live HTTP actions, CancelAll
+           │     on PIE end.
+           │
+           └─ UElevenLabsTextToDialogueStream  (UBlueprintAsyncActionBase)
+                 latent Blueprint node for /v1/text-to-dialogue/stream.
+                 OnAudioChunk / OnComplete / OnError.
                       │
                       ▼
-          FLiteRtLmConversationWorker   (FRunnable, one per conversation, NOT a UObject)
+          FLiteRtLmConversationWorker   (FRunnable, one per conversation)
                  Owns the native LiteRtLmConversation and ConversationConfig.
-                 Runs a multi-round agent loop inside ProcessMessage:
-                   round 0:   send user message (SendMessageStream)
-                   round N+1: execute collected tool_calls on game thread
-                              via FEvent, build tool_result message, send
-                   terminate: when a round produces final text, dispatch
-                              OnComplete; cancelled/error dispatches OnError
-                 Static C callback (OnStreamChunkStatic) runs on LiteRT-LM's
-                 internal thread and marshals token chunks and tool_call
-                 entries back to the worker via StreamEvent + AsyncTask.
+                 Multi-round agent loop: user msg → tool calls → tool
+                 results → final text. Marshals via AsyncTask(GameThread).
                       │
                       ▼
                  LiteRtLm.dll  (pure C API — litert_lm_conversation_*)
@@ -328,8 +346,9 @@ Two independent axes of progress: **UE API milestones** (A → D → E → ...) 
 | A — Phase 1 native bring-up | ✅ done | `InoAgents.LoadEngineTest`, `GenerateTest`, `ConversationTest`. Proves the C API works via raw smoke tests. |
 | B — Tool calling at the C API layer | ✅ done | `InoAgents.ToolCallTest`. Full agent loop using `litert_lm_conversation_*` directly, no UObjects. |
 | C — Non-blocking streaming | ✅ done | `InoAgents.StreamTest`. First worker → game-thread marshaling via `AsyncTask`; template for Milestone D's worker. |
-| **D** — UE-facing API | ✅ done | `ULiteRtLmSubsystem`, `ULiteRtLmConversation`, `ULiteRtLmModelConfig`, `ILiteRtLmTool`, `ULiteRtLmAddNumbersTool`. Five `InoAgents.LiteRtLm.*` smoke tests validate the full surface in PIE. See the Milestone D design spec in `docs/superpowers/specs/2026-04-11-milestone-d-litert-lm-ue-api-design.md` for the design record, and `README.md` for the user-facing API documentation. |
-| E — TBD | ⏳ pending | Possible scope: deferred-tool-result state machine (wire through `SubmitDeferredToolResult`), multi-conversation concurrency, per-conversation config overrides, Blueprint latent nodes wrapping `SendMessageAsync`. |
+| **D** — UE-facing API | ✅ done | `ULiteRtLmSubsystem`, `ULiteRtLmConversation`, `FLiteRtLmModelConfig` (USTRUCT), `ILiteRtLmTool`, `ULiteRtLmAddNumbersTool`. Five `InoAgents.LiteRtLm.*` smoke tests validate the full surface in PIE. |
+| **D+** — Agent component + integrations | ✅ done | `UInoAgentsLiteRtLmAgentComponent` (all-in-one scene component), `UInoAgentsStreamingAudioComponent` (MP3/PCM playback via bundled minimp3), `UInoAgentsLiteRtLmDialogueQueue` (ordered TTS with pauses), `UElevenLabsSubsystem` + `UElevenLabsTextToDialogueStream` (ElevenLabs HTTP client), `UInoAgentsSettings` (unified Project Settings), model auto-download, `OnSentence(RawText,CleanText)` + `OnNewLine` delegates, system message format fix, Slate chat panel (`ShowChatPanel`/`HideChatPanel`). |
+| E — TBD | ⏳ pending | Possible scope: deferred-tool-result state machine (wire through `SubmitDeferredToolResult`), multi-conversation concurrency, ElevenLabs TTS phase 2 (single-voice), STT phase 3, SHA-256 model verification. |
 
 ### Platform phases
 
@@ -359,40 +378,34 @@ No backend abstraction layer. LiteRT-LM is the one backend, and its public C API
 
 ## Model file distribution
 
-Gemma 4 `.litertlm` model files are 2.5–5 GB and **must never be committed**. They are also not redistributed with the plugin — developers download the model files they need manually.
+Gemma 4 `.litertlm` model files are 2.5–5 GB and **must never be committed**. Models are auto-downloaded on first use from URLs configured in Project Settings → Plugins → InoAgents → LiteRT-LM → Models.
 
-### Dev-time location (inside the plugin)
+### Model path resolution
 
-```
-Plugins/InoAgents/
-└── Models/
-    └── gemma-4-E2B-it.litertlm          ← 2.58 GB, developer-downloaded, gitignored
-```
+`LiteRtLmResolveModelPath(ModelFileName)` (in `LiteRtLmTypes.h/.cpp`) checks two locations in order:
 
-**Why inside the plugin and not in the host project:** the plugin is the primary artifact; the demo project exists only to exercise the plugin. Models travel with the plugin so that the plugin is self-contained when someone consumes it. The plugin's `.gitignore` excludes `Models/` so the 2.5 GB file can never land in git.
+1. **`FPaths::ProjectPersistentDownloadDir() / "InoAgents/Models/"`** — where auto-downloaded models are cached. This is UE's canonical location for runtime-acquired content that persists across sessions and app updates. Platform-appropriate (sandboxed on mobile, app-support on macOS).
+2. **`Plugins/InoAgents/Models/`** — legacy dev-time path. The plugin's `.gitignore` excludes `Models/` so the 2.5+ GB file never lands in git.
 
-**How the plugin resolves the model path at runtime:**
+If neither location has the file, `ULiteRtLmSubsystem::LoadModelAsync` looks up the `ModelFileName` in the `UInoAgentsSettings::Models` array to find the download URL, then downloads via `FHttpModule` and saves to `PersistentDownloadDir`. The subsystem fires `OnDownloadProgress(Percent, BytesReceived, TotalBytes)` during download for loading screens.
 
-```cpp
-const FString BaseDir = IPluginManager::Get().FindPlugin(TEXT("InoAgents"))->GetBaseDir();
-const FString ModelPath = FPaths::Combine(BaseDir, TEXT("Models"), TEXT("gemma-4-E2B-it.litertlm"));
-```
+### Model config
 
-This is the same `IPluginManager` pattern used in `FInoAgentsModule::StartupModule` for locating the native DLLs. One consistent convention: *anything the plugin needs to find at runtime lives under the plugin's base directory and is located via `IPluginManager::FindPlugin`*.
+Models are configured via `FLiteRtLmModelConfig` — a **plain USTRUCT** (not a UDataAsset). Set `ModelFileName`, `Backend`, `MaxNumTokens`, `SystemMessage` directly on the agent component's details panel, or build one in Blueprint via a Make node and pass to `LoadModelAsync`.
 
-### Model config (Milestone D)
+Phase 1 smoke tests under `InoAgents.*` still hardcode the model path via `InoAgentsSmokeTest::ResolveDefaultModelPath()` because they bypass the UE API and call the C functions directly.
 
-Models are selected via `ULiteRtLmModelConfig` — a `UDataAsset` subclass. Create one as a Content Browser asset (right-click → Miscellaneous → Data Asset → `LiteRtLmModelConfig`), point its `ModelFileName` at the file inside `Plugins/InoAgents/Models/`, and pass the asset to `ULiteRtLmSubsystem::LoadModelAsync`. The subsystem prepends `IPluginManager::FindPlugin("InoAgents")->GetBaseDir() + "/Models/"` internally so the config remains portable across developer machines.
+### System message format
 
-Phase 1 smoke tests under `InoAgents.*` still hardcode the path via `InoAgentsSmokeTest::ResolveDefaultModelPath()` because they bypass the UE API and call the C functions directly — that is intentional to keep the native layer testable without `ULiteRtLmSubsystem`.
+The system message is passed to LiteRT-LM's C API as a **plain text string** (NOT wrapped in JSON). The C API's `engine.cc:214-226` tries to JSON-parse the input; when parsing fails (because raw text isn't valid JSON), it falls back to using the raw string as the "content" field: `{"role":"system","content":"Your prompt here..."}`. This is what Gemma's Jinja2 chat template expects — wrapping as `{"type":"text","text":"..."}` would produce a content object that the template silently drops.
 
 ### Shipping builds
 
-For shipping the model can't live inside the plugin tree — it would bloat the packaged build. The plan, still to be implemented:
-- **Download on first run** to `FPaths::ProjectPersistentDownloadDir()` (canonical UE location for runtime-acquired user content)
-- Verify SHA-256 against a manifest baked into the game
-- Show a progress UI (the download is 2.5–5 GB)
-- Point a runtime `ULiteRtLmModelConfig` at the downloaded path instead of the dev-time `Models/` directory
+Auto-download to `PersistentDownloadDir` is **implemented** and works for both dev and shipping:
+- First run downloads from the configured Hugging Face URL (~2.5–5 GB, 2–10 min)
+- `OnDownloadProgress` fires for loading-screen UI
+- Subsequent runs use the cached file (loads in <1 second with XNNPACK cache)
+- SHA-256 verification is NOT yet implemented (planned)
 
 ### Model sources
 
