@@ -297,12 +297,14 @@ void UInoAgentsStreamingAudioComponent::BeginStreamIfNeeded(EInoAgentsAudioForma
 
 void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, int32 NumChannels)
 {
-    // Always rebuild the procedural wave for each new stream. Reusing
-    // a wave after Stop() + ResetAudio() has subtle state issues with
-    // the audio engine's internal source management — Play() after
-    // Stop() on the same USoundWaveProcedural can fail silently on
-    // the second stream. Rebuilding is cheap (one NewObject + SetSound)
-    // and avoids these edge cases entirely.
+    // Match: nothing to do. Playback is gated by TryStartPlayback,
+    // not by EnsureProceduralWave — we do NOT call Play() here.
+    if (ProceduralWave != nullptr &&
+        ActiveSampleRate  == SampleRate &&
+        ActiveNumChannels == NumChannels)
+    {
+        return;
+    }
 
     // Mismatch (or first configuration): allocate a fresh
     // USoundWaveProcedural. USoundWaveProcedural does NOT accept
