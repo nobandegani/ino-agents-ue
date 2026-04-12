@@ -11,13 +11,24 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/Event.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"  // EscapeJsonString
 
 #include "litert/lm/engine.h"
+
+#if PLATFORM_WINDOWS
+    #include "Windows/AllowWindowsPlatformTypes.h"
+    #include <io.h>
+    #include <fcntl.h>
+    #include <stdio.h>
+    #include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 namespace
 {
@@ -384,12 +395,62 @@ bool FLiteRtLmConversationWorker::RunOneStreamRound(
     const char* const ExtraContextCStr =
         ExtraContextForRound.IsEmpty() ? nullptr : ExtraContextUtf8.Get();
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("RunOneStreamRound: sending message (%d chars), extra_context=%s"),
+           MessageJson.Len(),
+           ExtraContextCStr ? TEXT("<set>") : TEXT("<null>"));
+
+    // Capture stderr around the C API call so we can surface LiteRT-LM's
+    // ABSL_LOG(ERROR) diagnostics via UE_LOG. Without this, error details
+    // are lost because ABSL_LOG goes to stderr and UE GUI apps don't
+    // display stderr output.
+#if PLATFORM_WINDOWS
+    // Redirect stderr to a temp file BEFORE the C API call.
+    FString StderrCapturePath = FPaths::CreateTempFilename(
+        *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
+    FILE* StderrFile = nullptr;
+    int OldStderr = -1;
+    {
+        const FTCHARToUTF8 PathUtf8(*StderrCapturePath);
+        OldStderr = _dup(_fileno(stderr));
+        StderrFile = fopen(PathUtf8.Get(), "w");
+        if (StderrFile != nullptr)
+        {
+            _dup2(_fileno(StderrFile), _fileno(stderr));
+        }
+    }
+#endif
+
     const int StartRc = litert_lm_conversation_send_message_stream(
         NativeConversation,
         MessageJsonUtf8.Get(),
         /*extra_context=*/ ExtraContextCStr,
         &FLiteRtLmConversationWorker::OnStreamChunkStatic,
         /*callback_data=*/ this);
+
+#if PLATFORM_WINDOWS
+    // Restore stderr and read any captured output.
+    FString CapturedStderr;
+    if (StderrFile != nullptr)
+    {
+        fflush(stderr);
+        _dup2(OldStderr, _fileno(stderr));
+        fclose(StderrFile);
+        _close(OldStderr);
+        FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
+        IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
+    }
+    else if (OldStderr >= 0)
+    {
+        _close(OldStderr);
+    }
+    if (!CapturedStderr.IsEmpty())
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("LiteRT-LM stderr during send_message_stream: %s"),
+               *CapturedStderr.TrimEnd());
+    }
+#endif
 
     if (StartRc != 0)
     {
