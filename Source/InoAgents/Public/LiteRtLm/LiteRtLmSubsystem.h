@@ -268,19 +268,25 @@ private:
     // until the OnLoaded callback fires back on the game thread.
     bool bLoadInFlight = false;
 
-    // Download state — used when LoadModelAsync needs to fetch the model.
-    // Writes chunks directly to disk via IFileHandle to avoid buffering
-    // 3+ GB in a TArray (which overflows int32 and crashes).
-    FHttpRequestPtr DownloadRequest;
+    // Download state — chunked Range-based download to avoid UE's
+    // HTTP module accumulating the full response in a TArray<uint8>
+    // (which overflows int32 at ~2.1 GB and crashes for 3+ GB models).
+    // Each chunk is <=500 MB, safely within TArray limits.
+    static constexpr int64 kDownloadChunkSize = 500 * 1024 * 1024;  // 500 MB
+
+    FString         DownloadUrl;
     FString         PendingDownloadTargetPath;
     FOnLiteRtLmModelLoaded PendingOnLoaded;
     IFileHandle*    DownloadFileHandle = nullptr;
-    uint64          DownloadLastWriteOffset = 0;
+    int64           DownloadBytesWritten = 0;
+    FHttpRequestPtr DownloadRequest;
 
     void StartDownload(const FString& Url, const FString& TargetPath,
                        const FOnLiteRtLmModelLoaded& OnLoaded);
-    void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
-    void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void DownloadNextChunk();
+    void HandleChunkComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void FinishDownloadSuccess();
+    void FinishDownloadError(const FString& Error);
     void CleanupDownload();
     void ProceedWithLoad(const FString& ModelPath, const FOnLiteRtLmModelLoaded& OnLoaded);
 

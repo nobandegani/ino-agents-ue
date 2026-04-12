@@ -534,147 +534,138 @@ void ULiteRtLmSubsystem::StartDownload(
     const FString& Url, const FString& TargetPath,
     const FOnLiteRtLmModelLoaded& OnLoaded)
 {
+    DownloadUrl               = Url;
     PendingDownloadTargetPath = TargetPath;
     PendingOnLoaded           = OnLoaded;
-    DownloadLastWriteOffset   = 0;
+    DownloadBytesWritten      = 0;
 
-    // Open file for writing BEFORE starting the HTTP request. Write
-    // to a .partial temp file so a crash mid-download doesn't leave
-    // a corrupt model file that ResolveModelPath would find next time.
+    // Open .partial temp file. A crash mid-download won't leave a
+    // corrupt file that ResolveModelPath would find.
     const FString PartialPath = TargetPath + TEXT(".partial");
     DownloadFileHandle = FPlatformFileManager::Get().GetPlatformFile().OpenWrite(*PartialPath);
     if (DownloadFileHandle == nullptr)
     {
-        bLoadInFlight = false;
-        LoadedConfig  = FLiteRtLmModelConfig();
         const FString Err = FString::Printf(
             TEXT("Failed to open %s for writing"), *PartialPath);
-        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
-        OnLoaded.ExecuteIfBound(false, Err);
+        FinishDownloadError(Err);
         return;
     }
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LoadModelAsync: starting chunked download (%lld-byte chunks)"),
+           kDownloadChunkSize);
+
+    DownloadNextChunk();
+}
+
+void ULiteRtLmSubsystem::DownloadNextChunk()
+{
+    const int64 RangeStart = DownloadBytesWritten;
+    const int64 RangeEnd   = RangeStart + kDownloadChunkSize - 1;
+
     DownloadRequest = FHttpModule::Get().CreateRequest();
-    DownloadRequest->SetURL(Url);
+    DownloadRequest->SetURL(DownloadUrl);
     DownloadRequest->SetVerb(TEXT("GET"));
     DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
+    DownloadRequest->SetHeader(TEXT("Range"),
+        FString::Printf(TEXT("bytes=%lld-%lld"), RangeStart, RangeEnd));
 
-    DownloadRequest->OnRequestProgress64().BindUObject(
-        this, &ULiteRtLmSubsystem::HandleDownloadProgress);
     DownloadRequest->OnProcessRequestComplete().BindUObject(
-        this, &ULiteRtLmSubsystem::HandleDownloadComplete);
+        this, &ULiteRtLmSubsystem::HandleChunkComplete);
 
     DownloadRequest->ProcessRequest();
 }
 
-void ULiteRtLmSubsystem::HandleDownloadProgress(
-    FHttpRequestPtr Request, uint64 /*BytesSent*/, uint64 BytesReceived)
+void ULiteRtLmSubsystem::HandleChunkComplete(
+    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
 {
-    // Write new bytes directly to disk as they arrive. UE's HTTP
-    // module accumulates the full response in a TArray<uint8> — for
-    // a 3.5 GB model file, that overflows TArray's int32 size limit
-    // and crashes. By flushing to disk here, we keep the in-memory
-    // buffer from growing (UE still holds it, but we avoid the
-    // SaveArrayToFile call that would copy it again at the end).
-    if (DownloadFileHandle != nullptr && Request.IsValid())
-    {
-        if (const FHttpResponsePtr Resp = Request->GetResponse())
-        {
-            const TArray<uint8>& All = Resp->GetContent();
-            const uint64 Available = static_cast<uint64>(All.Num());
-            if (Available > DownloadLastWriteOffset)
-            {
-                const uint64 NewCount = Available - DownloadLastWriteOffset;
-                DownloadFileHandle->Write(
-                    All.GetData() + DownloadLastWriteOffset,
-                    static_cast<int64>(NewCount));
-                DownloadLastWriteOffset = Available;
-            }
-        }
-    }
-
-    // Broadcast progress. We don't query Content-Length from the
-    // response headers — Hugging Face uses chunked transfer encoding
-    // so Content-Length isn't available mid-stream, and attempting to
-    // read it spams "Can't get cached header" warnings. Instead we
-    // report bytes-so-far with TotalBytes=-1 (unknown). The caller
-    // can show a spinner or "X MB downloaded" instead of a percent
-    // bar.
-    OnDownloadProgress.Broadcast(
-        0.0f,
-        static_cast<int64>(BytesReceived),
-        -1);
-}
-
-void ULiteRtLmSubsystem::HandleDownloadComplete(
-    FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded)
-{
-    // Flush any remaining bytes that arrived between the last progress
-    // tick and the completion callback.
-    if (DownloadFileHandle != nullptr && bSucceeded && Response.IsValid())
-    {
-        const TArray<uint8>& All = Response->GetContent();
-        const uint64 Available = static_cast<uint64>(All.Num());
-        if (Available > DownloadLastWriteOffset)
-        {
-            const uint64 NewCount = Available - DownloadLastWriteOffset;
-            DownloadFileHandle->Write(
-                All.GetData() + DownloadLastWriteOffset,
-                static_cast<int64>(NewCount));
-            DownloadLastWriteOffset = Available;
-        }
-    }
-
-    // Close the file handle before anything else.
-    CleanupDownload();
-
     DownloadRequest.Reset();
 
     if (!bSucceeded || !Response.IsValid())
     {
-        // Delete the partial file so it doesn't confuse the next attempt.
-        IFileManager::Get().Delete(*(PendingDownloadTargetPath + TEXT(".partial")));
-        bLoadInFlight = false;
-        LoadedConfig  = FLiteRtLmModelConfig();
-        const FString Err = TEXT("Model download failed (network error)");
-        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
-        PendingOnLoaded.ExecuteIfBound(false, Err);
+        FinishDownloadError(TEXT("Model download failed (network error)"));
         return;
     }
 
     const int32 Code = Response->GetResponseCode();
-    if (Code < 200 || Code >= 300)
+
+    // 416 Range Not Satisfiable = we've gone past the end of the file.
+    // This means the previous chunk was the last one — we're done.
+    if (Code == 416)
     {
-        IFileManager::Get().Delete(*(PendingDownloadTargetPath + TEXT(".partial")));
-        bLoadInFlight = false;
-        LoadedConfig  = FLiteRtLmModelConfig();
-        const FString Err = FString::Printf(TEXT("Model download failed: HTTP %d"), Code);
-        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
-        PendingOnLoaded.ExecuteIfBound(false, Err);
+        FinishDownloadSuccess();
         return;
     }
 
-    // Rename .partial → final path atomically.
+    // Accept 200 (server ignores Range and returns the full file — only
+    // works if the file is < 2 GB) and 206 (partial content — expected
+    // for chunked downloads of large files).
+    if (Code != 200 && Code != 206)
+    {
+        FinishDownloadError(FString::Printf(TEXT("Model download failed: HTTP %d"), Code));
+        return;
+    }
+
+    // Write this chunk to disk.
+    const TArray<uint8>& Content = Response->GetContent();
+    if (Content.Num() > 0 && DownloadFileHandle != nullptr)
+    {
+        DownloadFileHandle->Write(Content.GetData(), Content.Num());
+        DownloadBytesWritten += Content.Num();
+    }
+
+    // Broadcast progress.
+    OnDownloadProgress.Broadcast(
+        0.0f,
+        DownloadBytesWritten,
+        -1);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LoadModelAsync: downloaded %lld MB so far"),
+           DownloadBytesWritten / (1024 * 1024));
+
+    // If we got a 200 (full file) or the chunk was smaller than
+    // what we asked for, we're done — this was the last chunk.
+    if (Code == 200 || Content.Num() < kDownloadChunkSize)
+    {
+        FinishDownloadSuccess();
+        return;
+    }
+
+    // More to download — request the next chunk.
+    DownloadNextChunk();
+}
+
+void ULiteRtLmSubsystem::FinishDownloadSuccess()
+{
+    CleanupDownload();
+
+    // Rename .partial → final path.
     const FString PartialPath = PendingDownloadTargetPath + TEXT(".partial");
     if (!IFileManager::Get().Move(
             *PendingDownloadTargetPath, *PartialPath, /*Replace=*/true))
     {
         IFileManager::Get().Delete(*PartialPath);
-        bLoadInFlight = false;
-        LoadedConfig  = FLiteRtLmModelConfig();
-        const FString Err = FString::Printf(
-            TEXT("Failed to rename %s → %s"), *PartialPath, *PendingDownloadTargetPath);
-        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
-        PendingOnLoaded.ExecuteIfBound(false, Err);
+        FinishDownloadError(FString::Printf(
+            TEXT("Failed to rename %s → %s"), *PartialPath, *PendingDownloadTargetPath));
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: model downloaded and saved to %s (%llu bytes)"),
-           *PendingDownloadTargetPath, DownloadLastWriteOffset);
+           TEXT("LoadModelAsync: model downloaded and saved to %s (%lld bytes)"),
+           *PendingDownloadTargetPath, DownloadBytesWritten);
 
-    // Now load normally.
     ProceedWithLoad(PendingDownloadTargetPath, PendingOnLoaded);
+}
+
+void ULiteRtLmSubsystem::FinishDownloadError(const FString& Error)
+{
+    CleanupDownload();
+    IFileManager::Get().Delete(*(PendingDownloadTargetPath + TEXT(".partial")));
+    bLoadInFlight = false;
+    LoadedConfig  = FLiteRtLmModelConfig();
+    UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Error);
+    PendingOnLoaded.ExecuteIfBound(false, Error);
 }
 
 void ULiteRtLmSubsystem::CleanupDownload()
@@ -684,7 +675,6 @@ void ULiteRtLmSubsystem::CleanupDownload()
         delete DownloadFileHandle;
         DownloadFileHandle = nullptr;
     }
-    DownloadLastWriteOffset = 0;
 }
 
 // ======================================================================
