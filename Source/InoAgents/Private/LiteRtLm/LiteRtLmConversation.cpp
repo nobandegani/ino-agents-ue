@@ -6,6 +6,8 @@
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 #include "LiteRtLmConversationWorker.h"
 
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"  // EscapeJsonString
 
 #include "litert/lm/engine.h"
@@ -376,26 +378,38 @@ FString ULiteRtLmConversation::BuildMergedContext() const
         return FString();
     }
 
-    FString Result;
+    // Build a valid JSON object. The LiteRT-LM C API parses extra_context
+    // with nlohmann::json::parse(). If the string is NOT valid JSON, the
+    // parse returns a "discarded" value that passes the upstream null/empty
+    // guard (upstream bug: missing is_discarded() check) and propagates a
+    // corrupted JSON value into SendMessageAsync, causing error 13.
+    //
+    // Shape: {"system_context":{"k":"v",...},"user_context":{"k":"v",...}}
+    TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 
     if (SystemContextMap.Num() > 0)
     {
-        Result += TEXT("[System Context]\n");
+        TSharedRef<FJsonObject> SysObj = MakeShared<FJsonObject>();
         for (const auto& Pair : SystemContextMap)
         {
-            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+            SysObj->SetStringField(Pair.Key, Pair.Value);
         }
+        Root->SetObjectField(TEXT("system_context"), SysObj);
     }
 
     if (UserContextMap.Num() > 0)
     {
-        Result += TEXT("[User Context]\n");
+        TSharedRef<FJsonObject> UsrObj = MakeShared<FJsonObject>();
         for (const auto& Pair : UserContextMap)
         {
-            Result += FString::Printf(TEXT("%s: %s\n"), *Pair.Key, *Pair.Value);
+            UsrObj->SetStringField(Pair.Key, Pair.Value);
         }
+        Root->SetObjectField(TEXT("user_context"), UsrObj);
     }
 
+    FString Result;
+    const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Result);
+    FJsonSerializer::Serialize(Root, Writer);
     return Result;
 }
 
