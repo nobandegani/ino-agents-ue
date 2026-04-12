@@ -50,26 +50,25 @@ void ULiteRtLmConversation::Initialize(
 
     Subsystem = InSubsystem;
 
-    // Build the system message JSON, if the config provides one.
-    // Format (from LiteRT-LM's C API comments + Phase 1 ConversationTest):
-    //     {"type":"text","text":"<escaped>"}
-    // EscapeJsonString includes surrounding quotes, so the format string
-    // does NOT re-wrap the %s in "".
-    FString SystemMessageJson;
-    if (!InConfig->SystemMessage.IsEmpty())
-    {
-        const FString EscapedQuoted = EscapeJsonString(InConfig->SystemMessage);
-        SystemMessageJson = FString::Printf(
-            TEXT(R"({"type":"text","text":%s})"),
-            *EscapedQuoted);
-    }
-
-    // Pass a null pointer to the C API when no system message was
-    // configured — LiteRT-LM interprets that as "use model default".
-    // The UTF-8 converter must outlive the call, so keep it in scope.
-    const FTCHARToUTF8 SystemMessageJsonUtf8(*SystemMessageJson);
-    const char* const SystemMessageJsonCStr =
-        SystemMessageJson.IsEmpty() ? nullptr : SystemMessageJsonUtf8.Get();
+    // Build the system message string for the C API.
+    //
+    // IMPORTANT: pass as a PLAIN STRING, not as a JSON object like
+    // {"type":"text","text":"..."}.
+    //
+    // The C API (c/engine.cc:214-226) tries to JSON-parse the string.
+    // If parsing fails, it treats the raw string as the "content"
+    // field of a {"role":"system","content":"..."} message. Gemma's
+    // Jinja2 chat template expects "content" to be a plain string
+    // (or an array). If we pass a JSON object, the template sees an
+    // object it can't index with [0] and SILENTLY DROPS the system
+    // message — the model never sees our prompt.
+    //
+    // By passing the raw text (not valid JSON), the C API's parse
+    // fails gracefully and uses the raw string as content, which is
+    // exactly what Gemma's template expects.
+    const FTCHARToUTF8 SystemMessageUtf8(*InConfig->SystemMessage);
+    const char* const SystemMessageCStr =
+        InConfig->SystemMessage.IsEmpty() ? nullptr : SystemMessageUtf8.Get();
 
     // Snapshot the subsystem's tool registry into a tools_json array
     // for this conversation. Tools registered AFTER this call do not
@@ -121,7 +120,7 @@ void ULiteRtLmConversation::Initialize(
     LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create(
         InEngine,
         /*session_config=*/              nullptr,
-        /*system_message_json=*/         SystemMessageJsonCStr,
+        /*system_message_json=*/         SystemMessageCStr,
         /*tools_json=*/                  ToolsJsonCStr,
         /*messages_json=*/               nullptr,
         /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
