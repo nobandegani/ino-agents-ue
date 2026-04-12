@@ -106,7 +106,7 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void SendMessageAsync(const FString& UserText,
-                          const FString& ExtraContext = FString());
+                          const FString& ExtraContext);
 
     /**
      * Cancel the in-flight stream, if any. Safe to call at any time
