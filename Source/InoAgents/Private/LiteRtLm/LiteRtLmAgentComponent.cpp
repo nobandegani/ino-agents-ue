@@ -17,18 +17,19 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
 {
     PrimaryComponentTick.bCanEverTick          = false;
     PrimaryComponentTick.bStartWithTickEnabled = false;
+    bAutoActivate = false;
 
-    // Create the audio component as a child so it shows up in the
-    // details panel and inherits our scene transform for 3D
-    // spatialization. All UAudioComponent properties (volume, pitch,
-    // attenuation, source effect chain, etc.) are editable directly
-    // on this child without any code.
+    // Child audio component for spatialised playback.
     AudioComp = ObjectInitializer.CreateDefaultSubobject<UInoAgentsStreamingAudioComponent>(
         this, TEXT("StreamingAudio"));
     if (AudioComp != nullptr)
     {
         AudioComp->SetupAttachment(this);
     }
+
+    // TTS defaults.
+    TtsRequestTemplate.ModelId      = TEXT("eleven_v3");
+    TtsRequestTemplate.OutputFormat = EElevenLabsOutputFormat::Pcm_16000;
 }
 
 // ======================================================================
@@ -38,16 +39,10 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
 void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 {
     Super::BeginPlay();
-
-    if (bAutoLoadOnBeginPlay)
-    {
-        LoadModel();
-    }
 }
 
 void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 {
-    // Tear down in reverse order: queue → conversation → subsystem ref.
     if (DialogueQueue != nullptr)
     {
         DialogueQueue->Clear();
@@ -61,12 +56,34 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
     }
 
     SubsystemWeak.Reset();
-
     Super::EndPlay(Reason);
 }
 
 // ======================================================================
-// Public API
+// Setup API
+// ======================================================================
+
+void UInoAgentsLiteRtLmAgentComponent::Initialize(
+    const FLiteRtLmModelConfig& InModelConfig,
+    const FString& InVoiceId,
+    const FElevenLabsDialogueRequest& InTtsRequestTemplate,
+    int32 InPauseDurationMs)
+{
+    ModelConfig        = InModelConfig;
+    VoiceId            = InVoiceId;
+    TtsRequestTemplate = InTtsRequestTemplate;
+    PauseDurationMs    = FMath::Max(InPauseDurationMs, 0);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("UInoAgentsLiteRtLmAgentComponent::Initialize: model=%s, voice=%s, "
+                "outputFmt=%d, pauseMs=%d"),
+           *ModelConfig.ModelFileName, *VoiceId,
+           static_cast<int32>(TtsRequestTemplate.OutputFormat),
+           PauseDurationMs);
+}
+
+// ======================================================================
+// LoadModel
 // ======================================================================
 
 void UInoAgentsLiteRtLmAgentComponent::LoadModel()
@@ -74,13 +91,12 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
     if (ModelConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: ModelConfig.ModelFileName "
-                    "is empty — set it in the details panel."));
+               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: "
+                    "ModelConfig.ModelFileName is empty."));
         OnError.Broadcast(TEXT("ModelConfig.ModelFileName is empty"));
         return;
     }
 
-    // Find the subsystem.
     const UGameInstance* GI = GetOwner() != nullptr
         ? GetOwner()->GetGameInstance()
         : nullptr;
@@ -91,45 +107,40 @@ void UInoAgentsLiteRtLmAgentComponent::LoadModel()
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: no ULiteRtLmSubsystem — "
-                    "start PIE or a packaged game first."));
+               TEXT("UInoAgentsLiteRtLmAgentComponent::LoadModel: "
+                    "no ULiteRtLmSubsystem — start PIE first."));
         OnError.Broadcast(TEXT("No ULiteRtLmSubsystem"));
         return;
     }
     SubsystemWeak = Subsys;
 
-    // If the model is already loaded, skip straight to conversation creation.
     if (Subsys->IsModelLoaded())
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("UInoAgentsLiteRtLmAgentComponent: model already loaded, "
-                    "creating conversation directly"));
+               TEXT("UInoAgentsLiteRtLmAgentComponent: model already loaded"));
         HandleModelLoaded(true, FString());
         return;
     }
 
-    // Forward download progress from the subsystem to our own delegate.
     Subsys->OnDownloadProgress.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress);
 
-    // The subsystem handles everything: resolve path, download if
-    // missing, then load. All we do is pass the config and a callback.
     FOnLiteRtLmModelLoaded OnLoaded;
     OnLoaded.BindDynamic(this, &UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded);
     Subsys->LoadModelAsync(ModelConfig, OnLoaded);
 }
 
+// ======================================================================
+// Runtime API
+// ======================================================================
+
 void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
 {
     if (Conversation == nullptr)
     {
-        UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent::SendMessage: no conversation — "
-                    "model not loaded yet or LoadModel failed."));
-        OnError.Broadcast(TEXT("No conversation — model not loaded yet"));
+        OnError.Broadcast(TEXT("No conversation — call LoadModel first"));
         return;
     }
-
     Conversation->SendMessageAsync(Text);
 }
 
@@ -154,6 +165,14 @@ void UInoAgentsLiteRtLmAgentComponent::HideChatPanel()
     if (ULiteRtLmSubsystem* Subsys = SubsystemWeak.Get())
     {
         Subsys->HideChatPanel();
+    }
+}
+
+void UInoAgentsLiteRtLmAgentComponent::ClearDialogueQueue()
+{
+    if (DialogueQueue != nullptr)
+    {
+        DialogueQueue->Clear();
     }
 }
 
@@ -196,7 +215,6 @@ void UInoAgentsLiteRtLmAgentComponent::HandleModelLoaded(
            TEXT("UInoAgentsLiteRtLmAgentComponent: model loaded, creating conversation"));
 
     CreateConversationAndQueue();
-
     OnModelLoaded.Broadcast(true, FString());
 }
 
@@ -210,6 +228,11 @@ void UInoAgentsLiteRtLmAgentComponent::HandleSentence(FString RawText, FString C
     OnSentence.Broadcast(RawText, CleanText);
 }
 
+void UInoAgentsLiteRtLmAgentComponent::HandleNewLine()
+{
+    OnNewLine.Broadcast();
+}
+
 void UInoAgentsLiteRtLmAgentComponent::HandleComplete(FString FullText)
 {
     OnComplete.Broadcast(FullText);
@@ -220,9 +243,21 @@ void UInoAgentsLiteRtLmAgentComponent::HandleError(FString ErrorMessage)
     OnError.Broadcast(ErrorMessage);
 }
 
+void UInoAgentsLiteRtLmAgentComponent::HandleToolCalled(
+    FName ToolName, FString ArgumentsJson, FString ResultJson)
+{
+    OnToolCalled.Broadcast(ToolName, ArgumentsJson, ResultJson);
+}
+
 void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
 {
     OnAudioFinished.Broadcast();
+}
+
+void UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress(
+    float Percent, int64 BytesReceived, int64 TotalBytes)
+{
+    OnDownloadProgress.Broadcast(Percent, BytesReceived, TotalBytes);
 }
 
 // ======================================================================
@@ -235,41 +270,41 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent: subsystem gone during "
-                    "CreateConversationAndQueue"));
+               TEXT("UInoAgentsLiteRtLmAgentComponent: subsystem gone"));
         return;
     }
 
-    // Create the conversation.
+    // Create conversation.
     Conversation = Subsys->CreateConversation();
     if (Conversation == nullptr)
     {
-        UE_LOG(LogInoAgents, Error,
-               TEXT("UInoAgentsLiteRtLmAgentComponent: CreateConversation returned null"));
         OnError.Broadcast(TEXT("CreateConversation returned null"));
         return;
     }
 
-    // Bind conversation delegates → trampolines → component delegates.
+    // Bind ALL conversation delegates → trampolines.
     Conversation->OnToken.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleToken);
     Conversation->OnSentence.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleSentence);
+    Conversation->OnNewLine.AddDynamic(
+        this, &UInoAgentsLiteRtLmAgentComponent::HandleNewLine);
     Conversation->OnComplete.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleComplete);
     Conversation->OnError.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleError);
+    Conversation->OnToolCalled.AddDynamic(
+        this, &UInoAgentsLiteRtLmAgentComponent::HandleToolCalled);
 
-    // Create and initialize the dialogue queue. It auto-binds to
-    // the conversation's OnSentence + OnNewLine for TTS dispatch.
+    // Create and initialize the dialogue queue.
     DialogueQueue = NewObject<UInoAgentsLiteRtLmDialogueQueue>(this);
     DialogueQueue->Initialize(
-        this,              // WorldContextObject
-        AudioComp,         // audio component
-        Conversation,      // conversation to listen to
-        VoiceId,           // default voice
-        TtsRequestTemplate,// ElevenLabs settings
-        PauseDurationMs);  // pause between lines
+        this,
+        AudioComp,
+        Conversation,
+        VoiceId,
+        TtsRequestTemplate,
+        PauseDurationMs);
 
     DialogueQueue->OnAllComplete.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished);
@@ -277,11 +312,4 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsLiteRtLmAgentComponent: ready (conversation=%s, voice=%s)"),
            *Conversation->GetName(), *VoiceId);
-}
-
-// Download progress trampoline — forwards from subsystem to component delegate.
-void UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress(
-    float Percent, int64 BytesReceived, int64 TotalBytes)
-{
-    OnDownloadProgress.Broadcast(Percent, BytesReceived, TotalBytes);
 }

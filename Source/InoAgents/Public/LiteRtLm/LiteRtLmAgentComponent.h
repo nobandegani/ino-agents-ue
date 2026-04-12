@@ -24,23 +24,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoAgentsAgentModelLoaded,
 /**
  * All-in-one LiteRT-LM + ElevenLabs agent component.
  *
- * Drop this on any actor, configure in the details panel, and call
- * SendMessage. The component handles model loading, conversation
- * creation, TTS dispatch, ordered audio playback, and spatialisation
- * from the actor's 3D position. Everything is internal — no manual
- * wiring of subsystems, queues, or audio components needed.
- *
- * Details panel exposes: model config, voice ID, TTS settings, pause
- * duration, auto-load toggle, and the child Streaming Audio component
- * (with all its inherited UAudioComponent properties like volume,
- * pitch, attenuation, source effect chain, etc.).
+ * Drop on any actor → Initialize → LoadModel → SendMessage.
  *
  * Blueprint usage:
- *   - Drop "LiteRT-LM Agent" on an actor
- *   - Set ModelConfig (data asset) and VoiceId
- *   - On key press: Agent → Send Message ("Hello")
- *   - Bind OnToken / OnSentence / OnComplete for UI
- *   - Audio plays automatically from the actor's position
+ *   BeginPlay:
+ *     Agent → Initialize (ModelConfig, VoiceId, TtsTemplate, PauseMs)
+ *     Agent → Load Model
+ *   On trigger:
+ *     Agent → Send Message ("Hello")
+ *   Bind events:
+ *     OnToken, OnSentence, OnComplete, OnError, OnAudioFinished, etc.
  */
 UCLASS(ClassGroup = (InoAgents),
        meta = (BlueprintSpawnableComponent, DisplayName = "LiteRT-LM Agent"))
@@ -52,52 +45,61 @@ public:
     UInoAgentsLiteRtLmAgentComponent(const FObjectInitializer& ObjectInitializer);
 
     // =============================================================
-    // Configuration (editable in details panel)
+    // Configuration (editable in details panel as defaults)
     // =============================================================
 
-    /** Model configuration — set ModelFileName, Backend, SystemMessage
-     *  directly in the details panel. No data asset needed. */
+    /** Model configuration — ModelFileName, Backend, SystemMessage. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
     FLiteRtLmModelConfig ModelConfig;
 
-    /** ElevenLabs voice ID for TTS. Find yours at
-     *  https://elevenlabs.io/app/voice-lab. */
+    /** ElevenLabs voice ID. Default: EwVlpfIFmNJ50rqcxXfJ. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
-    FString VoiceId;
+    FString VoiceId = TEXT("EwVlpfIFmNJ50rqcxXfJ");
 
-    /** ElevenLabs TTS settings (ModelId, OutputFormat, Stability,
-     *  Seed, LanguageCode, ApplyTextNormalization). The Inputs array
-     *  is ignored — filled per-sentence internally by the dialogue
-     *  queue. Leave fields at their defaults to use the subsystem's
-     *  Project Settings values. */
+    /** ElevenLabs TTS settings. Default: model=eleven_v3, format=Pcm_16000. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
     FElevenLabsDialogueRequest TtsRequestTemplate;
 
-    /** Silence in ms inserted between lines. 0 = no pause. */
+    /** Silence in ms between lines. 0 = no pause. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent",
               meta = (ClampMin = "0", ClampMax = "5000"))
     int32 PauseDurationMs = 500;
 
-    /** If true, automatically loads the model and creates a
-     *  conversation on BeginPlay. Set to false if you want to call
-     *  LoadModel() manually (e.g. after a loading screen). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent")
-    bool bAutoLoadOnBeginPlay = true;
-
     // =============================================================
-    // API
+    // Setup API
     // =============================================================
 
-    /** Load the model from ModelConfig. Non-blocking. OnModelLoaded
-     *  fires when done. If bAutoLoadOnBeginPlay is true, this is
-     *  called from BeginPlay automatically. Safe to call multiple
-     *  times — subsequent calls after a successful load are no-ops. */
+    /**
+     * Configure all settings and prepare the dialogue queue.
+     * Call once before LoadModel. Overrides any values set in the
+     * details panel.
+     *
+     * Can be skipped if you set values in the details panel instead
+     * — LoadModel will use the UPROPERTY values directly.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
+    void Initialize(
+        const FLiteRtLmModelConfig& InModelConfig,
+        const FString& InVoiceId,
+        const FElevenLabsDialogueRequest& InTtsRequestTemplate,
+        int32 InPauseDurationMs);
+
+    /**
+     * Load the model and create a conversation. Non-blocking.
+     * OnModelLoaded fires when done. Uses the config set via
+     * Initialize or the details panel defaults. Safe to call
+     * multiple times — subsequent calls after a successful load
+     * are no-ops.
+     */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void LoadModel();
 
-    /** Send a user message. The model streams a response via
-     *  OnToken / OnSentence / OnComplete, and TTS audio plays from
-     *  this component's world position. */
+    // =============================================================
+    // Runtime API
+    // =============================================================
+
+    /** Send a user message. The model streams a response, TTS
+     *  dispatches per-line, audio plays from this actor's position. */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void SendMessage(const FString& Text);
 
@@ -105,8 +107,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void Cancel();
 
-    /** Show the debug Slate chat panel connected to this agent's
-     *  conversation. */
+    /** Show the debug Slate chat panel connected to this conversation. */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void ShowChatPanel();
 
@@ -114,8 +115,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
     void HideChatPanel();
 
+    /** Clear the TTS dialogue queue (stop all pending audio). */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Agent")
+    void ClearDialogueQueue();
+
     // =============================================================
-    // Delegates (pass-through from internal conversation + queue)
+    // Delegates — conversation
     // =============================================================
 
     /** Fires when LoadModel completes (success or failure). */
@@ -126,26 +131,36 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnLiteRtLmToken OnToken;
 
-    /** Fires per line (newline-delimited). RawText has [emotion] tags
-     *  for TTS; CleanText has them stripped for UI display. */
+    /** Fires per newline-delimited line. RawText has [emotion] tags;
+     *  CleanText has them stripped for UI. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnLiteRtLmSentence OnSentence;
+
+    /** Fires at each newline boundary (after OnSentence). */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
+    FOnLiteRtLmNewLine OnNewLine;
 
     /** Fires once when the model finishes its full response. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnLiteRtLmComplete OnComplete;
 
-    /** Fires once on any error (model error, TTS error, etc.). */
+    /** Fires once on any error. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnLiteRtLmError OnError;
+
+    /** Fires once per tool call executed (diagnostic). */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
+    FOnLiteRtLmToolCalled OnToolCalled;
+
+    // =============================================================
+    // Delegates — dialogue queue / audio
+    // =============================================================
 
     /** Fires when all queued TTS audio has finished playing. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnInoAgentsAudioFinished OnAudioFinished;
 
-    /** Fires during model download with progress info. Use for
-     *  loading screens / progress bars. Only fires when the model
-     *  isn't cached locally and needs to be downloaded. */
+    /** Fires during model download. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnInoAgentsModelDownloadProgress OnDownloadProgress;
 
@@ -159,16 +174,17 @@ public:
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     bool IsStreaming() const;
 
-    /** Access the internal conversation for advanced delegate binding
-     *  (e.g. OnToolCalled). */
+    /** Access the internal conversation for advanced use. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     ULiteRtLmConversation* GetConversation() const { return Conversation; }
 
-    /** Access the child audio component for volume / pitch /
-     *  attenuation tweaks at runtime. Also visible as a child in the
-     *  details panel. */
+    /** Access the child audio component. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     UInoAgentsStreamingAudioComponent* GetAudioComponent() const { return AudioComp; }
+
+    /** Access the internal dialogue queue. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
+    UInoAgentsLiteRtLmDialogueQueue* GetDialogueQueue() const { return DialogueQueue; }
 
     //~ USceneComponent interface
     virtual void BeginPlay() override;
@@ -176,9 +192,6 @@ public:
     //~ End USceneComponent interface
 
 private:
-    /** Child audio component — created in constructor so it appears
-     *  in the details panel with its inherited UAudioComponent
-     *  properties (volume, pitch, attenuation, etc.). */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "InoAgents|Agent",
               meta = (AllowPrivateAccess = "true"))
     TObjectPtr<UInoAgentsStreamingAudioComponent> AudioComp;
@@ -191,17 +204,16 @@ private:
 
     TWeakObjectPtr<ULiteRtLmSubsystem> SubsystemWeak;
 
-    // Delegate trampolines — UFUNCTION required for dynamic delegates.
+    // Delegate trampolines.
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
     UFUNCTION() void HandleToken(FString Chunk);
     UFUNCTION() void HandleSentence(FString RawText, FString CleanText);
+    UFUNCTION() void HandleNewLine();
     UFUNCTION() void HandleComplete(FString FullText);
     UFUNCTION() void HandleError(FString ErrorMessage);
+    UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
     UFUNCTION() void HandleAudioFinished();
+    UFUNCTION() void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 
     void CreateConversationAndQueue();
-
-    // Download progress trampoline from subsystem → component delegate.
-    UFUNCTION()
-    void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 };
