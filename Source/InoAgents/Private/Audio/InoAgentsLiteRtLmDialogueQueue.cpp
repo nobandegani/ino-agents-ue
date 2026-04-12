@@ -135,6 +135,14 @@ void UInoAgentsLiteRtLmDialogueQueue::Initialize(
 
 void UInoAgentsLiteRtLmDialogueQueue::Clear()
 {
+    // Cancel any pending pause timer before resetting state — prevents
+    // a stale callback from firing on the cleared queue.
+    if (PauseTimerHandle.IsValid())
+    {
+        FTSTicker::GetCoreTicker().RemoveTicker(PauseTimerHandle);
+        PauseTimerHandle.Reset();
+    }
+
     // Unbind from the conversation if we're attached.
     if (ULiteRtLmConversation* Conv = BoundConversation.Get())
     {
@@ -159,6 +167,13 @@ void UInoAgentsLiteRtLmDialogueQueue::Clear()
 
 void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
 {
+    // Cancel any pending pause timer before resetting state.
+    if (PauseTimerHandle.IsValid())
+    {
+        FTSTicker::GetCoreTicker().RemoveTicker(PauseTimerHandle);
+        PauseTimerHandle.Reset();
+    }
+
     // Same as Clear but keeps the conversation binding so the queue
     // continues to receive OnSentence/OnNewLine for the next response.
     Slots.Reset();
@@ -370,12 +385,13 @@ void UInoAgentsLiteRtLmDialogueQueue::DrainReadySlots()
             bPauseTimerPending = true;
 
             TWeakObjectPtr<UInoAgentsLiteRtLmDialogueQueue> WeakSelf(this);
-            FTSTicker::GetCoreTicker().AddTicker(
+            PauseTimerHandle = FTSTicker::GetCoreTicker().AddTicker(
                 FTickerDelegate::CreateLambda(
                     [WeakSelf](float) -> bool
                     {
                         if (UInoAgentsLiteRtLmDialogueQueue* Self = WeakSelf.Get())
                         {
+                            Self->PauseTimerHandle.Reset();
                             Self->bPauseTimerPending = false;
                             Self->CurrentPlayIndex++;
                             Self->bCurrentSlotStreaming = false;

@@ -289,7 +289,6 @@ private:
     UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
     UFUNCTION() void HandleAudioReadyToPlay();
     UFUNCTION() void HandleAudioPlaybackFinished();
-    UFUNCTION() void HandleAudioFinished();
     UFUNCTION() void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 
     void CreateConversationAndQueue();

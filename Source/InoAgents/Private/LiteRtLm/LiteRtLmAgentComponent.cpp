@@ -352,12 +352,6 @@ void UInoAgentsLiteRtLmAgentComponent::HandleAudioPlaybackFinished()
     OnAudioFinished.Broadcast();
 }
 
-void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
-{
-    // DialogueQueue::OnAllComplete — all TTS slots processed and audio
-    // queued. Audio may still be playing. Don't set Idle here — wait
-    // for HandleAudioPlaybackFinished (AudioComp::OnFinished) instead.
-}
 
 void UInoAgentsLiteRtLmAgentComponent::HandleDownloadProgress(
     float Percent, int64 BytesReceived, int64 TotalBytes)
@@ -422,9 +416,6 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         VoiceId,
         TtsRequestTemplate,
         PauseDurationMs);
-
-    DialogueQueue->OnAllComplete.AddDynamic(
-        this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsLiteRtLmAgentComponent: ready (conversation=%s, voice=%s)"),

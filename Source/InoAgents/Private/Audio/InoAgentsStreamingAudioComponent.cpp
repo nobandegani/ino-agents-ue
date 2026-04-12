@@ -297,12 +297,14 @@ void UInoAgentsStreamingAudioComponent::BeginStreamIfNeeded(EInoAgentsAudioForma
 
 void UInoAgentsStreamingAudioComponent::EnsureProceduralWave(int32 SampleRate, int32 NumChannels)
 {
-    // Match: nothing to do. Playback is gated by TryStartPlayback,
-    // not by EnsureProceduralWave — we do NOT call Play() here.
+    // Reuse: same rate/channels, wave already exists. Re-initialize
+    // visualization (owner + batch size) because ResetInternalState
+    // cleared them via ResetVisualization at the end of the prior stream.
     if (ProceduralWave != nullptr &&
         ActiveSampleRate  == SampleRate &&
         ActiveNumChannels == NumChannels)
     {
+        ProceduralWave->SetOwnerAndBatchSize(this, NumVisualizationSamples);
         return;
     }
 

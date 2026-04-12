@@ -173,6 +173,10 @@ private:
 
     TArray<FSlot> Slots;
     int32 CurrentPlayIndex      = 0;
+
+    /** Handle for the active pause timer. Cancelled on StopAndReset/Clear
+     *  to prevent stale callbacks from firing on cleared queue state. */
+    FTSTicker::FDelegateHandle PauseTimerHandle;
     bool  bCurrentSlotStreaming  = false;
 
     /** True while a pause timer is counting down. Prevents re-entrant
