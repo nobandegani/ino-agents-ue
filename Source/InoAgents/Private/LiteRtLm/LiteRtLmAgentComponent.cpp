@@ -21,15 +21,6 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
     PrimaryComponentTick.bStartWithTickEnabled = false;
     bAutoActivate = false;
 
-    // Create the audio component as a default subobject. It will be
-    // attached to the actor's root (or a custom parent) in BeginPlay.
-    AudioComp = ObjectInitializer.CreateDefaultSubobject<UInoAgentsStreamingAudioComponent>(
-        this, TEXT("StreamingAudio"));
-    if (AudioComp != nullptr)
-    {
-        AudioComp->SetPcmFormat(16000, 1);
-    }
-
     // TTS defaults.
     TtsRequestTemplate.ModelId      = TEXT("eleven_v3");
     TtsRequestTemplate.OutputFormat = EElevenLabsOutputFormat::Pcm_16000;
@@ -43,23 +34,18 @@ void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 {
     Super::BeginPlay();
 
-    // Attach the audio component to the specified parent (or actor
-    // root if none set). This gives 3D spatialization at the right
-    // position — e.g. a head socket on a skeletal mesh.
-    if (AudioComp != nullptr && GetOwner() != nullptr)
+    // Create the audio component at runtime and attach to the owning
+    // actor's root. Using NewObject + RegisterComponent (not
+    // CreateDefaultSubobject) so it doesn't show as a duplicate in
+    // the details panel — the agent is an UActorComponent with no
+    // transform, the audio component is just an implementation detail.
+    AActor* Owner = GetOwner();
+    if (Owner != nullptr)
     {
-        USceneComponent* AttachTarget = AudioAttachParent;
-        if (AttachTarget == nullptr)
-        {
-            AttachTarget = GetOwner()->GetRootComponent();
-        }
-        if (AttachTarget != nullptr)
-        {
-            AudioComp->AttachToComponent(
-                AttachTarget,
-                FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-                AudioAttachSocket);
-        }
+        AudioComp = NewObject<UInoAgentsStreamingAudioComponent>(Owner, TEXT("AgentStreamingAudio"));
+        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+        AudioComp->SetupAttachment(Owner->GetRootComponent());
+        AudioComp->RegisterComponent();
     }
 }
 
@@ -74,6 +60,13 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
     {
         DialogueQueue->Clear();
         DialogueQueue = nullptr;
+    }
+
+    if (AudioComp != nullptr)
+    {
+        AudioComp->StopAndReset();
+        AudioComp->DestroyComponent();
+        AudioComp = nullptr;
     }
 
     if (Conversation != nullptr)
