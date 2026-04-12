@@ -267,6 +267,7 @@ private:
     UFUNCTION() void HandleComplete(FString FullText);
     UFUNCTION() void HandleError(FString ErrorMessage);
     UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
+    UFUNCTION() void HandleAudioReadyToPlay();
     UFUNCTION() void HandleAudioFinished();
     UFUNCTION() void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
 

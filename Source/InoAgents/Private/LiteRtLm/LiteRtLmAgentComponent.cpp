@@ -262,11 +262,6 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToken(FString Chunk)
 
 void UInoAgentsLiteRtLmAgentComponent::HandleSentence(FString RawText, FString CleanText)
 {
-    // First sentence arriving means TTS will start — transition to Talking.
-    if (Status == EInoAgentsAgentStatus::Thinking)
-    {
-        SetStatus(EInoAgentsAgentStatus::Talking);
-    }
     OnSentence.Broadcast(RawText, CleanText);
 }
 
@@ -290,6 +285,11 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToolCalled(
     FName ToolName, FString ArgumentsJson, FString ResultJson)
 {
     OnToolCalled.Broadcast(ToolName, ArgumentsJson, ResultJson);
+}
+
+void UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay()
+{
+    SetStatus(EInoAgentsAgentStatus::Talking);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::HandleAudioFinished()
@@ -345,6 +345,8 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     if (AudioComp != nullptr)
     {
         AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+        AudioComp->OnReadyToPlay.AddDynamic(
+            this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay);
     }
 
     // Create and initialize the dialogue queue.
