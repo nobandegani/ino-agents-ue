@@ -160,9 +160,15 @@ public:
      * registered tools (see RegisterTool below). Tools registered AFTER
      * the conversation is created do not retroactively apply.
      */
+    /** Create a conversation with no initial history. */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
-    ULiteRtLmConversation* CreateConversation(
-        const TArray<FLiteRtLmMessage>& InitialMessages = TArray<FLiteRtLmMessage>());
+    ULiteRtLmConversation* CreateConversation();
+
+    /** Create a conversation pre-populated with saved history. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM",
+              meta = (DisplayName = "Create Conversation With History"))
+    ULiteRtLmConversation* CreateConversationWithHistory(
+        const TArray<FLiteRtLmMessage>& InitialMessages);
 
     // ------------------------------------------------------------------
     // Chat panel (dev/debug UI)

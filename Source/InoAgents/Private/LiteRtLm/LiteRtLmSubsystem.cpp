@@ -308,7 +308,12 @@ void ULiteRtLmSubsystem::UnloadModel()
     UE_LOG(LogInoAgents, Log, TEXT("ULiteRtLmSubsystem: UnloadModel complete"));
 }
 
-ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation(
+ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation()
+{
+    return CreateConversationWithHistory(TArray<FLiteRtLmMessage>());
+}
+
+ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversationWithHistory(
     const TArray<FLiteRtLmMessage>& InitialMessages)
 {
     check(IsInGameThread());
@@ -320,9 +325,6 @@ ULiteRtLmConversation* ULiteRtLmSubsystem::CreateConversation(
         return nullptr;
     }
 
-    // LoadedConfig is guaranteed non-null whenever Engine is non-null
-    // (see the success path of LoadModelAsync's completion lambda), but
-    // defensively check anyway.
     if (LoadedConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
