@@ -89,12 +89,23 @@ public:
      *                            will play the ordered audio.
      * @param InDefaultVoiceId    ElevenLabs voice ID used for every
      *                            sentence unless overridden per-call.
+     * @param InRequestTemplate   ElevenLabs request settings (ModelId,
+     *                            OutputFormat, Stability, Seed, etc.)
+     *                            applied to every TTS call. The Inputs
+     *                            array is ignored — EnqueueSentence
+     *                            fills that in per-sentence. Leave
+     *                            fields at their defaults to use the
+     *                            subsystem's Project Settings values.
+     *                            The audio component's feed format and
+     *                            PCM sample rate are auto-derived from
+     *                            the template's OutputFormat.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
               meta = (WorldContext = "WorldContextObject"))
     void Initialize(UObject* WorldContextObject,
                     UInoAgentsStreamingAudioComponent* InAudioComponent,
-                    const FString& InDefaultVoiceId);
+                    const FString& InDefaultVoiceId,
+                    const FElevenLabsDialogueRequest& InRequestTemplate);
 
     /**
      * Queue a sentence for TTS. The ElevenLabs request is dispatched
@@ -155,6 +166,14 @@ private:
     TArray<TObjectPtr<UInoAgentsTtsSlotObserver>> Observers;
 
     FString DefaultVoiceId;
+
+    /** Template request — all settings except Inputs are copied into
+     *  every TTS call dispatched by EnqueueSentence. */
+    FElevenLabsDialogueRequest RequestTemplate;
+
+    /** Audio format derived from RequestTemplate.OutputFormat at
+     *  Initialize time. Used in FeedAudioBytes calls. */
+    EInoAgentsAudioFormat DerivedAudioFormat = EInoAgentsAudioFormat::Mp3;
 
     TArray<FSlot> Slots;
 

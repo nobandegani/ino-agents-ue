@@ -43,18 +43,88 @@ void UInoAgentsTtsSlotObserver::HandleError(FString ErrorMessage)
 // Queue
 // ======================================================================
 
+namespace
+{
+    /** Map an ElevenLabs output format to the audio component's feed
+     *  format and PCM sample rate (ignored for MP3). */
+    void DeriveAudioFormat(
+        EElevenLabsOutputFormat ElevenLabsFmt,
+        EInoAgentsAudioFormat&  OutFeedFormat,
+        int32&                  OutPcmSampleRate)
+    {
+        switch (ElevenLabsFmt)
+        {
+            case EElevenLabsOutputFormat::Mp3_44100_128:
+            case EElevenLabsOutputFormat::Mp3_44100_64:
+            case EElevenLabsOutputFormat::Mp3_22050_32:
+                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
+                OutPcmSampleRate = 0;  // unused for MP3
+                return;
+
+            case EElevenLabsOutputFormat::Pcm_16000:
+                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutPcmSampleRate = 16000;
+                return;
+
+            case EElevenLabsOutputFormat::Pcm_24000:
+                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutPcmSampleRate = 24000;
+                return;
+
+            case EElevenLabsOutputFormat::Pcm_44100:
+                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutPcmSampleRate = 44100;
+                return;
+
+            case EElevenLabsOutputFormat::Ulaw_8000:
+                // u-law is not decoded by the audio component today;
+                // fall back to MP3 and let the caller notice the
+                // mismatch. A future phase can add u-law decoding.
+                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
+                OutPcmSampleRate = 0;
+                return;
+
+            default:
+                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
+                OutPcmSampleRate = 0;
+                return;
+        }
+    }
+}
+
 void UInoAgentsTtsAudioQueue::Initialize(
     UObject*                             WorldContextObject,
     UInoAgentsStreamingAudioComponent*   InAudioComponent,
-    const FString&                       InDefaultVoiceId)
+    const FString&                       InDefaultVoiceId,
+    const FElevenLabsDialogueRequest&    InRequestTemplate)
 {
-    WorldContextWeak = WorldContextObject;
-    AudioComponent   = InAudioComponent;
-    DefaultVoiceId   = InDefaultVoiceId;
-    CurrentPlayIndex = 0;
-    bCurrentSlotStreaming = false;
+    WorldContextWeak      = WorldContextObject;
+    AudioComponent        = InAudioComponent;
+    DefaultVoiceId        = InDefaultVoiceId;
+    RequestTemplate       = InRequestTemplate;
+    CurrentPlayIndex      = 0;
+    bCurrentSlotStreaming  = false;
     Slots.Reset();
     Observers.Reset();
+
+    // Derive the audio format + PCM sample rate from the ElevenLabs
+    // output format so the queue feeds the right bytes to the audio
+    // component without the caller having to specify it twice.
+    int32 PcmRate = 0;
+    DeriveAudioFormat(RequestTemplate.OutputFormat, DerivedAudioFormat, PcmRate);
+
+    if (DerivedAudioFormat == EInoAgentsAudioFormat::PcmInt16 && AudioComponent != nullptr)
+    {
+        AudioComponent->SetPcmFormat(PcmRate, /*NumChannels=*/1);
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("UInoAgentsTtsAudioQueue: initialized (voice=%s, model=%s, "
+                "outputFmt=%d, audioFeedFmt=%d)"),
+           *DefaultVoiceId,
+           *RequestTemplate.ModelId,
+           static_cast<int32>(RequestTemplate.OutputFormat),
+           static_cast<int32>(DerivedAudioFormat));
 }
 
 void UInoAgentsTtsAudioQueue::EnqueueSentence(
@@ -78,14 +148,14 @@ void UInoAgentsTtsAudioQueue::EnqueueSentence(
     const int32 SlotIndex = Slots.Num();
     Slots.AddDefaulted();
 
-    // Build the TTS request — one input per sentence.
+    // Build the TTS request from the stored template — copy all
+    // settings (ModelId, OutputFormat, Stability, Seed, etc.) and
+    // replace only the Inputs array with this sentence's text + voice.
     const FString& VoiceId = VoiceIdOverride.IsEmpty() ? DefaultVoiceId : VoiceIdOverride;
 
-    FElevenLabsDialogueRequest Req;
+    FElevenLabsDialogueRequest Req = RequestTemplate;
+    Req.Inputs.Reset();
     Req.Inputs.Add({ SentenceText, VoiceId });
-    // Leave ModelId / OutputFormat / etc. at their defaults — the
-    // subsystem fills in the DefaultModelId and the user's Project
-    // Settings output format.
 
     // Create the async action.
     UElevenLabsTextToDialogueStream* Action =
@@ -157,7 +227,7 @@ void UInoAgentsTtsAudioQueue::OnSlotChunk(
         // to the audio component for minimum latency. No buffering.
         if (AudioComponent != nullptr)
         {
-            AudioComponent->FeedAudioBytes(Bytes, EInoAgentsAudioFormat::Mp3);
+            AudioComponent->FeedAudioBytes(Bytes, DerivedAudioFormat);
             bCurrentSlotStreaming = true;
         }
     }
@@ -223,7 +293,7 @@ void UInoAgentsTtsAudioQueue::DrainReadySlots()
         // before reaching head-of-line, flush its buffered bytes now.
         if (!Slot.bErrored && Slot.BufferedBytes.Num() > 0 && AudioComponent != nullptr)
         {
-            AudioComponent->FeedAudioBytes(Slot.BufferedBytes, EInoAgentsAudioFormat::Mp3);
+            AudioComponent->FeedAudioBytes(Slot.BufferedBytes, DerivedAudioFormat);
         }
 
         // Free the buffer — bytes are in the audio component now.
