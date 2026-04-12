@@ -528,6 +528,33 @@ FString FLiteRtLmConversationWorker::ExecuteToolSynchronously(
                     // field rather than a syntax error.
                     LocalResult = FString(TEXT("\"\""));
                 }
+
+                // Validate that the tool returned valid JSON. The
+                // result is embedded verbatim into the tool_response
+                // "value" field — if it's not valid JSON, the entire
+                // tool response message becomes malformed and the
+                // C API will fail to parse it.
+                //
+                // Common mistake: returning a plain string like
+                // "hello" instead of a quoted JSON string "\"hello\"".
+                // Safety net: if it doesn't parse as JSON, wrap it in
+                // quotes to produce a valid JSON string literal.
+                {
+                    const auto Reader = TJsonReaderFactory<>::Create(LocalResult);
+                    TSharedPtr<FJsonValue> Parsed;
+                    if (!FJsonSerializer::Deserialize(Reader, Parsed) || !Parsed.IsValid())
+                    {
+                        UE_LOG(LogInoAgents, Warning,
+                               TEXT("Tool '%s' returned invalid JSON: \"%s\". "
+                                    "Wrapping in quotes to produce a valid JSON string. "
+                                    "Tool implementations should return valid JSON "
+                                    "(bare number, quoted string, object, or array)."),
+                               *ToolName.ToString(),
+                               *LocalResult.Left(200));
+                        LocalResult = EscapeJsonString(LocalResult);
+                    }
+                }
+
                 ToolResult = LocalResult;
             }
             else

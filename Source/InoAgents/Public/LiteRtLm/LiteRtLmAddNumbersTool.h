@@ -20,7 +20,7 @@
  * as a scalar value in the tool_response.value field.
  *
  * This tool exists for two purposes:
- *   1. As the smoke-test fixture for Milestone D.4's
+ *   1. As the smoke-test fixture for the
  *      InoAgents.LiteRtLm.ConversationToolTest console command. The
  *      Phase 1 ToolCallTest chose add_numbers for the same reason: a
  *      pure math function has no RLHF baggage so the model reliably
@@ -33,7 +33,7 @@
  *
  * The tool is NOT auto-registered with the subsystem. Users who want
  * it must either:
- *   - Construct and register it explicitly (see the D.4 smoke test),
+ *   - Construct and register it explicitly (see the tool smoke test),
  *     or
  *   - Subclass it in Blueprint to change the schema/description
  *     without touching C++.

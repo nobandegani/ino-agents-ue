@@ -180,10 +180,9 @@ INOAGENTS_API FString LiteRtLmResolveModelPath(const FString& ModelFileName);
 // Delegates
 // ============================================================================
 //
-// All five delegates the Milestone D API exposes are declared here upfront,
-// even though only FOnLiteRtLmModelLoaded is used by the D.1 sub-milestone.
-// Centralizing them avoids header churn across sub-milestones and makes the
-// full Blueprint API surface discoverable in one place.
+// All delegates are declared here upfront. Centralizing them avoids
+// header churn and makes the full Blueprint API surface discoverable
+// in one place.
 //
 // Dynamic delegates are Blueprint-visible but require binding via UFUNCTION-
 // flagged methods on UObjects. Non-dynamic delegates support BindLambda but

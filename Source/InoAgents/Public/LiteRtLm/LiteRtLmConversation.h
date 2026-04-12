@@ -41,7 +41,7 @@ extern "C" {
  * delegate broadcasts. Blueprint code only ever sees delegates firing on
  * the game thread — there is no thread-safety burden on callers.
  *
- * Milestone D.4 surface: SendMessageAsync (streaming via
+ * Current surface: SendMessageAsync (streaming via
  * litert_lm_conversation_send_message_stream on the worker), OnToken
  * (per-chunk text delta), OnComplete (once at end with full
  * accumulated text from the final round), OnError (once on failure),
@@ -85,7 +85,7 @@ public:
     //~ End UObject interface
 
     // ------------------------------------------------------------------
-    // Entry points (D.2)
+    // Entry points
     // ------------------------------------------------------------------
 
     /**
@@ -221,11 +221,10 @@ public:
      * tool implementations need to do their own async work (network
      * calls, disk I/O, user confirmation dialogs) before answering.
      *
-     * STUBBED in Milestone D.4 — all tool calls are executed
-     * synchronously on the game thread inside the conversation's
-     * agent loop, which blocks the worker thread until Execute
-     * returns. Calling this method in D.4 logs a warning and is
-     * otherwise a no-op.
+     * STUBBED — all tool calls are currently executed synchronously
+     * on the game thread inside the conversation's agent loop, which
+     * blocks the worker thread until Execute returns. Calling this
+     * method logs a warning and is otherwise a no-op.
      *
      * The method exists in the header now so that consumers of the
      * plugin can already wire it up in Blueprint — a future commit

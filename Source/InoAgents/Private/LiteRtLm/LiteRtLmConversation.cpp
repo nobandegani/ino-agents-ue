@@ -313,17 +313,17 @@ void ULiteRtLmConversation::Shutdown()
 void ULiteRtLmConversation::SubmitDeferredToolResult(
     FName ToolCallId, const FString& ResultJson)
 {
-    // Stubbed for Milestone D.4 — see the header doc-comment. All
-    // D.4 tool calls are resolved synchronously inside the worker's
-    // agent loop via a game-thread FEvent round-trip, so there is
-    // nothing for this method to unblock. The future implementation
-    // will use ToolCallId to look up a pending TPromise stored on
-    // the worker and fulfil it with ResultJson.
+    // Stubbed — see the header doc-comment. All tool calls are
+    // currently resolved synchronously inside the worker's agent loop
+    // via a game-thread FEvent round-trip, so there is nothing for
+    // this method to unblock. The future implementation will use
+    // ToolCallId to look up a pending TPromise stored on the worker
+    // and fulfil it with ResultJson.
     UE_LOG(LogInoAgents, Warning,
            TEXT("SubmitDeferredToolResult(%s): ignored — deferred tool "
-                "results are not wired through in Milestone D.4. All "
-                "tools execute synchronously on the game thread from "
-                "inside the worker's agent loop. (ResultJson length: %d)"),
+                "results are not yet implemented. All tools currently "
+                "execute synchronously on the game thread from inside "
+                "the worker's agent loop. (ResultJson length: %d)"),
            *ToolCallId.ToString(), ResultJson.Len());
 }
 

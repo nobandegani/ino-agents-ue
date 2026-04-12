@@ -37,7 +37,7 @@ extern "C" {
  *
  * Owns:
  *   - The loaded LiteRtLmEngine* (expensive, shared across conversations)
- *   - [D.4] A map of registered ILiteRtLmTool implementations
+ *   - A map of registered ILiteRtLmTool implementations
  *   - A weak reference to the single currently-active ULiteRtLmConversation,
  *     used to enforce "one conversation per engine" and to tear it down
  *     before the engine at shutdown time.
@@ -60,7 +60,7 @@ extern "C" {
  *                    any) before destroying the engine, so native resources
  *                    are always torn down in a safe order.
  *   Deinitialize() : called by UE at game shutdown; calls UnloadModel and
- *                    [D.4] clears the tool registry.
+ *                    Clears the tool registry.
  */
 UCLASS()
 class INOAGENTS_API ULiteRtLmSubsystem : public UGameInstanceSubsystem
@@ -74,7 +74,7 @@ public:
     //~ End UGameInstanceSubsystem interface
 
     // ------------------------------------------------------------------
-    // Model lifecycle (D.1)
+    // Model lifecycle
     // ------------------------------------------------------------------
 
     /**
@@ -130,7 +130,7 @@ public:
     void UnloadModel();
 
     // ------------------------------------------------------------------
-    // Conversation factory (D.2)
+    // Conversation factory
     // ------------------------------------------------------------------
 
     /**
@@ -195,7 +195,7 @@ public:
     void HideChatPanel();
 
     // ------------------------------------------------------------------
-    // Tool registry (D.4)
+    // Tool registry
     // ------------------------------------------------------------------
 
     /**

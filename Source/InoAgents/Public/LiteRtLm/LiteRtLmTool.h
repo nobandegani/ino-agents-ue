@@ -62,8 +62,8 @@ class ULiteRtLmTool : public UInterface
  * on model inference.
  *
  * Tools should be cheap. Tools that need to do their own async work
- * are not supported in Milestone D — the SubmitDeferredToolResult API
- * on the conversation is stubbed for a future iteration.
+ * are not currently supported — the SubmitDeferredToolResult API on
+ * the conversation is stubbed for a future iteration.
  */
 class INOAGENTS_API ILiteRtLmTool
 {
