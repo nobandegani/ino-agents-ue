@@ -25,6 +25,8 @@ UInoAgentsLiteRtLmAgentComponent::UInoAgentsLiteRtLmAgentComponent(
     if (AudioComp != nullptr)
     {
         AudioComp->SetupAttachment(this);
+        // Match the default ElevenLabs PCM output: 16 kHz mono.
+        AudioComp->SetPcmFormat(16000, 1);
     }
 
     // TTS defaults.
