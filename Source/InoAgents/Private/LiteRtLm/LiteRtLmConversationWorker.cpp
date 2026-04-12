@@ -507,11 +507,11 @@ FString FLiteRtLmConversationWorker::ExecuteToolSynchronously(
                 // tool that throws can't kill the game thread.
                 FString LocalResult;
                 #if PLATFORM_EXCEPTIONS_DISABLED
-                    LocalResult = Tool->Execute(ArgsJson);
+                    LocalResult = Tool->ExecuteFromString(ArgsJson);
                 #else
                     try
                     {
-                        LocalResult = Tool->Execute(ArgsJson);
+                        LocalResult = Tool->ExecuteFromString(ArgsJson);
                     }
                     catch (...)
                     {

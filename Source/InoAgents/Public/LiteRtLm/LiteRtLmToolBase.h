@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "JsonObjectWrapper.h"
 
 #include "LiteRtLmToolBase.generated.h"
 
@@ -46,7 +47,8 @@ struct FLiteRtLmToolParameter
  * Blueprint workflow:
  *   1. Create a Blueprint subclass of this class.
  *   2. In Class Defaults, set ToolName, Description, and Parameters.
- *   3. Override the Execute function.
+ *   3. Override the Execute function — use GetField nodes on the
+ *      Arguments parameter to read the model's input.
  *   4. In BeginPlay, call RegisterTool on the LiteRtLm Subsystem,
  *      passing an instance of your tool.
  *
@@ -82,9 +84,9 @@ public:
     TArray<FLiteRtLmToolParameter> Parameters;
 
     /**
-     * Execute the tool. ArgumentsJson is a JSON object (as a string)
-     * matching the parameters defined above. Returns a result that
-     * the model will see in the tool response.
+     * Execute the tool. Arguments is a parsed JSON object containing
+     * the parameters the model supplied. Use GetField nodes in
+     * Blueprint (from JsonBlueprintUtilities) to read values.
      *
      * Return values:
      *   - Plain text strings are auto-wrapped in JSON quotes by the
@@ -95,8 +97,16 @@ public:
      * Override this in your subclass (C++ or Blueprint).
      */
     UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "InoAgents|Tool")
-    FString Execute(const FString& ArgumentsJson);
-    virtual FString Execute_Implementation(const FString& ArgumentsJson);
+    FString Execute(const FJsonObjectWrapper& Arguments);
+    virtual FString Execute_Implementation(const FJsonObjectWrapper& Arguments);
+
+    /**
+     * Internal: called by the conversation worker with the raw JSON
+     * string from the model. Parses it into FJsonObjectWrapper and
+     * calls Execute. Subclasses should NOT override this — override
+     * Execute instead.
+     */
+    FString ExecuteFromString(const FString& ArgumentsJson);
 
     /**
      * Build the OpenAI-style function-call JSON schema from ToolName,

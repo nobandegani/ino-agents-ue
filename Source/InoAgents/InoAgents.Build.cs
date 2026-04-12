@@ -71,6 +71,9 @@ public class InoAgents : ModuleRules
 				"InoAgentsLibrary",  // LiteRT-LM C API via the staged header.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				                     // and building ElevenLabs request bodies.
+				"JsonUtilities",     // FJsonObjectWrapper — Blueprint-friendly JSON struct used by
+				                     // ULiteRtLmToolBase::Execute for parsed tool arguments.
+				"JsonBlueprintUtilities", // GetField/SetField/HasField Blueprint nodes for FJsonObjectWrapper.
 				"Projects",          // IPluginManager for locating the plugin's base directory at runtime.
 				"HTTP",              // FHttpModule / IHttpRequest / IHttpResponse — ElevenLabs backend only.
 				"DeveloperSettings", // UDeveloperSettings base class — UElevenLabsSettings.

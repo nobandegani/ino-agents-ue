@@ -2,13 +2,44 @@
 
 #include "LiteRtLm/LiteRtLmToolBase.h"
 
+#include "InoAgentsLog.h"
+
 #include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
-FString ULiteRtLmToolBase::Execute_Implementation(const FString& ArgumentsJson)
+FString ULiteRtLmToolBase::Execute_Implementation(const FJsonObjectWrapper& Arguments)
 {
     return FString();
+}
+
+FString ULiteRtLmToolBase::ExecuteFromString(const FString& ArgumentsJson)
+{
+    // Parse the raw JSON string into FJsonObjectWrapper so Execute
+    // receives a pre-parsed object. Blueprint tools use GetField
+    // nodes on it; C++ tools access Arguments.JsonObject directly.
+    FJsonObjectWrapper Wrapper;
+
+    if (!ArgumentsJson.IsEmpty())
+    {
+        TSharedPtr<FJsonObject> Parsed;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ArgumentsJson);
+        if (FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid())
+        {
+            Wrapper.JsonObject = Parsed;
+            Wrapper.JsonString = ArgumentsJson;
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("ULiteRtLmToolBase::ExecuteFromString: failed to parse arguments "
+                        "JSON for tool '%s': %s"),
+                   *ToolName.ToString(), *ArgumentsJson);
+        }
+    }
+
+    return Execute(Wrapper);
 }
 
 FString ULiteRtLmToolBase::BuildSchemaJson() const

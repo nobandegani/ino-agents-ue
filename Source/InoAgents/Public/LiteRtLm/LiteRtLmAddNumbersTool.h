@@ -35,5 +35,5 @@ class INOAGENTS_API ULiteRtLmAddNumbersTool : public ULiteRtLmToolBase
 public:
     ULiteRtLmAddNumbersTool();
 
-    virtual FString Execute_Implementation(const FString& ArgumentsJson) override;
+    virtual FString Execute_Implementation(const FJsonObjectWrapper& Arguments) override;
 };

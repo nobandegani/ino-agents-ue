@@ -115,7 +115,7 @@ static void RunLiteRtLmToolRegistryTest(const TArray<FString>& /*Args*/)
     }
 
     // ---- 5. Execute directly -----------------------------------------
-    const FString ExecResult = AddTool->Execute(TEXT(R"({"a":27,"b":15})"));
+    const FString ExecResult = AddTool->ExecuteFromString(TEXT(R"({"a":27,"b":15})"));
     UE_LOG(LogInoAgents, Log,
            TEXT("ToolRegistryTest: Execute({\"a\":27,\"b\":15}) -> \"%s\""),
            *ExecResult);

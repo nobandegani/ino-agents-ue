@@ -5,9 +5,6 @@
 #include "InoAgentsLog.h"
 
 #include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
 
 ULiteRtLmAddNumbersTool::ULiteRtLmAddNumbersTool()
 {
@@ -31,31 +28,27 @@ ULiteRtLmAddNumbersTool::ULiteRtLmAddNumbersTool()
     Parameters.Add(ParamB);
 }
 
-FString ULiteRtLmAddNumbersTool::Execute_Implementation(const FString& ArgumentsJson)
+FString ULiteRtLmAddNumbersTool::Execute_Implementation(const FJsonObjectWrapper& Arguments)
 {
-    // Parse arguments. Small models often emit numeric arguments as
-    // JSON strings rather than numbers (e.g. "a": "27" instead of
-    // "a": 27), so we accept both.
-    TSharedPtr<FJsonObject> ArgsObj;
-    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ArgumentsJson);
-    if (!FJsonSerializer::Deserialize(Reader, ArgsObj) || !ArgsObj.IsValid())
+    if (!Arguments.JsonObject.IsValid())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("add_numbers: failed to parse arguments JSON: %s"),
-               *ArgumentsJson);
-        return FString(TEXT("\"ERROR: failed to parse arguments JSON\""));
+               TEXT("add_numbers: arguments object is null"));
+        return FString(TEXT("\"ERROR: failed to parse arguments\""));
     }
 
+    // Small models often emit numeric arguments as JSON strings rather
+    // than numbers (e.g. "a": "27" instead of "a": 27), so we accept both.
     auto ReadIntField = [&](const TCHAR* FieldName, int64& Out) -> bool
     {
         double AsNumber = 0.0;
-        if (ArgsObj->TryGetNumberField(FieldName, AsNumber))
+        if (Arguments.JsonObject->TryGetNumberField(FieldName, AsNumber))
         {
             Out = static_cast<int64>(AsNumber);
             return true;
         }
         FString AsString;
-        if (ArgsObj->TryGetStringField(FieldName, AsString))
+        if (Arguments.JsonObject->TryGetStringField(FieldName, AsString))
         {
             if (AsString.IsNumeric())
             {
