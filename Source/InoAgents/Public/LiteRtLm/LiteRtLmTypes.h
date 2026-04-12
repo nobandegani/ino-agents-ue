@@ -138,7 +138,7 @@ struct FLiteRtLmModelConfig
 
     /** Activation precision. Lower = faster + less RAM. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
-    ELiteRtLmActivationType ActivationType = ELiteRtLmActivationType::F32;
+    ELiteRtLmActivationType ActivationType = ELiteRtLmActivationType::F16;
 
     /** Custom XNNPACK cache directory. Empty = default (next to model file). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
