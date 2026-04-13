@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
-#include "Containers/Ticker.h"
 
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
@@ -44,19 +43,24 @@ public:
 /**
  * Ordered TTS audio queue — fully automatic.
  *
- * Pass a ULiteRtLmConversation to Initialize and the queue self-wires
- * to the conversation's OnSentence and OnNewLine delegates. Each line
- * the LLM produces is dispatched to ElevenLabs TTS in parallel, and
- * the resulting audio bytes are fed into a streaming sound wave in
- * strict sentence order with configurable pauses between lines.
+ * Binds to a ULiteRtLmConversation's OnSentence + OnNewLine and:
+ *   - Dispatches each sentence to ElevenLabs TTS (in parallel — they
+ *     stream back on their own clocks).
+ *   - Feeds the returned bytes into a UInoAgentsStreamingSoundWave in
+ *     strict SENTENCE order, regardless of which TTS finishes first.
+ *   - Inserts a configurable silence gap between every pair of
+ *     consecutive sentences. The gap is implemented as silence
+ *     samples appended to the wave's buffer, so playback stays in
+ *     perfect sync with the timer-free pause (wall-clock pauses
+ *     would fire while the prior sentence's audio was still ahead
+ *     of the playback cursor).
  *
- * The queue does NOT own or drive a UAudioComponent — it only feeds
- * bytes into the caller-provided wave. Blueprint (or higher-level
- * game code) is responsible for plugging the wave into an audio
- * component and calling Play/Stop as needed. The queue marks the
- * wave as drain-ready once all slots dispatch, so the wave's
- * OnAudioPlaybackFinished will fire naturally when the audio engine
- * pulls the final samples out.
+ * The queue does NOT own or drive a UAudioComponent — Blueprint or
+ * higher-level code is responsible for plugging the wave into an
+ * audio component and calling Play/Stop. Once all slots dispatch,
+ * the queue flips the wave to drain mode (SetStopSoundOnPlaybackFinish
+ * = true) so the wave's OnAudioPlaybackFinished fires naturally when
+ * the audio engine pulls the last sample.
  *
  * Blueprint setup:
  *
@@ -75,23 +79,25 @@ public:
      *
      * @param WorldContextObject       Any UObject with a World.
      * @param InStreamingWave          Streaming sound wave fed the
-     *                                  TTS bytes. Caller is
-     *                                  responsible for plugging it
-     *                                  into a UAudioComponent and
-     *                                  driving playback.
+     *                                  TTS bytes. Caller is responsible
+     *                                  for plugging it into a
+     *                                  UAudioComponent and driving
+     *                                  playback.
      * @param InConversation           The conversation to listen to.
-     *                                  The queue binds to OnSentence
-     *                                  and OnNewLine automatically.
-     * @param InDefaultVoiceId         ElevenLabs voice ID for all
-     *                                  sentences.
+     *                                  Queue binds to OnSentence and
+     *                                  OnNewLine automatically.
+     * @param InDefaultVoiceId         ElevenLabs voice ID.
      * @param InRequestTemplate        ElevenLabs settings (ModelId,
      *                                  OutputFormat, Stability, etc.).
      *                                  Inputs array is ignored; the
      *                                  output format drives the feed
-     *                                  format (Mp3 vs RAW PCM rate).
-     * @param InDefaultPauseDurationMs Silence in ms between lines.
-     *                                  500 = natural conversational
-     *                                  pause. 0 = no pause.
+     *                                  format (MP3 vs RAW PCM) and the
+     *                                  silence-injection sample rate.
+     * @param InDefaultPauseDurationMs Silence in ms between consecutive
+     *                                  sentences. 500 = natural
+     *                                  conversational pause. 0 = no
+     *                                  gap. Can be changed at runtime
+     *                                  via SetPauseDurationMs.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
               meta = (WorldContext = "WorldContextObject"))
@@ -103,7 +109,7 @@ public:
                     int32 InDefaultPauseDurationMs);
 
     /**
-     * Drop all slots, unbind from the conversation, and stop audio.
+     * Drop all slots, unbind from the conversation, and reset the wave.
      * After Clear() the queue can be re-initialized with a new
      * conversation.
      */
@@ -111,8 +117,8 @@ public:
     void Clear();
 
     /**
-     * Stop audio playback and drop all pending/playing slots, but keep
-     * the conversation binding intact. Call this when the user sends a
+     * Drop all pending/playing slots and reset the wave's buffer, but
+     * keep the conversation binding intact. Call when the user sends a
      * new message while the previous response is still playing — the
      * queue will pick up the new response's OnSentence events
      * automatically.
@@ -120,10 +126,20 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
     void StopAndReset();
 
-    /** Fires once when every enqueued slot has been dispatched to TTS
-     *  and the audio stream's drain flag has been set. Audio may still
-     *  be playing at this point — bind the wave's
-     *  OnAudioPlaybackFinished for the "audio has truly ended" signal. */
+    /** Change the between-sentence silence duration at runtime.
+     *  Takes effect on the NEXT pause slot inserted — slots already
+     *  queued keep their pre-change duration. */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio")
+    void SetPauseDurationMs(int32 InDurationMs);
+
+    /** Current silence duration between sentences. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Audio")
+    int32 GetPauseDurationMs() const { return DefaultPauseDurationMs; }
+
+    /** Fires once when every enqueued slot has been dispatched and
+     *  the wave has been flipped to drain mode. Audio may still be
+     *  playing at this point — bind the wave's OnAudioPlaybackFinished
+     *  for the "audio has truly ended" signal. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
     FOnInoAgentsAudioPlaybackFinished OnAllComplete;
 
@@ -157,6 +173,10 @@ private:
      *  internal task pipe. */
     void FeedBytesToWave(const TArray<uint8>& Bytes);
 
+    /** Append a block of silence frames for the current pause slot.
+     *  PauseMs * DerivedSampleRate / 1000 frames, Int16 zeros. */
+    void InjectSilence(int32 PauseMs);
+
     // -----------------------------------------------------------------
     // Types + state
     // -----------------------------------------------------------------
@@ -187,24 +207,20 @@ private:
     FElevenLabsDialogueRequest RequestTemplate;
 
     /** Derived audio format for feeding the wave: true = MP3, false =
-     *  raw int16 PCM at DerivedSampleRate. */
+     *  raw int16 PCM. Rate is always populated (for both MP3 and PCM)
+     *  so silence injection knows how many samples to write. */
     bool  bDerivedFormatIsMP3 = true;
     int32 DerivedSampleRate   = 0;
     int32 DerivedNumChannels  = 1;
 
     TArray<FSlot> Slots;
-    int32 CurrentPlayIndex      = 0;
+    int32 CurrentPlayIndex = 0;
 
-    /** Handle for the active pause timer. Cancelled on StopAndReset/Clear
-     *  to prevent stale callbacks from firing on cleared queue state. */
-    FTSTicker::FDelegateHandle PauseTimerHandle;
-    bool  bCurrentSlotStreaming  = false;
-
-    /** True while a pause timer is counting down. Prevents re-entrant
-     *  DrainReadySlots calls (from concurrent OnSlotComplete) from
-     *  advancing past the consumed pause slot, which would cause the
-     *  timer callback to double-advance and skip slots. */
-    bool  bPauseTimerPending    = false;
+    /** Latched after OnAllComplete broadcasts so duplicate drain
+     *  iterations (from mid-insertion drain calls, trailing OnNewLine
+     *  after completion, etc.) don't re-fire it. Reset whenever new
+     *  slots are enqueued or the queue is cleared. */
+    bool bAllCompleteBroadcasted = false;
 
     void DrainReadySlots();
 };
