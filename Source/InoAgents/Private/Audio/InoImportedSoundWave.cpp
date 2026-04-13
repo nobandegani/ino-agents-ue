@@ -210,12 +210,21 @@ void UInoImportedSoundWave::ForceStopPlayback()
     // cleanly.
     bActive.Store(false);
 
-    FScopeLock Lock(&SharedPCM->Guard);
-    SharedPCM->Data.Empty();
-    SharedPCM->TotalFrames       = 0;
-    PlayedFrames                 = 0;
-    bPlaybackFinishedBroadcasted = false;
-    VisualizationCarry.Reset();
+    {
+        FScopeLock Lock(&SharedPCM->Guard);
+        SharedPCM->Data.Empty();
+        SharedPCM->TotalFrames       = 0;
+        PlayedFrames                 = 0;
+        bPlaybackFinishedBroadcasted = false;
+    }
+
+    // Visualization carry has its own lock — the audio thread mutates
+    // it OUTSIDE SharedPCM->Guard, so reusing that lock here would
+    // not protect the race. See VisualizationGuard's comment.
+    {
+        FScopeLock Lock(&VisualizationGuard);
+        VisualizationCarry.Reset();
+    }
 }
 
 bool UInoImportedSoundWave::IsSoundLooping() const
@@ -451,6 +460,7 @@ void UInoImportedSoundWave::SetNumSamplesPerChunk(int32 NumSamples)
 
 void UInoImportedSoundWave::ResetVisualizationCarry()
 {
+    FScopeLock Lock(&VisualizationGuard);
     VisualizationCarry.Reset();
 }
 
@@ -666,6 +676,15 @@ int32 UInoImportedSoundWave::GeneratePCMData(
             // Fixed-size batching. Append the real samples to the
             // carry, then slice out as many complete batches as are
             // ready. Remainder stays in the carry for next call.
+            //
+            // VisualizationGuard protects the carry against concurrent
+            // Reset() calls from the game thread (BeginDestroy /
+            // ForceStopPlayback). Without this lock, Append/RemoveAt
+            // here can race with Reset and corrupt the TArray's
+            // internal pointer — which previously manifested as the
+            // audio mixer command queue hanging on PIE shutdown.
+            FScopeLock VizLock(&VisualizationGuard);
+
             VisualizationCarry.Append(FloatSamples.GetData(), RealSamples);
 
             const int32 BatchSize = NumSamplesPerChunk;

@@ -400,6 +400,15 @@ protected:
      *  broadcast per engine poll. Set via SetNumSamplesPerChunk. */
     int32 NumSamplesPerChunk = 0;
 
+    /** Protects VisualizationCarry — mutated from the audio thread in
+     *  GeneratePCMData and from the game thread in BeginDestroy /
+     *  ForceStopPlayback. Without this lock, concurrent Append +
+     *  Reset on the same TArray races at the heap level and was
+     *  previously locking up the audio mixer's source-command queue
+     *  on PIE shutdown. Held very briefly, never across an async
+     *  dispatch. */
+    mutable FCriticalSection VisualizationGuard;
+
     /** Accumulator for samples that haven't yet filled a full
      *  NumSamplesPerChunk batch. Carried across GeneratePCMData calls.
      *  Only touched on the audio render thread. */
