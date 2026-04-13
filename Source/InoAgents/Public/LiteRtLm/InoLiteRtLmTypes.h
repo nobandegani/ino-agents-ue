@@ -274,12 +274,19 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoLiteRtLmSentence,
     FString, CleanText);
 
 /**
- * Fired at each newline boundary in the streaming token stream, right
- * after the corresponding OnSentence broadcast. Use this to insert a
- * timed pause between TTS audio segments via
- * UInoLiteRtLmDialogueQueue::EnqueuePause.
+ * Fired at every sentence-split boundary in the streaming token stream,
+ * right after the corresponding OnSentence broadcast. The set of
+ * boundaries that count is controlled by the conversation's
+ * SentenceSplitFlags (see ELiteRtLmSentenceSplit) — newline alone, or
+ * newline + period + comma + ..., or any subset.
+ *
+ * Use this for cues that fire per emitted sentence regardless of
+ * payload — animation triggers, viseme resets, custom effects. The
+ * dialogue queue handles silence between sentences itself via the
+ * OnSentence flow, so there is no need to bind this just to add
+ * pauses.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoLiteRtLmNewLine);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoLiteRtLmSentenceBoundary);
 
 /**
  * Diagnostic event fired after UInoLiteRtLmConversation has handled a tool call

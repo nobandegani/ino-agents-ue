@@ -331,13 +331,18 @@ public:
     FOnInoLiteRtLmSentence OnSentence;
 
     /**
-     * Fires at each newline boundary, right after the corresponding
-     * OnSentence broadcast. Wire this to
-     * UInoLiteRtLmDialogueQueue::EnqueuePause to insert timed silence
-     * between audio segments.
+     * Fires after each OnSentence broadcast — at EVERY split boundary
+     * configured via SentenceSplitFlags (newline + any enabled
+     * punctuation + space). Use this for sentence-paced effects that
+     * don't need the text payload (animation cues, viseme resets,
+     * subtitle fade-in markers).
+     *
+     * Renamed from OnNewLine — the delegate now fires on every
+     * configured split, not only newlines, so the new name reflects
+     * the broader behavior.
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
-    FOnInoLiteRtLmNewLine OnNewLine;
+    FOnInoLiteRtLmSentenceBoundary OnSentenceBoundary;
 
     // ------------------------------------------------------------------
     // Sentence split configuration

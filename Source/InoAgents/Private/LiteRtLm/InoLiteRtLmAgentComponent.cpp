@@ -377,9 +377,9 @@ void UInoLiteRtLmAgentComponent::HandleSentence(FString RawText, FString CleanTe
     OnSentence.Broadcast(RawText, CleanText);
 }
 
-void UInoLiteRtLmAgentComponent::HandleNewLine()
+void UInoLiteRtLmAgentComponent::HandleSentenceBoundary()
 {
-    OnNewLine.Broadcast();
+    OnSentenceBoundary.Broadcast();
 }
 
 void UInoLiteRtLmAgentComponent::HandleComplete(FString FullText)
@@ -471,8 +471,8 @@ void UInoLiteRtLmAgentComponent::CreateConversationAndQueue()
         this, &UInoLiteRtLmAgentComponent::HandleToken);
     Conversation->OnSentence.AddDynamic(
         this, &UInoLiteRtLmAgentComponent::HandleSentence);
-    Conversation->OnNewLine.AddDynamic(
-        this, &UInoLiteRtLmAgentComponent::HandleNewLine);
+    Conversation->OnSentenceBoundary.AddDynamic(
+        this, &UInoLiteRtLmAgentComponent::HandleSentenceBoundary);
     Conversation->OnComplete.AddDynamic(
         this, &UInoLiteRtLmAgentComponent::HandleComplete);
     Conversation->OnError.AddDynamic(

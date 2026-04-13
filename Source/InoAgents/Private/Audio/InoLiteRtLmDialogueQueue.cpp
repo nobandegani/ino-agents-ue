@@ -132,14 +132,16 @@ void UInoLiteRtLmDialogueQueue::Initialize(
         StreamingWave->SetInitialDesiredNumChannels(DerivedNumChannels);
     }
 
-    // Bind to the conversation's OnSentence and OnNewLine.
+    // Bind to the conversation's OnSentence — that's all the queue
+    // needs. Pause-between-sentences is handled inside the OnSentence
+    // flow (EnqueueSentenceInternal inserts a silence slot before each
+    // sentence except the first), so binding the OnSentenceBoundary
+    // delegate would be a redundant signal.
     BoundConversation = InConversation;
     if (InConversation != nullptr)
     {
         InConversation->OnSentence.AddDynamic(
             this, &UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation);
-        InConversation->OnNewLine.AddDynamic(
-            this, &UInoLiteRtLmDialogueQueue::HandleNewLineFromConversation);
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -167,8 +169,6 @@ void UInoLiteRtLmDialogueQueue::Clear()
     {
         Conv->OnSentence.RemoveDynamic(
             this, &UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation);
-        Conv->OnNewLine.RemoveDynamic(
-            this, &UInoLiteRtLmDialogueQueue::HandleNewLineFromConversation);
     }
     BoundConversation = nullptr;
 
@@ -200,7 +200,7 @@ void UInoLiteRtLmDialogueQueue::StopAndReset()
     const bool bWasInFlight = (Slots.Num() > 0 && !bAllCompleteBroadcasted);
 
     // Same as Clear but keeps the conversation binding so the queue
-    // continues to receive OnSentence/OnNewLine for the next response.
+    // continues to receive OnSentence for the next response.
     Slots.Reset();
     Observers.Reset();
     CurrentPlayIndex         = 0;
@@ -254,23 +254,6 @@ void UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation(
     EnqueueSentenceInternal(TtsText);
 }
 
-void UInoLiteRtLmDialogueQueue::HandleNewLineFromConversation()
-{
-    // Insert a pause slot on newline. Deduplicated: if the last slot
-    // is already a pause (e.g. EnqueueSentenceInternal just inserted
-    // one before the next sentence), skip.
-    if (DefaultPauseDurationMs <= 0)
-    {
-        return;
-    }
-    if (Slots.Num() > 0 && Slots.Last().bIsPause)
-    {
-        return;
-    }
-    EnqueuePauseInternal();
-    DrainReadySlots();
-}
-
 // ======================================================================
 // Internal sentence / pause dispatch
 // ======================================================================
@@ -291,8 +274,7 @@ void UInoLiteRtLmDialogueQueue::EnqueueSentenceInternal(const FString& SentenceT
     }
 
     // Insert a silence-pause slot before every sentence except the
-    // first. Deduped: if the prior slot is already a pause (from a
-    // prior OnNewLine fire), skip.
+    // first.
     if (DefaultPauseDurationMs > 0
         && Slots.Num() > 0
         && !Slots.Last().bIsPause)

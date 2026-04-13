@@ -560,7 +560,6 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
     {
         int32 SplitIndex = INDEX_NONE;
         int32 SplitLen   = 0;
-        bool  bIsNewline = false;
 
         if (EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Newline))
         {
@@ -569,7 +568,6 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             {
                 SplitIndex = NlIdx;
                 SplitLen   = 1;
-                bIsNewline = true;
             }
         }
 
@@ -585,7 +583,6 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             {
                 SplitIndex = Idx;
                 SplitLen   = Candidate.Len;
-                bIsNewline = false;
             }
         }
 
@@ -605,10 +602,11 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             const FString CleanLine = StripTags(RawLine);
             OnSentence.Broadcast(RawLine, CleanLine);
         }
-        if (bIsNewline)
-        {
-            OnNewLine.Broadcast();
-        }
+
+        // Boundary signal — fires on every configured split, not just
+        // newlines. Consumers that wanted the OLD newline-only behavior
+        // can check for trailing '\n' inside their OnSentence handler.
+        OnSentenceBoundary.Broadcast();
     }
 }
 

@@ -43,7 +43,7 @@ public:
 /**
  * Ordered TTS audio queue — fully automatic.
  *
- * Binds to a UInoLiteRtLmConversation's OnSentence + OnNewLine and:
+ * Binds to a UInoLiteRtLmConversation's OnSentence delegate and:
  *   - Dispatches each sentence to ElevenLabs TTS (in parallel — they
  *     stream back on their own clocks).
  *   - Feeds the returned bytes into a UInoStreamingSoundWave in
@@ -84,8 +84,10 @@ public:
      *                                  UAudioComponent and driving
      *                                  playback.
      * @param InConversation           The conversation to listen to.
-     *                                  Queue binds to OnSentence and
-     *                                  OnNewLine automatically.
+     *                                  Queue binds to OnSentence
+     *                                  automatically (silence between
+     *                                  sentences is handled inside the
+     *                                  OnSentence flow).
      * @param InDefaultVoiceId         ElevenLabs voice ID.
      * @param InRequestTemplate        ElevenLabs settings (ModelId,
      *                                  OutputFormat, Stability, etc.).
@@ -169,9 +171,6 @@ private:
     UFUNCTION()
     void HandleSentenceFromConversation(FString RawText, FString CleanText);
 
-    UFUNCTION()
-    void HandleNewLineFromConversation();
-
     // -----------------------------------------------------------------
     // Internal sentence / pause dispatch
     // -----------------------------------------------------------------
@@ -228,9 +227,9 @@ private:
     int32 CurrentPlayIndex = 0;
 
     /** Latched after OnAllComplete broadcasts so duplicate drain
-     *  iterations (from mid-insertion drain calls, trailing OnNewLine
-     *  after completion, etc.) don't re-fire it. Reset whenever new
-     *  slots are enqueued or the queue is cleared. */
+     *  iterations (from mid-insertion drain calls, etc.) don't re-fire
+     *  it. Reset whenever new slots are enqueued or the queue is
+     *  cleared. */
     bool bAllCompleteBroadcasted = false;
 
     void DrainReadySlots();

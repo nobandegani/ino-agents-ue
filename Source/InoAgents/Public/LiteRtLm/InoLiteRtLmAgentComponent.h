@@ -226,9 +226,11 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
     FOnInoLiteRtLmSentence OnSentence;
 
-    /** Fires at each newline boundary (after OnSentence). */
+    /** Fires after each OnSentence — at every split boundary configured
+     *  via the conversation's SentenceSplitFlags. Use for animation
+     *  cues / viseme resets that fire per emitted sentence. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
-    FOnInoLiteRtLmNewLine OnNewLine;
+    FOnInoLiteRtLmSentenceBoundary OnSentenceBoundary;
 
     /** Fires once when the model finishes its full response. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
@@ -350,7 +352,7 @@ private:
     UFUNCTION() void HandleModelLoaded(bool bSuccess, FString ErrorMessage);
     UFUNCTION() void HandleToken(FString RawText, FString CleanText);
     UFUNCTION() void HandleSentence(FString RawText, FString CleanText);
-    UFUNCTION() void HandleNewLine();
+    UFUNCTION() void HandleSentenceBoundary();
     UFUNCTION() void HandleComplete(FString FullText);
     UFUNCTION() void HandleError(FString ErrorMessage);
     UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
