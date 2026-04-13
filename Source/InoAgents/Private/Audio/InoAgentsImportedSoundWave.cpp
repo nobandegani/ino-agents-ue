@@ -203,6 +203,21 @@ void UInoAgentsImportedSoundWave::SetSoundLooping(bool bLoop)
     }
 }
 
+void UInoAgentsImportedSoundWave::ForceStopPlayback()
+{
+    // Gate the audio-thread path FIRST so any in-flight
+    // GeneratePCMData that re-enters during this call short-circuits
+    // cleanly.
+    bActive.Store(false);
+
+    FScopeLock Lock(&SharedPCM->Guard);
+    SharedPCM->Data.Empty();
+    SharedPCM->TotalFrames       = 0;
+    PlayedFrames                 = 0;
+    bPlaybackFinishedBroadcasted = false;
+    VisualizationCarry.Reset();
+}
+
 bool UInoAgentsImportedSoundWave::IsSoundLooping() const
 {
     FScopeLock Lock(&SharedPCM->Guard);
@@ -468,6 +483,17 @@ void UInoAgentsImportedSoundWave::AppendFloat32Frames(
         bPlaybackFinishedBroadcasted = false;
     }
 
+    // Re-open the audio-thread gate in case ForceStopPlayback closed
+    // it earlier. Without this, a wave that was force-stopped and
+    // then re-appended to would still return 0 from GeneratePCMData.
+    // Skip the re-open if BeginDestroy has already started — at that
+    // point the wave is on its way out and the audio thread shouldn't
+    // see us as alive again.
+    if (!HasAnyFlags(RF_BeginDestroyed))
+    {
+        bActive.Store(true);
+    }
+
     TWeakObjectPtr<UInoAgentsImportedSoundWave> WeakThis(this);
     AsyncTask(ENamedThreads::GameThread,
         [WeakThis, Data = MoveTemp(BroadcastCopy), bWantPopulateData]() mutable
@@ -504,6 +530,16 @@ int32 UInoAgentsImportedSoundWave::GeneratePCMData(
     // buffer is fully played do we return 0.
 
     if (OutPCMData == nullptr || SamplesNeeded <= 0)
+    {
+        return 0;
+    }
+
+    // Early-out on teardown / hard-stop so the audio engine's source
+    // stops immediately. Without this, the wave keeps padding silence
+    // through BeginDestroy / PIE shutdown, piling up audio-mixer
+    // source-command backlog and freezing the editor on stop PIE.
+    // Re-activated by AppendFloat32Frames when fresh data lands.
+    if (!bActive.Load())
     {
         return 0;
     }

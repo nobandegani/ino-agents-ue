@@ -58,7 +58,16 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
         DialogueQueue = nullptr;
     }
 
-    StreamingWave = nullptr;
+    if (StreamingWave != nullptr)
+    {
+        // Force the wave to signal end-of-stream BEFORE it goes out
+        // of scope. This stops any active audio source that BP wired
+        // the wave into so the audio mixer doesn't keep polling us
+        // through PIE teardown — which otherwise piles up source-
+        // command-queue backlog and freezes the editor on stop PIE.
+        StreamingWave->ForceStopPlayback();
+        StreamingWave = nullptr;
+    }
 
     if (Conversation != nullptr)
     {

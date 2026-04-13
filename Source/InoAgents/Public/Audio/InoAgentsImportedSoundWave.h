@@ -162,6 +162,22 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio|Control")
     void SetSoundLooping(bool bLoop);
 
+    /**
+     * Hard-stop playback: close the visualization gate, clear the
+     * buffer, and force the next GeneratePCMData poll to return 0 so
+     * the audio engine's source stops immediately. Use this on
+     * teardown or when a hard "remove the audio" semantic is needed
+     * without waiting for the wave to drain naturally.
+     *
+     * After this, the wave is still valid — new data can be appended
+     * and the source re-Played. bActive is re-enabled on the next
+     * AppendFloat32Frames call.
+     *
+     * Thread-safe.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio|Control")
+    void ForceStopPlayback();
+
     /** Current loop flag. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Audio|Control")
     bool IsSoundLooping() const;
