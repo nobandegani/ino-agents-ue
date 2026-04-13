@@ -453,6 +453,10 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
         return;
     }
 
+    // Apply sentence-split flags up front so the first streamed tokens
+    // already use the caller's configured boundaries.
+    Conversation->SetSentenceSplitFlags(SentenceSplitFlags);
+
     // Bind ALL conversation delegates → trampolines.
     Conversation->OnToken.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleToken);

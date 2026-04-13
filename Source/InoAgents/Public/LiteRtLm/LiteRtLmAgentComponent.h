@@ -7,6 +7,7 @@
 
 #include "Audio/InoAgentsAudioTypes.h"
 #include "ElevenLabs/ElevenLabsTypes.h"
+#include "LiteRtLm/LiteRtLmConversation.h"   // ELiteRtLmSentenceSplit
 #include "LiteRtLm/LiteRtLmTypes.h"
 
 #include "LiteRtLmAgentComponent.generated.h"
@@ -131,6 +132,20 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "0", ClampMax = "16384"))
     int32 NumSamplesPerChunk = 160;
+
+    /** Bitmask of boundaries that trigger OnSentence on the underlying
+     *  conversation. Applied at conversation creation AND whenever the
+     *  property is changed at runtime (Initialize re-sends it). See
+     *  ELiteRtLmSentenceSplit. Default matches the conversation's own
+     *  default: Newline | Period | Comma | Question | Exclamation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent",
+              meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.ELiteRtLmSentenceSplit"))
+    int32 SentenceSplitFlags =
+          static_cast<int32>(ELiteRtLmSentenceSplit::Newline)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Period)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Comma)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Question)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Exclamation);
 
     // =============================================================
     // Setup API

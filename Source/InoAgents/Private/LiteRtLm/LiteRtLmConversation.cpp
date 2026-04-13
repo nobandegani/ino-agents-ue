@@ -525,43 +525,66 @@ FString ULiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
     return Clean;
 }
 
+void ULiteRtLmConversation::SetSentenceSplitFlags(int32 NewFlags)
+{
+    SentenceSplitFlags = NewFlags;
+}
+
 void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 {
     check(IsInGameThread());
 
     SentenceBuffer += Chunk;
 
-    // Split on sentence boundaries: newline, or punctuation followed
-    // by a space (". ", ", ", "? ", "! "). This gives the dialogue
-    // queue smaller chunks for faster TTS dispatch and more granular
-    // OnSentence events for lip sync / subtitles.
+    // Split on whichever boundaries the caller has enabled in
+    // SentenceSplitFlags. If no flags are set, this loop exits
+    // immediately on the first iteration and everything accumulates
+    // until FlushSentenceBuffer runs at OnComplete time (one big
+    // sentence for the full response).
+    const ELiteRtLmSentenceSplit Flags =
+        static_cast<ELiteRtLmSentenceSplit>(SentenceSplitFlags);
+
+    // Punctuation+space delimiters paired with their enum flag so we
+    // can skip the Find for any flag the caller disabled.
+    struct FSplitCandidate { const TCHAR* Delim; int32 Len; ELiteRtLmSentenceSplit Flag; };
+    static const FSplitCandidate PunctDelims[] = {
+        { TEXT(". "), 2, ELiteRtLmSentenceSplit::Period      },
+        { TEXT(", "), 2, ELiteRtLmSentenceSplit::Comma       },
+        { TEXT("? "), 2, ELiteRtLmSentenceSplit::Question    },
+        { TEXT("! "), 2, ELiteRtLmSentenceSplit::Exclamation },
+        { TEXT("; "), 2, ELiteRtLmSentenceSplit::Semicolon   },
+        { TEXT(": "), 2, ELiteRtLmSentenceSplit::Colon       },
+    };
+
     while (true)
     {
-        // Find the earliest split point.
         int32 SplitIndex = INDEX_NONE;
-        int32 SplitLen = 0;     // how many chars the delimiter consumes
+        int32 SplitLen   = 0;
         bool  bIsNewline = false;
 
-        // Check newline first.
-        const int32 NlIdx = SentenceBuffer.Find(TEXT("\n"));
-        if (NlIdx != INDEX_NONE)
+        if (EnumHasAnyFlags(Flags, ELiteRtLmSentenceSplit::Newline))
         {
-            SplitIndex = NlIdx;
-            SplitLen = 1;
-            bIsNewline = true;
+            const int32 NlIdx = SentenceBuffer.Find(TEXT("\n"));
+            if (NlIdx != INDEX_NONE)
+            {
+                SplitIndex = NlIdx;
+                SplitLen   = 1;
+                bIsNewline = true;
+            }
         }
 
-        // Check punctuation+space delimiters. Use the earliest one.
-        static const TCHAR* const Delimiters[] = {
-            TEXT(". "), TEXT(", "), TEXT("? "), TEXT("! ")
-        };
-        for (const TCHAR* Delim : Delimiters)
+        for (const FSplitCandidate& Candidate : PunctDelims)
         {
-            const int32 Idx = SentenceBuffer.Find(Delim);
-            if (Idx != INDEX_NONE && (SplitIndex == INDEX_NONE || Idx < SplitIndex))
+            if (!EnumHasAnyFlags(Flags, Candidate.Flag))
+            {
+                continue;
+            }
+            const int32 Idx = SentenceBuffer.Find(Candidate.Delim);
+            if (Idx != INDEX_NONE
+                && (SplitIndex == INDEX_NONE || Idx < SplitIndex))
             {
                 SplitIndex = Idx;
-                SplitLen = 2;  // punctuation + space
+                SplitLen   = Candidate.Len;
                 bIsNewline = false;
             }
         }
@@ -571,7 +594,8 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             break;
         }
 
-        // Include the punctuation in the sentence (split after it).
+        // Include the punctuation in the emitted sentence (split
+        // AFTER it). For newlines, drop the newline itself.
         const int32 SentenceEnd = (SplitLen == 2) ? SplitIndex + 1 : SplitIndex;
         FString RawLine = SentenceBuffer.Left(SentenceEnd).TrimStartAndEnd();
         SentenceBuffer.MidInline(SplitIndex + SplitLen);

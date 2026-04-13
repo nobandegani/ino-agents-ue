@@ -22,6 +22,32 @@ extern "C" {
 }
 
 /**
+ * Bitmask of boundaries that trigger OnSentence broadcasts.
+ *
+ * The conversation accumulates streamed tokens in an internal buffer
+ * and fires OnSentence every time a configured boundary is seen. All
+ * punctuation flags match the punctuation character followed by a
+ * single space — so "3.14" doesn't split, but "Done. Next" does.
+ *
+ * Enable as many or as few as you like. Empty (0) = OnSentence only
+ * fires at end-of-response (FlushSentenceBuffer) with the full reply
+ * as one sentence.
+ */
+UENUM(BlueprintType, meta = (Bitflags, UseEnumValuesAsMaskValuesInEditor = "true"))
+enum class ELiteRtLmSentenceSplit : uint8
+{
+    None        = 0          UMETA(Hidden),
+    Newline     = 0x01       UMETA(DisplayName = "Newline (\\n)"),
+    Period      = 0x02       UMETA(DisplayName = "Period + space (\". \")"),
+    Comma       = 0x04       UMETA(DisplayName = "Comma + space (\", \")"),
+    Question    = 0x08       UMETA(DisplayName = "Question + space (\"? \")"),
+    Exclamation = 0x10       UMETA(DisplayName = "Exclamation + space (\"! \")"),
+    Semicolon   = 0x20       UMETA(DisplayName = "Semicolon + space (\"; \")"),
+    Colon       = 0x40       UMETA(DisplayName = "Colon + space (\": \")"),
+};
+ENUM_CLASS_FLAGS(ELiteRtLmSentenceSplit);
+
+/**
  * One stateful conversation with a LiteRT-LM model.
  *
  * Construction: via ULiteRtLmSubsystem::CreateConversation. Do NOT construct
@@ -312,6 +338,41 @@ public:
      */
     UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
     FOnLiteRtLmNewLine OnNewLine;
+
+    // ------------------------------------------------------------------
+    // Sentence split configuration
+    // ------------------------------------------------------------------
+
+    /**
+     * Bitmask of boundaries that trigger OnSentence broadcasts while
+     * streaming tokens. See ELiteRtLmSentenceSplit for the flag set.
+     *
+     * Default: Newline | Period | Comma | Question | Exclamation
+     * (matches the original hard-coded behavior).
+     *
+     * Changing mid-stream is allowed but takes effect on the NEXT
+     * boundary search — already-accumulated buffer contents aren't
+     * re-scanned.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
+              meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.ELiteRtLmSentenceSplit"))
+    int32 SentenceSplitFlags =
+          static_cast<int32>(ELiteRtLmSentenceSplit::Newline)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Period)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Comma)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Question)
+        | static_cast<int32>(ELiteRtLmSentenceSplit::Exclamation);
+
+    /** Replace the current split flags. Pass any combination of
+     *  ELiteRtLmSentenceSplit values OR'd into an int32. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    void SetSentenceSplitFlags(
+        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.ELiteRtLmSentenceSplit"))
+        int32 NewFlags);
+
+    /** Current split flags as an int32 bitmask. */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
+    int32 GetSentenceSplitFlags() const { return SentenceSplitFlags; }
 
     /**
      * Diagnostic event: fires AFTER a tool has been executed and its
