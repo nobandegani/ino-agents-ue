@@ -30,10 +30,10 @@ FString UInoAgentsSettings::GetEffectiveElevenLabsBaseUrl() const
     return Result;
 }
 
-const FLiteRtLmModelEntry* UInoAgentsSettings::FindModelByFileName(
+const FInoLiteRtLmModelEntry* UInoAgentsSettings::FindModelByFileName(
     const FString& FileName) const
 {
-    for (const FLiteRtLmModelEntry& Entry : Models)
+    for (const FInoLiteRtLmModelEntry& Entry : Models)
     {
         if (Entry.ModelFileName.Equals(FileName, ESearchCase::IgnoreCase))
         {

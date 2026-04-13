@@ -18,7 +18,7 @@
  *   - LiteRtLm.dll                         (our monolithic Bazel output)
  *
  * This module does NOT block on model loading — that happens lazily in
- * ULiteRtLmSubsystem::LoadModelAsync, off the game thread. Loading a 3 GB
+ * UInoLiteRtLmSubsystem::LoadModelAsync, off the game thread. Loading a 3 GB
  * Gemma 4 model from here would freeze the editor for seconds.
  *
  * See Plugins/InoAgents/README.md for the plugin's user-facing API and

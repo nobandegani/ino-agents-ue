@@ -5,8 +5,8 @@
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
 
-#include "ElevenLabs/ElevenLabsTypes.h"
-#include "LiteRtLm/LiteRtLmTypes.h"
+#include "ElevenLabs/InoElevenLabsTypes.h"
+#include "LiteRtLm/InoLiteRtLmTypes.h"
 
 #include "InoAgentsSettings.generated.h"
 
@@ -47,13 +47,13 @@ public:
               meta = (DisplayName = "Base URL"))
     FString ElevenLabsBaseUrl;
 
-    /** Default model id when FElevenLabsDialogueRequest::ModelId is empty. */
+    /** Default model id when FInoElevenLabsDialogueRequest::ModelId is empty. */
     UPROPERTY(EditAnywhere, Config, Category = "ElevenLabs|Defaults")
     FString ElevenLabsDefaultModelId = TEXT("eleven_v3");
 
     /** Default audio format when no explicit format is passed. */
     UPROPERTY(EditAnywhere, Config, Category = "ElevenLabs|Defaults")
-    EElevenLabsOutputFormat ElevenLabsDefaultOutputFormat = EElevenLabsOutputFormat::Mp3_44100_128;
+    EInoElevenLabsOutputFormat ElevenLabsDefaultOutputFormat = EInoElevenLabsOutputFormat::Mp3_44100_128;
 
     // =============================================================
     // LiteRT-LM
@@ -63,7 +63,7 @@ public:
      *  matches its ModelConfig.ModelFileName against this array to find
      *  the download URL when the model isn't on disk yet. */
     UPROPERTY(EditAnywhere, Config, Category = "LiteRT-LM|Models")
-    TArray<FLiteRtLmModelEntry> Models;
+    TArray<FInoLiteRtLmModelEntry> Models;
 
     // =============================================================
     // Accessors
@@ -76,5 +76,5 @@ public:
     FString GetEffectiveElevenLabsBaseUrl() const;
 
     /** Look up a model entry by filename. Returns nullptr if not found. */
-    const FLiteRtLmModelEntry* FindModelByFileName(const FString& FileName) const;
+    const FInoLiteRtLmModelEntry* FindModelByFileName(const FString& FileName) const;
 };

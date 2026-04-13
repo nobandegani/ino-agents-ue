@@ -54,9 +54,9 @@ namespace
      * Unlike the stock UE "Third Party Library" plugin template, this does
      * NOT show a blocking MessageDialog on failure — that dialog pops up
      * every editor start if a single DLL is missing, which is hostile during
-     * development. An error log is sufficient; ULiteRtLmSubsystem::LoadModelAsync
+     * development. An error log is sufficient; UInoLiteRtLmSubsystem::LoadModelAsync
      * surfaces the actual load failure to Blueprint / C++ via its
-     * FOnLiteRtLmModelLoaded delegate.
+     * FOnInoLiteRtLmModelLoaded delegate.
      */
     void* LoadStagedDll(const TCHAR* DllFileName)
     {
