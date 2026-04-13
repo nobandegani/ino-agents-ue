@@ -25,7 +25,10 @@
       "Bash(grep:*)",
       "Read(//e/Projects/InoAgentDemo/**)",
       "Bash(ls *.uproject)",
-      "Bash(\"C:/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex)"
+      "Bash(\"C:/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex)",
+      "Bash(python refactor_rename.py)",
+      "Bash(mkdir -p Config)",
+      "Bash(grep -A 200 \"^\\\\[CoreRedirects\\\\]\" \"../../Config/DefaultEngine.ini\")"
     ]
   }
 }
