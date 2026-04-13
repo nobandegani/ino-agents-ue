@@ -58,9 +58,10 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
         Up = FVector::UpVector;
     }
 
-    // Ensure orthogonality: Right = Forward x Up, then re-derive Up.
-    const FVector Right = FVector::CrossProduct(Forward, Up).GetSafeNormal();
-    Up = FVector::CrossProduct(Right, Forward).GetSafeNormal();
+    // Ensure orthogonality. UE is left-handed (X=Forward, Y=Right, Z=Up),
+    // so Right = Up x Forward, and re-derived Up = Forward x Right.
+    const FVector Right = FVector::CrossProduct(Up, Forward).GetSafeNormal();
+    Up = FVector::CrossProduct(Forward, Right).GetSafeNormal();
 
     // --- Left eye ---
     {
