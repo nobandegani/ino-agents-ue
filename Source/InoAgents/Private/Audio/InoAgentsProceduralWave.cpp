@@ -42,9 +42,13 @@ int32 UInoAgentsProceduralWave::GeneratePCMData(uint8* PCMData, const int32 Samp
     // Let the base class pull samples from the queue into PCMData.
     const int32 BytesGenerated = Super::GeneratePCMData(PCMData, SamplesNeeded);
 
-    // Skip visualization if disabled or nobody is listening.
+    // Skip visualization if disabled, nobody is listening, or the
+    // queue is empty (underrun — GeneratePCMData returns zeros when
+    // there's no real audio data, and we don't want to broadcast
+    // silence as visualization data).
     const int32 CurrentBatchSize = BatchSize.Load();
-    if (CurrentBatchSize <= 0 || !OwnerWeak.IsValid() || BytesGenerated <= 0)
+    if (CurrentBatchSize <= 0 || !OwnerWeak.IsValid() || BytesGenerated <= 0
+        || GetAvailableAudioByteCount() <= 0)
     {
         return BytesGenerated;
     }

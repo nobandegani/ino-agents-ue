@@ -426,6 +426,11 @@ void UInoAgentsStreamingAudioComponent::ResetInternalState()
     PcmPendingBytes.Reset();
     CurrentFormat        = EInoAgentsAudioFormat::PcmInt16;
 
+    // Stop the audio engine so it stops calling GeneratePCMData.
+    // Without this, the engine keeps pulling zero-filled samples
+    // (underrun protection) indefinitely after the queue drains.
+    Stop();
+
     // Drop the decoder state so the next stream starts fresh. A
     // brand-new mp3dec_t is cheap (just a zero-init of a small
     // struct).
