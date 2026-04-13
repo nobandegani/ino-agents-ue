@@ -28,7 +28,9 @@
       "Bash(\"C:/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex)",
       "Bash(python refactor_rename.py)",
       "Bash(mkdir -p Config)",
-      "Bash(grep -A 200 \"^\\\\[CoreRedirects\\\\]\" \"../../Config/DefaultEngine.ini\")"
+      "Bash(grep -A 200 \"^\\\\[CoreRedirects\\\\]\" \"../../Config/DefaultEngine.ini\")",
+      "Bash(rm Config/DefaultEngine.ini)",
+      "Bash(rmdir Config)"
     ]
   }
 }
