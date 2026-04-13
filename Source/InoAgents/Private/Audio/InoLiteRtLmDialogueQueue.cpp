@@ -2,10 +2,14 @@
 
 #include "Audio/InoLiteRtLmDialogueQueue.h"
 
-#include "Audio/InoStreamingSoundWave.h"
 #include "ElevenLabs/InoElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
+
+// RuntimeAudioImporter plugin — provides the streaming sound wave +
+// raw/encoded format enums.
+#include "RuntimeAudioImporterTypes.h"
+#include "Sound/StreamingSoundWave.h"
 
 // ======================================================================
 // Slot observer — per-TTS-action trampoline
@@ -44,19 +48,16 @@ void UInoLiteRtLmDialogueSlotObserver::HandleError(FString ErrorMessage)
 namespace
 {
     /**
-     * Translate an ElevenLabs output format into the feed path + rate
-     * used on the streaming wave. MP3 formats take the
-     * AppendAudioDataFromMP3 path; RAW PCM formats take the
-     * AppendAudioDataFromRAW path with Int16 samples. The rate is
-     * returned for BOTH paths because silence injection during pause
-     * slots needs it even in MP3 mode (silence is always written as
-     * Int16 zeros via AppendAudioDataFromRAW, matching the rate of
-     * the surrounding MP3 frames).
+     * Translate an ElevenLabs output format into the queue's feed
+     * format (MP3 vs. RAW PCM int16) plus its sample rate. The rate
+     * is needed for both feed paths — RAW so we can pass it to
+     * AppendAudioDataFromRAW, MP3 so we can inject silence at the
+     * matching rate during pause slots.
      */
     void DeriveAudioFormat(
         EInoElevenLabsOutputFormat ElevenLabsFmt,
-        bool&                   OutIsMP3,
-        int32&                  OutSampleRate)
+        bool&                      OutIsMP3,
+        int32&                     OutSampleRate)
     {
         switch (ElevenLabsFmt)
         {
@@ -99,14 +100,13 @@ namespace
 // ======================================================================
 
 void UInoLiteRtLmDialogueQueue::Initialize(
-    UObject*                             WorldContextObject,
-    UInoStreamingSoundWave*        InStreamingWave,
-    UInoLiteRtLmConversation*               InConversation,
-    const FString&                       InDefaultVoiceId,
-    const FInoElevenLabsDialogueRequest&    InRequestTemplate,
-    int32                                InDefaultPauseDurationMs)
+    UObject*                              WorldContextObject,
+    UStreamingSoundWave*                  InStreamingWave,
+    UInoLiteRtLmConversation*             InConversation,
+    const FString&                        InDefaultVoiceId,
+    const FInoElevenLabsDialogueRequest&  InRequestTemplate,
+    int32                                 InDefaultPauseDurationMs)
 {
-    // Unbind from any prior conversation.
     Clear();
 
     WorldContextWeak        = WorldContextObject;
@@ -115,9 +115,6 @@ void UInoLiteRtLmDialogueQueue::Initialize(
     RequestTemplate         = InRequestTemplate;
     DefaultPauseDurationMs  = FMath::Max(InDefaultPauseDurationMs, 0);
 
-    // Derive the audio format + rate up front. Both MP3 and PCM paths
-    // have a definitive rate from the ElevenLabs request so silence
-    // injection works for either.
     DerivedNumChannels = 1;
     DeriveAudioFormat(RequestTemplate.OutputFormat,
                       bDerivedFormatIsMP3,
@@ -129,14 +126,9 @@ void UInoLiteRtLmDialogueQueue::Initialize(
     if (StreamingWave != nullptr && DerivedSampleRate > 0)
     {
         StreamingWave->SetInitialDesiredSampleRate(DerivedSampleRate);
-        StreamingWave->SetInitialDesiredNumChannels(DerivedNumChannels);
+        StreamingWave->SetInitialDesiredNumOfChannels(DerivedNumChannels);
     }
 
-    // Bind to the conversation's OnSentence — that's all the queue
-    // needs. Pause-between-sentences is handled inside the OnSentence
-    // flow (EnqueueSentenceInternal inserts a silence slot before each
-    // sentence except the first), so binding the OnSentenceBoundary
-    // delegate would be a redundant signal.
     BoundConversation = InConversation;
     if (InConversation != nullptr)
     {
@@ -158,13 +150,8 @@ void UInoLiteRtLmDialogueQueue::Initialize(
 
 void UInoLiteRtLmDialogueQueue::Clear()
 {
-    // Was a response in-flight? "In-flight" = we have slots AND haven't
-    // yet fired OnAllComplete for this cycle. Used to gate the
-    // OnAudioInterrupted delegate — we only want to fire it on true
-    // interruptions, not on clean post-completion resets.
     const bool bWasInFlight = (Slots.Num() > 0 && !bAllCompleteBroadcasted);
 
-    // Unbind from the conversation if we're attached.
     if (UInoLiteRtLmConversation* Conv = BoundConversation.Get())
     {
         Conv->OnSentence.RemoveDynamic(
@@ -177,14 +164,14 @@ void UInoLiteRtLmDialogueQueue::Clear()
     CurrentPlayIndex         = 0;
     bAllCompleteBroadcasted  = false;
 
-    // Reset the wave's buffer so stale audio from the prior cycle
-    // doesn't leak into the next one. Turn the drain flag off so a
-    // future cycle doesn't spuriously fire OnAudioPlaybackFinished
-    // before any real data lands.
+    // Reset the wave so stale audio from the prior cycle doesn't leak
+    // into the next one. Turning the drain flag off prevents the
+    // first OnAudioPlaybackFinished from firing before any real data
+    // lands in the next cycle.
     if (StreamingWave != nullptr)
     {
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
-        StreamingWave->ResetStreamingBuffer();
+        StreamingWave->ReleaseMemory();
     }
 
     if (bWasInFlight)
@@ -199,8 +186,6 @@ void UInoLiteRtLmDialogueQueue::StopAndReset()
 {
     const bool bWasInFlight = (Slots.Num() > 0 && !bAllCompleteBroadcasted);
 
-    // Same as Clear but keeps the conversation binding so the queue
-    // continues to receive OnSentence for the next response.
     Slots.Reset();
     Observers.Reset();
     CurrentPlayIndex         = 0;
@@ -209,7 +194,7 @@ void UInoLiteRtLmDialogueQueue::StopAndReset()
     if (StreamingWave != nullptr)
     {
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
-        StreamingWave->ResetStreamingBuffer();
+        StreamingWave->ReleaseMemory();
     }
 
     if (bWasInFlight)
@@ -226,15 +211,15 @@ void UInoLiteRtLmDialogueQueue::SetPauseDurationMs(int32 InDurationMs)
 }
 
 // ======================================================================
-// Auto-bound conversation handlers
+// Conversation handler
 // ======================================================================
 
 void UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation(
     FString RawText, FString /*CleanText*/)
 {
-    // Send RawText with [emotion] tags intact — ElevenLabs consumes
-    // them as delivery instructions. Strip {curly} emotion state
-    // tags which ElevenLabs doesn't understand and would speak aloud.
+    // Send RawText with [emotion] tags intact (ElevenLabs uses them as
+    // delivery hints) but strip {curly} emotion-state tags which would
+    // be spoken aloud literally.
     FString TtsText;
     TtsText.Reserve(RawText.Len());
     int32 CurlyDepth = 0;
@@ -273,8 +258,7 @@ void UInoLiteRtLmDialogueQueue::EnqueueSentenceInternal(const FString& SentenceT
         return;
     }
 
-    // Insert a silence-pause slot before every sentence except the
-    // first.
+    // Insert a silence-pause slot before every sentence except the first.
     if (DefaultPauseDurationMs > 0
         && Slots.Num() > 0
         && !Slots.Last().bIsPause)
@@ -282,7 +266,6 @@ void UInoLiteRtLmDialogueQueue::EnqueueSentenceInternal(const FString& SentenceT
         EnqueuePauseInternal();
     }
 
-    // Now add the sentence slot.
     const int32 SlotIndex = Slots.Num();
     Slots.AddDefaulted();
     bAllCompleteBroadcasted = false;
@@ -326,10 +309,6 @@ void UInoLiteRtLmDialogueQueue::EnqueueSentenceInternal(const FString& SentenceT
 
     Action->Activate();
 
-    // Drain once both the pause slot (if any) and the sentence slot
-    // are in place. If the sentence slot is incomplete (typical —
-    // TTS just fired), drain will process any ready pause slot and
-    // stop at the sentence.
     DrainReadySlots();
 }
 
@@ -364,13 +343,16 @@ void UInoLiteRtLmDialogueQueue::FeedBytesToWave(const TArray<uint8>& Bytes)
 
     if (bDerivedFormatIsMP3)
     {
-        StreamingWave->AppendAudioDataFromMP3(Bytes);
+        // RuntimeAudio's append takes TArray<uint8> by value (move-friendly).
+        // Copy here since the caller may reuse Bytes after this returns.
+        StreamingWave->AppendAudioDataFromEncoded(
+            TArray<uint8>(Bytes), ERuntimeAudioFormat::Mp3);
     }
     else
     {
         StreamingWave->AppendAudioDataFromRAW(
-            Bytes,
-            EInoRawAudioFormat::Int16,
+            TArray<uint8>(Bytes),
+            ERuntimeRAWAudioFormat::Int16,
             DerivedSampleRate,
             DerivedNumChannels);
     }
@@ -383,9 +365,6 @@ void UInoLiteRtLmDialogueQueue::InjectSilence(int32 PauseMs)
         return;
     }
 
-    // N frames of silence = rate * ms / 1000. Silence is always
-    // Int16 zeros regardless of surrounding MP3/PCM format — the
-    // wave transcodes to its internal float32 buffer either way.
     const int32 Channels    = FMath::Max(DerivedNumChannels, 1);
     const int64 NumFrames   =
         (static_cast<int64>(DerivedSampleRate) * static_cast<int64>(PauseMs)) / 1000;
@@ -400,8 +379,8 @@ void UInoLiteRtLmDialogueQueue::InjectSilence(int32 PauseMs)
     Silence.SetNumZeroed(static_cast<int32>(NumBytes));
 
     StreamingWave->AppendAudioDataFromRAW(
-        Silence,
-        EInoRawAudioFormat::Int16,
+        MoveTemp(Silence),
+        ERuntimeRAWAudioFormat::Int16,
         DerivedSampleRate,
         Channels);
 
@@ -426,9 +405,8 @@ void UInoLiteRtLmDialogueQueue::OnSlotChunk(
 
     if (SlotIndex == CurrentPlayIndex)
     {
-        // If anything accumulated while this slot wasn't current yet
-        // (race between OnSlotChunk and DrainReadySlots advancing),
-        // flush those first so byte order stays correct.
+        // Flush any bytes that accumulated while this slot wasn't current
+        // first, so byte order stays correct.
         if (Slot.BufferedBytes.Num() > 0)
         {
             FeedBytesToWave(Slot.BufferedBytes);
@@ -484,12 +462,9 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
         FSlot& Slot = Slots[CurrentPlayIndex];
 
         // Flush any bytes that accumulated while this slot wasn't
-        // current. Runs on every iteration — safe for incomplete
-        // slots (they'll get more chunks later, OnSlotChunk will
-        // feed those directly since BufferedBytes is empty after
-        // this flush). Critical for byte ordering: without this,
-        // a chunk that arrived before the slot became current would
-        // play AFTER live chunks that arrive once it's current.
+        // current. Critical for byte ordering: without this, late
+        // chunks for a slot whose CurrentPlayIndex moved past it
+        // would never play.
         if (!Slot.bIsPause
             && !Slot.bErrored
             && Slot.BufferedBytes.Num() > 0)
@@ -498,17 +473,11 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
             Slot.BufferedBytes.Reset();
         }
 
-        // Can't advance past an incomplete slot. The next
-        // OnSlotChunk / OnSlotComplete will re-enter drain.
         if (!Slot.bComplete)
         {
             break;
         }
 
-        // Pause slot: inject silence samples into the wave buffer so
-        // the silence plays back perfectly synced with the surrounding
-        // audio (no wall-clock timer — that would fire while prior
-        // sentence data is still ahead of the playback cursor).
         if (Slot.bIsPause)
         {
             InjectSilence(Slot.PauseDurationMs);
@@ -516,7 +485,6 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
             continue;
         }
 
-        // Audio slot: flush already handled above.
         CurrentPlayIndex++;
 
         UE_LOG(LogInoAgents, Verbose,
@@ -528,8 +496,8 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
         && Slots.Num() > 0
         && !bAllCompleteBroadcasted)
     {
-        // All slots drained. Flip the wave into drain mode so it
-        // emits OnAudioPlaybackFinished when its buffer empties and
+        // All slots dispatched. Flip the wave into drain mode so
+        // OnAudioPlaybackFinished fires when the buffer empties and
         // the audio component naturally stops.
         if (StreamingWave != nullptr)
         {

@@ -3,10 +3,12 @@
 #include "LiteRtLm/InoLiteRtLmAgentComponent.h"
 
 #include "Audio/InoLiteRtLmDialogueQueue.h"
-#include "Audio/InoStreamingSoundWave.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
+
+// RuntimeAudioImporter plugin
+#include "Sound/StreamingSoundWave.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -35,13 +37,14 @@ void UInoLiteRtLmAgentComponent::BeginPlay()
     Super::BeginPlay();
 
     // The agent no longer owns a UAudioComponent — Blueprint is
-    // expected to grab the wave via GetStreamingSoundWave() and
-    // plug it into whatever audio component it wants to use
-    // (spatialized, 2D UI, routed through a specific sound class,
-    // etc.). We only own the wave and its format config.
-    StreamingWave = UInoStreamingSoundWave::CreateStreamingSoundWave();
+    // expected to grab the wave via GetStreamingSoundWave() and plug
+    // it into whatever audio component it wants. We only own the
+    // RuntimeAudioImporter UStreamingSoundWave and its format config;
+    // RuntimeAudio handles all of decoding, threading, and clean
+    // PIE-shutdown teardown.
+    StreamingWave = UStreamingSoundWave::CreateStreamingSoundWave();
     StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-    StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+    StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
     StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
 }
 
@@ -60,12 +63,13 @@ void UInoLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 
     if (StreamingWave != nullptr)
     {
-        // Force the wave to signal end-of-stream BEFORE it goes out
-        // of scope. This stops any active audio source that BP wired
-        // the wave into so the audio mixer doesn't keep polling us
-        // through PIE teardown — which otherwise piles up source-
-        // command-queue backlog and freezes the editor on stop PIE.
-        StreamingWave->ForceStopPlayback();
+        // Drop pending bytes and stop any active source BP wired the
+        // wave into. RuntimeAudio's UStreamingSoundWave handles its
+        // own clean teardown via Parse() actively calling
+        // StopActiveSound on the audio thread when bStopSoundOnPlaybackFinish
+        // is true.
+        StreamingWave->ReleaseMemory();
+        StreamingWave->SetStopSoundOnPlaybackFinish(true);
         StreamingWave = nullptr;
     }
 
@@ -103,7 +107,7 @@ void UInoLiteRtLmAgentComponent::Initialize(
     if (StreamingWave != nullptr)
     {
         StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -486,7 +490,7 @@ void UInoLiteRtLmAgentComponent::CreateConversationAndQueue()
     if (StreamingWave != nullptr)
     {
         StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
         StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
         StreamingWave->OnPopulateAudioData.AddDynamic(
             this, &UInoLiteRtLmAgentComponent::HandleWavePopulateAudioData);

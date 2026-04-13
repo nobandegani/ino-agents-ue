@@ -43,19 +43,11 @@ public class InoAgents : ModuleRules
 				// private headers directly.
 				Path.Combine(ModuleDirectory, "Private", "ElevenLabs"),
 
-				// Subdirectory of Private/ that holds the sound-wave
-				// implementations plus the MP3 decoder wrapper. Added so
-				// InoStreamingSoundWave.cpp can #include
-				// "InoMp3Decoder.h" without a relative path,
-				// matching the convention used for every other private
-				// subtree.
+				// Subdirectory of Private/ that holds the dialogue-queue
+				// implementation. Streaming-audio playback is provided by
+				// the RuntimeAudioImporter plugin (UStreamingSoundWave) —
+				// we no longer ship our own sound-wave classes.
 				Path.Combine(ModuleDirectory, "Private", "Audio"),
-
-				// Third-party single-header libraries (currently: minimp3).
-				// Included only by InoMp3Decoder.cpp. Kept on its
-				// own include path so the vendored directory is explicit in
-				// the Build.cs file rather than buried under Private/Audio.
-				Path.Combine(ModuleDirectory, "Private", "Audio", "ThirdParty"),
 			}
 			);
 
@@ -77,6 +69,8 @@ public class InoAgents : ModuleRules
 				"Projects",          // IPluginManager for locating the plugin's base directory at runtime.
 				"HTTP",              // FHttpModule / IHttpRequest / IHttpResponse — ElevenLabs backend only.
 				"DeveloperSettings", // UDeveloperSettings base class — UElevenLabsSettings.
+				"RuntimeAudioImporter",  // UStreamingSoundWave + ERuntimeAudioFormat / ERuntimeRAWAudioFormat —
+				                     // the streaming TTS audio sink the dialogue queue feeds into.
 			}
 			);
 			
@@ -89,35 +83,12 @@ public class InoAgents : ModuleRules
 				"Slate",
 				"SlateCore",
 
-				// UInoImportedSoundWave subclasses USoundWaveProcedural which
-				// inherits IAudioProxyDataFactory from AudioExtensions.
-				"AudioExtensions",
-
-				// Audio::FResampler for sample-rate conversion inside the
-				// streaming wave's RAW append path.
-				"SignalProcessing",
-
-				// FAudioCapture base class + FAudioCaptureDeviceInfo struct —
-				// used by UInoCapturableSoundWave.
-				"AudioCaptureCore",
-
 				// Required for EKeys::Enter / EKeys::Escape constants used by the
 				// chat input's Enter-to-send and ESC-to-dismiss handling. Forgetting
 				// this gives a confusing link error rather than a header error.
 				"InputCore",
 			}
 			);
-
-		// Platform-specific capture backend. FAudioCapture is an abstract
-		// interface — the concrete implementation differs per platform.
-		// Only Windows + Mac use AudioCaptureRtAudio; iOS/Android have
-		// their own backends (not wired up until those platforms are
-		// supported).
-		if (Target.Platform == UnrealTargetPlatform.Win64
-		 || Target.Platform == UnrealTargetPlatform.Mac)
-		{
-			PrivateDependencyModuleNames.Add("AudioCaptureRtAudio");
-		}
 
 		// FEditorDelegates::PrePIEEnded is editor-only — used by the chat panel's
 		// Show/Hide console commands to tear the panel down BEFORE the GameViewport

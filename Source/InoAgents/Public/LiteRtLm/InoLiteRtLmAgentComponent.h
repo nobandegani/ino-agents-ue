@@ -5,14 +5,14 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 
-#include "Audio/InoAudioTypes.h"
+#include "Audio/InoLiteRtLmDialogueQueue.h"     // FOnInoDialogueQueueEvent
 #include "ElevenLabs/InoElevenLabsTypes.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"   // EInoLiteRtLmSentenceSplit
 #include "LiteRtLm/InoLiteRtLmTypes.h"
 
 #include "InoLiteRtLmAgentComponent.generated.h"
 
-class UInoStreamingSoundWave;
+class UStreamingSoundWave;            // RuntimeAudioImporter plugin
 class UInoLiteRtLmDialogueQueue;
 class UInoLiteRtLmConversation;
 class UInoLiteRtLmSubsystem;
@@ -250,7 +250,7 @@ public:
 
     /** Fires when all queued TTS audio has finished playing. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
-    FOnInoAudioPlaybackFinished OnAudioFinished;
+    FOnInoDialogueQueueEvent OnAudioFinished;
 
     /** Fires during model download. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
@@ -297,23 +297,22 @@ public:
     UInoLiteRtLmConversation* GetConversation() const { return Conversation; }
 
     /**
-     * Access the streaming sound wave that receives TTS audio from the
-     * dialogue queue. The agent does NOT create a UAudioComponent for
-     * this wave — Blueprint is responsible for:
+     * Access the streaming sound wave (RuntimeAudioImporter's
+     * UStreamingSoundWave) that the dialogue queue feeds TTS audio
+     * into. Blueprint is responsible for:
      *   1. Getting the wave via this accessor
      *   2. Setting it on a UAudioComponent (SetSound)
      *   3. Calling Play() on the audio component when ready
-     *   4. Calling Stop() on interruption (bind to OnStatusChanged
-     *      → Interrupted) if instant silence is desired
+     *   4. Calling Stop() on interruption if instant silence is
+     *      desired (or just bind OnAudioInterrupted on the queue).
      *
      * Bind to the wave's delegates directly:
      *   OnGeneratePCMData       — playback visualization / lip-sync
      *   OnPopulateAudioData     — incoming TTS data analysis
-     *   OnAudioPlaybackFinished — "audio actually ended" signal (only
-     *                             fires if BP is playing the wave)
+     *   OnAudioPlaybackFinished — "audio actually ended" signal
      */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
-    UInoStreamingSoundWave* GetStreamingSoundWave() const { return StreamingWave; }
+    UStreamingSoundWave* GetStreamingSoundWave() const { return StreamingWave; }
 
     /** Access the internal dialogue queue. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
@@ -326,7 +325,7 @@ public:
 
 private:
     UPROPERTY()
-    TObjectPtr<UInoStreamingSoundWave> StreamingWave;
+    TObjectPtr<UStreamingSoundWave> StreamingWave;
 
     UPROPERTY()
     TObjectPtr<UInoLiteRtLmConversation> Conversation;
