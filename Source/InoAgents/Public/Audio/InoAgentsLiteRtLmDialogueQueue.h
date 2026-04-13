@@ -11,7 +11,6 @@
 
 #include "InoAgentsLiteRtLmDialogueQueue.generated.h"
 
-class UAudioComponent;
 class UInoAgentsStreamingSoundWave;
 class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
@@ -48,23 +47,22 @@ public:
  * Pass a ULiteRtLmConversation to Initialize and the queue self-wires
  * to the conversation's OnSentence and OnNewLine delegates. Each line
  * the LLM produces is dispatched to ElevenLabs TTS in parallel, and
- * the resulting audio plays back through a streaming sound wave in
+ * the resulting audio bytes are fed into a streaming sound wave in
  * strict sentence order with configurable pauses between lines.
  *
- * Internally the queue feeds bytes into a UInoAgentsStreamingSoundWave
- * (the caller-provided wave is used directly — the queue does not own
- * it) which in turn is attached to a UAudioComponent (also caller-
- * provided). The queue drives Play()/Stop() on that component to match
- * the flow of queued slots.
+ * The queue does NOT own or drive a UAudioComponent — it only feeds
+ * bytes into the caller-provided wave. Blueprint (or higher-level
+ * game code) is responsible for plugging the wave into an audio
+ * component and calling Play/Stop as needed. The queue marks the
+ * wave as drain-ready once all slots dispatch, so the wave's
+ * OnAudioPlaybackFinished will fire naturally when the audio engine
+ * pulls the final samples out.
  *
- * Blueprint setup (two nodes total):
+ * Blueprint setup:
  *
  *   Queue = Construct Object From Class (UInoAgentsLiteRtLmDialogueQueue)
- *   Queue.Initialize(self, AudioComp, StreamingWave, Conversation,
+ *   Queue.Initialize(self, StreamingWave, Conversation,
  *                    VoiceId, RequestTemplate, PauseDurationMs)
- *
- * No manual wiring of OnSentence / OnNewLine / audio feeds needed —
- * the queue handles everything internally once initialized.
  */
 UCLASS(BlueprintType)
 class INOAGENTS_API UInoAgentsLiteRtLmDialogueQueue : public UObject
@@ -76,13 +74,11 @@ public:
      * Set up the queue and bind to the conversation's delegates.
      *
      * @param WorldContextObject       Any UObject with a World.
-     * @param InAudioComponent         Plain UAudioComponent used for
-     *                                  playback. Queue calls Play()
-     *                                  and Stop() on it to bracket
-     *                                  slot flow.
      * @param InStreamingWave          Streaming sound wave fed the
-     *                                  TTS bytes. Must already be set
-     *                                  as the component's sound.
+     *                                  TTS bytes. Caller is
+     *                                  responsible for plugging it
+     *                                  into a UAudioComponent and
+     *                                  driving playback.
      * @param InConversation           The conversation to listen to.
      *                                  The queue binds to OnSentence
      *                                  and OnNewLine automatically.
@@ -100,7 +96,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
               meta = (WorldContext = "WorldContextObject"))
     void Initialize(UObject* WorldContextObject,
-                    UAudioComponent* InAudioComponent,
                     UInoAgentsStreamingSoundWave* InStreamingWave,
                     ULiteRtLmConversation* InConversation,
                     const FString& InDefaultVoiceId,
@@ -162,10 +157,6 @@ private:
      *  internal task pipe. */
     void FeedBytesToWave(const TArray<uint8>& Bytes);
 
-    /** Call Play() on the audio component the first time any byte is
-     *  handed to the wave after a reset. Idempotent. */
-    void EnsurePlaybackStarted();
-
     // -----------------------------------------------------------------
     // Types + state
     // -----------------------------------------------------------------
@@ -180,9 +171,6 @@ private:
     };
 
     TWeakObjectPtr<UObject> WorldContextWeak;
-
-    UPROPERTY()
-    TObjectPtr<UAudioComponent> AudioComponent;
 
     UPROPERTY()
     TObjectPtr<UInoAgentsStreamingSoundWave> StreamingWave;
@@ -217,11 +205,6 @@ private:
      *  advancing past the consumed pause slot, which would cause the
      *  timer callback to double-advance and skip slots. */
     bool  bPauseTimerPending    = false;
-
-    /** Latched after the first Play() so StopAndReset/Clear know
-     *  whether a Stop() call is needed and subsequent feeds don't
-     *  re-trigger Play(). */
-    bool  bPlaybackStarted      = false;
 
     void DrainReadySlots();
 };

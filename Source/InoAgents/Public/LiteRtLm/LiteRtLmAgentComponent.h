@@ -11,7 +11,6 @@
 
 #include "LiteRtLmAgentComponent.generated.h"
 
-class UAudioComponent;
 class UInoAgentsStreamingSoundWave;
 class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
@@ -114,13 +113,13 @@ public:
               meta = (ClampMin = "0.0", ClampMax = "5.0"))
     float InterruptionDelaySec = 0.0f;
 
-    /** PCM sample rate for the audio component. Must match the
+    /** PCM sample rate applied to the streaming wave. Must match the
      *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "8000", ClampMax = "192000"))
     int32 PcmSampleRate = 16000;
 
-    /** PCM channel count. 1 = mono, 2 = stereo. */
+    /** PCM channel count applied to the streaming wave. 1 = mono, 2 = stereo. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
               meta = (ClampMin = "1", ClampMax = "2"))
     int32 PcmNumChannels = 1;
@@ -280,14 +279,22 @@ public:
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     ULiteRtLmConversation* GetConversation() const { return Conversation; }
 
-    /** Access the child audio component. */
-    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
-    UAudioComponent* GetAudioComponent() const { return AudioComp; }
-
-    /** Access the streaming sound wave feeding the audio component.
-     *  Bind to its OnGeneratePCMData for playback visualization,
-     *  OnPopulateAudioData for incoming-data analysis, or
-     *  OnAudioPlaybackFinished for a true "audio ended" signal. */
+    /**
+     * Access the streaming sound wave that receives TTS audio from the
+     * dialogue queue. The agent does NOT create a UAudioComponent for
+     * this wave — Blueprint is responsible for:
+     *   1. Getting the wave via this accessor
+     *   2. Setting it on a UAudioComponent (SetSound)
+     *   3. Calling Play() on the audio component when ready
+     *   4. Calling Stop() on interruption (bind to OnStatusChanged
+     *      → Interrupted) if instant silence is desired
+     *
+     * Bind to the wave's delegates directly:
+     *   OnGeneratePCMData       — playback visualization / lip-sync
+     *   OnPopulateAudioData     — incoming TTS data analysis
+     *   OnAudioPlaybackFinished — "audio actually ended" signal (only
+     *                             fires if BP is playing the wave)
+     */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
     UInoAgentsStreamingSoundWave* GetStreamingSoundWave() const { return StreamingWave; }
 
@@ -301,9 +308,6 @@ public:
     //~ End UActorComponent interface
 
 private:
-    UPROPERTY()
-    TObjectPtr<UAudioComponent> AudioComp;
-
     UPROPERTY()
     TObjectPtr<UInoAgentsStreamingSoundWave> StreamingWave;
 

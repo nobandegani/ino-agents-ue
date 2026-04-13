@@ -8,7 +8,6 @@
 #include "LiteRtLm/LiteRtLmConversation.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
-#include "Components/AudioComponent.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -35,25 +34,15 @@ void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 {
     Super::BeginPlay();
 
-    // Create and attach the audio component + its streaming sound
-    // wave at runtime. Using NewObject + RegisterComponent (not
-    // CreateDefaultSubobject) so these don't show as duplicates in
-    // the details panel — the agent is a pure UActorComponent with
-    // no transform, the audio layer is an implementation detail.
-    AActor* Owner = GetOwner();
-    if (Owner != nullptr)
-    {
-        AudioComp = NewObject<UAudioComponent>(Owner, TEXT("AgentAudio"));
-        AudioComp->bAutoActivate = false;
-        AudioComp->SetupAttachment(Owner->GetRootComponent());
-        AudioComp->RegisterComponent();
-
-        StreamingWave = UInoAgentsStreamingSoundWave::CreateStreamingSoundWave();
-        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
-        StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
-        AudioComp->SetSound(StreamingWave);
-    }
+    // The agent no longer owns a UAudioComponent — Blueprint is
+    // expected to grab the wave via GetStreamingSoundWave() and
+    // plug it into whatever audio component it wants to use
+    // (spatialized, 2D UI, routed through a specific sound class,
+    // etc.). We only own the wave and its format config.
+    StreamingWave = UInoAgentsStreamingSoundWave::CreateStreamingSoundWave();
+    StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
+    StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+    StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
 }
 
 void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
@@ -69,12 +58,6 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
         DialogueQueue = nullptr;
     }
 
-    if (AudioComp != nullptr)
-    {
-        AudioComp->Stop();
-        AudioComp->DestroyComponent();
-        AudioComp = nullptr;
-    }
     StreamingWave = nullptr;
 
     if (Conversation != nullptr)
@@ -483,7 +466,6 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     DialogueQueue = NewObject<UInoAgentsLiteRtLmDialogueQueue>(this);
     DialogueQueue->Initialize(
         this,
-        AudioComp,
         StreamingWave,
         Conversation,
         VoiceId,

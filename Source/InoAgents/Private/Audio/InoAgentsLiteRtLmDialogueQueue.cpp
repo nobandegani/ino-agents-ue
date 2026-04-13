@@ -7,7 +7,6 @@
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
 
-#include "Components/AudioComponent.h"
 #include "Containers/Ticker.h"
 
 // ======================================================================
@@ -96,7 +95,6 @@ namespace
 
 void UInoAgentsLiteRtLmDialogueQueue::Initialize(
     UObject*                             WorldContextObject,
-    UAudioComponent*                     InAudioComponent,
     UInoAgentsStreamingSoundWave*        InStreamingWave,
     ULiteRtLmConversation*               InConversation,
     const FString&                       InDefaultVoiceId,
@@ -107,7 +105,6 @@ void UInoAgentsLiteRtLmDialogueQueue::Initialize(
     Clear();
 
     WorldContextWeak        = WorldContextObject;
-    AudioComponent          = InAudioComponent;
     StreamingWave           = InStreamingWave;
     DefaultVoiceId          = InDefaultVoiceId;
     RequestTemplate         = InRequestTemplate;
@@ -178,18 +175,13 @@ void UInoAgentsLiteRtLmDialogueQueue::Clear()
     // Reset the wave's buffer so stale audio from the prior cycle
     // doesn't leak into the next one. Turn the drain flag off so a
     // future cycle doesn't spuriously fire OnAudioPlaybackFinished
-    // before any real data lands.
+    // before any real data lands. Audio-component lifecycle is
+    // Blueprint's responsibility — we only manage the wave.
     if (StreamingWave != nullptr)
     {
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
         StreamingWave->ResetStreamingBuffer();
     }
-
-    if (AudioComponent != nullptr && bPlaybackStarted)
-    {
-        AudioComponent->Stop();
-    }
-    bPlaybackStarted = false;
 }
 
 void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
@@ -214,12 +206,6 @@ void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
         StreamingWave->ResetStreamingBuffer();
     }
-
-    if (AudioComponent != nullptr && bPlaybackStarted)
-    {
-        AudioComponent->Stop();
-    }
-    bPlaybackStarted = false;
 }
 
 // ======================================================================
@@ -347,8 +333,6 @@ void UInoAgentsLiteRtLmDialogueQueue::FeedBytesToWave(const TArray<uint8>& Bytes
         return;
     }
 
-    EnsurePlaybackStarted();
-
     if (bDerivedFormatIsMP3)
     {
         StreamingWave->AppendAudioDataFromMP3(Bytes);
@@ -361,16 +345,6 @@ void UInoAgentsLiteRtLmDialogueQueue::FeedBytesToWave(const TArray<uint8>& Bytes
             DerivedSampleRate,
             DerivedNumChannels);
     }
-}
-
-void UInoAgentsLiteRtLmDialogueQueue::EnsurePlaybackStarted()
-{
-    if (bPlaybackStarted || AudioComponent == nullptr)
-    {
-        return;
-    }
-    AudioComponent->Play();
-    bPlaybackStarted = true;
 }
 
 // ======================================================================
