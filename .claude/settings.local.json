@@ -19,7 +19,10 @@
       "Bash(xargs grep:*)",
       "Bash(find \"E:/Projects/InoAgentDemo/Plugins/InoAgents/LiteRtLm/vendor/LiteRT-LM/runtime/components/tool_use\" -name \"*_test.cc\" -exec grep -l \"ParseFcExpression\\\\|FormatToolAsFc\" {} \\\\;)",
       "WebSearch",
-      "WebFetch(domain:ai.google.dev)"
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(find \"./Source/InoAgents\"*\"/Audio\" -type f \\\\\\( -name \"*.h\" -o -name \"*.cpp\" \\\\\\))",
+      "Bash(wc -l \"Source/InoAgents/Public/Audio/\"* \"Source/InoAgents/Private/Audio/\"*)",
+      "Bash(grep:*)"
     ]
   }
 }
