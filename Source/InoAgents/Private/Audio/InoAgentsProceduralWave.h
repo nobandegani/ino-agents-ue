@@ -53,6 +53,13 @@ private:
      *  only cleared on the audio thread where it's written. */
     TAtomic<bool> bResetPending{false};
 
+    /** Gate for visualization. Set true in SetOwnerAndBatchSize
+     *  (stream starts), false in ResetVisualization (stream ends).
+     *  Checked in GeneratePCMData to skip broadcasting after Stop()
+     *  — the audio engine may still call GeneratePCMData for 1-2
+     *  frames after Stop() because the stop is asynchronous. */
+    TAtomic<bool> bActive{false};
+
     /** Accumulator. ONLY accessed from the audio render thread
      *  (inside GeneratePCMData). Game thread signals resets via
      *  bResetPending, never touches Accumulator directly. */

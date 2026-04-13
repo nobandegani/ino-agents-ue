@@ -11,17 +11,15 @@ void UInoAgentsProceduralWave::SetOwnerAndBatchSize(
 {
     OwnerWeak = InOwner;
     BatchSize = FMath::Max(InBatchSize, 0);
-    // Signal a reset — the audio thread will clear the accumulator
-    // at the start of the next GeneratePCMData call.
     bResetPending = true;
+    bActive = true;
 }
 
 void UInoAgentsProceduralWave::ResetVisualization()
 {
+    bActive = false;
     OwnerWeak.Reset();
     BatchSize = 0;
-    // Signal a reset instead of touching Accumulator directly —
-    // Accumulator is only safe to modify on the audio thread.
     bResetPending = true;
 }
 
@@ -42,7 +40,15 @@ int32 UInoAgentsProceduralWave::GeneratePCMData(uint8* PCMData, const int32 Samp
     // Let the base class pull samples from the queue into PCMData.
     const int32 BytesGenerated = Super::GeneratePCMData(PCMData, SamplesNeeded);
 
-    // Skip visualization if disabled or nobody is listening.
+    // Skip visualization if inactive (stream ended), disabled, or
+    // nobody is listening. bActive is set false by ResetVisualization
+    // on the game thread and checked here on the audio thread — the
+    // atomic ensures we stop broadcasting immediately even if the
+    // audio engine hasn't processed Stop() yet.
+    if (!bActive.Load())
+    {
+        return BytesGenerated;
+    }
     const int32 CurrentBatchSize = BatchSize.Load();
     if (CurrentBatchSize <= 0 || !OwnerWeak.IsValid() || BytesGenerated <= 0)
     {
