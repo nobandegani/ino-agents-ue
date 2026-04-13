@@ -22,7 +22,10 @@
       "WebFetch(domain:ai.google.dev)",
       "Bash(find \"./Source/InoAgents\"*\"/Audio\" -type f \\\\\\( -name \"*.h\" -o -name \"*.cpp\" \\\\\\))",
       "Bash(wc -l \"Source/InoAgents/Public/Audio/\"* \"Source/InoAgents/Private/Audio/\"*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Read(//e/Projects/InoAgentDemo/**)",
+      "Bash(ls *.uproject)",
+      "Bash(\"C:/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoAgentDemoEditor Win64 Development -Project=\"E:/Projects/InoAgentDemo/InoAgentDemo.uproject\" -WaitMutex)"
     ]
   }
 }
