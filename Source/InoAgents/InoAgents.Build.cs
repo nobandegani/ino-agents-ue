@@ -43,10 +43,11 @@ public class InoAgents : ModuleRules
 				// private headers directly.
 				Path.Combine(ModuleDirectory, "Private", "ElevenLabs"),
 
-				// Subdirectory of Private/ that holds the dialogue-queue
-				// implementation. Streaming-audio playback is provided by
-				// the RuntimeAudioImporter plugin (UStreamingSoundWave) —
-				// we no longer ship our own sound-wave classes.
+				// Subdirectory of Private/ that holds the audio function
+				// library's private impl. Streaming-audio playback is
+				// provided by the RuntimeAudioImporter plugin
+				// (UStreamingSoundWave); we don't ship our own sound-wave
+				// classes or dialogue-queue any more.
 				Path.Combine(ModuleDirectory, "Private", "Audio"),
 			}
 			);
