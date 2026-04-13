@@ -195,9 +195,26 @@ void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
 void UInoAgentsLiteRtLmDialogueQueue::HandleSentenceFromConversation(
     FString RawText, FString /*CleanText*/)
 {
-    // Send RawText (with [emotion]/[audio] tags intact) to ElevenLabs.
-    // Tags are consumed as delivery instructions and not spoken aloud.
-    EnqueueSentenceInternal(RawText);
+    // Send RawText with [emotion] tags intact — ElevenLabs consumes
+    // them as delivery instructions. But strip {curly} emotion state
+    // tags which ElevenLabs doesn't understand and would speak aloud.
+    FString TtsText;
+    TtsText.Reserve(RawText.Len());
+    int32 CurlyDepth = 0;
+    for (const TCHAR Ch : RawText)
+    {
+        if (Ch == TEXT('{')) { CurlyDepth++; continue; }
+        if (Ch == TEXT('}') && CurlyDepth > 0) { CurlyDepth--; continue; }
+        if (CurlyDepth == 0) { TtsText.AppendChar(Ch); }
+    }
+    TtsText.TrimStartAndEndInline();
+
+    if (TtsText.IsEmpty())
+    {
+        return;
+    }
+
+    EnqueueSentenceInternal(TtsText);
 }
 
 void UInoAgentsLiteRtLmDialogueQueue::HandleNewLineFromConversation()
