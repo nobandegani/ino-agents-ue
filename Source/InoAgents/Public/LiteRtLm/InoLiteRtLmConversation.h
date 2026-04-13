@@ -284,6 +284,18 @@ public:
     // ------------------------------------------------------------------
 
     /**
+     * Fires at the START of every SendMessageAsync call, synchronously,
+     * with the user's text as passed in. Useful for chat UI that wants
+     * to echo the user's message immediately (without waiting for the
+     * model's first token) and for logging / analytics.
+     *
+     * Always on the game thread, fires BEFORE OnToken / OnComplete /
+     * OnError for the same send.
+     */
+    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
+    FOnInoLiteRtLmUserMessage OnUserMessage;
+
+    /**
      * Fires zero or more times per SendMessageAsync call as the model
      * streams out its response. Each broadcast delivers two strings:
      *

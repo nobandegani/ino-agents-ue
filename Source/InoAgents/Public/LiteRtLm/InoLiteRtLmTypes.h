@@ -251,6 +251,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoLiteRtLmError,
     FString, ErrorMessage);
 
 /**
+ * Fired at the start of every SendMessageAsync call, on the game thread,
+ * with the user's text BEFORE any context augmentation / history
+ * recording is applied. Use for chat UI that wants to echo the user's
+ * message as soon as it's submitted (without waiting for the model to
+ * start generating) or for analytics / logging.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoLiteRtLmUserMessage,
+    FString, UserText);
+
+/**
  * Fired each time the streaming token buffer crosses a newline boundary.
  * Delivers two versions of the text:
  *

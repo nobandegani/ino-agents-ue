@@ -263,6 +263,12 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
 {
     check(IsInGameThread());
 
+    // Broadcast the user's text synchronously BEFORE any validation so
+    // chat UIs echo every submitted message regardless of whether the
+    // downstream send then fails. Observers that only care about
+    // successful sends can additionally bind OnComplete.
+    OnUserMessage.Broadcast(UserText);
+
     if (!Worker.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
