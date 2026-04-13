@@ -237,6 +237,15 @@ void UInoAgentsLiteRtLmAgentComponent::OnInterruptionDelayFinished()
 
 void UInoAgentsLiteRtLmAgentComponent::Cancel()
 {
+    // Tear down in-flight TTS audio FIRST so the old response doesn't
+    // keep playing past the cancel. Without this, Cancel stops the
+    // LLM generation but leaves the dialogue queue's slots alive; the
+    // wave would drain whatever TTS had already started.
+    if (DialogueQueue != nullptr)
+    {
+        DialogueQueue->StopAndReset();
+    }
+
     if (Conversation != nullptr)
     {
         Conversation->Cancel();
@@ -371,6 +380,16 @@ void UInoAgentsLiteRtLmAgentComponent::HandleComplete(FString FullText)
 
 void UInoAgentsLiteRtLmAgentComponent::HandleError(FString ErrorMessage)
 {
+    // LLM error mid-response — drop any TTS slots in flight so the
+    // queue doesn't keep feeding the wave with partial bytes from a
+    // dead conversation. The agent goes Idle; BP sees OnError and
+    // can show an error state.
+    if (DialogueQueue != nullptr)
+    {
+        DialogueQueue->StopAndReset();
+    }
+
+    bTalkingLatched = false;
     SetStatus(EInoAgentsAgentStatus::Idle);
     OnError.Broadcast(ErrorMessage);
 }

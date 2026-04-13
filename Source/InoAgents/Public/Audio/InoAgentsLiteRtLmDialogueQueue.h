@@ -143,6 +143,17 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
     FOnInoAgentsAudioPlaybackFinished OnAllComplete;
 
+    /** Fires when StopAndReset / Clear is called while a response was
+     *  still being dispatched or played — i.e. the queue was actively
+     *  working and got yanked out mid-cycle. Blueprint can bind this
+     *  to hard-stop its UAudioComponent if instant silence (vs. the
+     *  natural silence from an emptied buffer) is preferred.
+     *
+     *  Does NOT fire on normal, post-completion Clear/StopAndReset
+     *  (when OnAllComplete has already broadcast). */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Audio")
+    FOnInoAgentsAudioPlaybackFinished OnAudioInterrupted;
+
     // -----------------------------------------------------------------
     // Internal — called by UInoAgentsLiteRtLmDialogueSlotObserver
     // -----------------------------------------------------------------

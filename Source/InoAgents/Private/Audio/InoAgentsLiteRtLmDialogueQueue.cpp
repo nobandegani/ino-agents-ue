@@ -156,6 +156,12 @@ void UInoAgentsLiteRtLmDialogueQueue::Initialize(
 
 void UInoAgentsLiteRtLmDialogueQueue::Clear()
 {
+    // Was a response in-flight? "In-flight" = we have slots AND haven't
+    // yet fired OnAllComplete for this cycle. Used to gate the
+    // OnAudioInterrupted delegate — we only want to fire it on true
+    // interruptions, not on clean post-completion resets.
+    const bool bWasInFlight = (Slots.Num() > 0 && !bAllCompleteBroadcasted);
+
     // Unbind from the conversation if we're attached.
     if (ULiteRtLmConversation* Conv = BoundConversation.Get())
     {
@@ -180,10 +186,19 @@ void UInoAgentsLiteRtLmDialogueQueue::Clear()
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
         StreamingWave->ResetStreamingBuffer();
     }
+
+    if (bWasInFlight)
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: interrupted mid-cycle (Clear)"));
+        OnAudioInterrupted.Broadcast();
+    }
 }
 
 void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
 {
+    const bool bWasInFlight = (Slots.Num() > 0 && !bAllCompleteBroadcasted);
+
     // Same as Clear but keeps the conversation binding so the queue
     // continues to receive OnSentence/OnNewLine for the next response.
     Slots.Reset();
@@ -195,6 +210,13 @@ void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
     {
         StreamingWave->SetStopSoundOnPlaybackFinish(false);
         StreamingWave->ResetStreamingBuffer();
+    }
+
+    if (bWasInFlight)
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("UInoAgentsLiteRtLmDialogueQueue: interrupted mid-cycle (StopAndReset)"));
+        OnAudioInterrupted.Broadcast();
     }
 }
 
