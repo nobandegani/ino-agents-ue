@@ -141,6 +141,8 @@ void UInoLiteRtLmDialogueQueue::Initialize(
     {
         InConversation->OnSentence.AddDynamic(
             this, &UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation);
+        InConversation->OnComplete.AddDynamic(
+            this, &UInoLiteRtLmDialogueQueue::HandleConversationComplete);
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -163,6 +165,8 @@ void UInoLiteRtLmDialogueQueue::Clear()
     {
         Conv->OnSentence.RemoveDynamic(
             this, &UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation);
+        Conv->OnComplete.RemoveDynamic(
+            this, &UInoLiteRtLmDialogueQueue::HandleConversationComplete);
     }
     BoundConversation = nullptr;
 
@@ -170,6 +174,7 @@ void UInoLiteRtLmDialogueQueue::Clear()
     Observers.Reset();
     CurrentPlayIndex         = 0;
     bAllCompleteBroadcasted  = false;
+    bLlmCompleted            = false;
 
     // Reset the wave so stale audio from the prior cycle doesn't leak
     // into the next one. Turning the drain flag off prevents the
@@ -197,6 +202,7 @@ void UInoLiteRtLmDialogueQueue::StopAndReset()
     Observers.Reset();
     CurrentPlayIndex         = 0;
     bAllCompleteBroadcasted  = false;
+    bLlmCompleted            = false;
 
     if (StreamingWave != nullptr)
     {
@@ -244,6 +250,15 @@ void UInoLiteRtLmDialogueQueue::HandleSentenceFromConversation(
     }
 
     EnqueueSentenceInternal(TtsText);
+}
+
+void UInoLiteRtLmDialogueQueue::HandleConversationComplete(FString /*FullText*/)
+{
+    // LLM has finished streaming text. Re-drain so the post-loop
+    // OnAllComplete check can fire now that bLlmCompleted is set
+    // (it stays gated until both LLM and TTS are done).
+    bLlmCompleted = true;
+    DrainReadySlots();
 }
 
 // ======================================================================
@@ -499,13 +514,22 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
                CurrentPlayIndex);
     }
 
-    if (CurrentPlayIndex >= Slots.Num()
+    // Fire OnAllComplete + flip the wave to drain mode ONLY when
+    // BOTH conditions hold:
+    //   1. The LLM has finished streaming (no more sentences coming).
+    //   2. Every slot has been dispatched and (where applicable)
+    //      its TTS has completed.
+    //
+    // Without the bLlmCompleted gate, OnAllComplete would fire as
+    // soon as the current TTS slot finished — which routinely
+    // happens before the LLM emits the next sentence — and the agent
+    // would flap Talking → Idle → Talking on every multi-sentence
+    // response.
+    if (bLlmCompleted
+        && CurrentPlayIndex >= Slots.Num()
         && Slots.Num() > 0
         && !bAllCompleteBroadcasted)
     {
-        // All slots dispatched. Flip the wave into drain mode so
-        // OnAudioPlaybackFinished fires when the buffer empties and
-        // the audio component naturally stops.
         if (StreamingWave != nullptr)
         {
             StreamingWave->SetStopSoundOnPlaybackFinish(true);
@@ -514,7 +538,7 @@ void UInoLiteRtLmDialogueQueue::DrainReadySlots()
         bAllCompleteBroadcasted = true;
 
         UE_LOG(LogInoAgents, Log,
-               TEXT("UInoLiteRtLmDialogueQueue: all %d slot(s) dispatched"),
+               TEXT("UInoLiteRtLmDialogueQueue: all %d slot(s) dispatched (LLM done)"),
                Slots.Num());
 
         OnAllComplete.Broadcast();

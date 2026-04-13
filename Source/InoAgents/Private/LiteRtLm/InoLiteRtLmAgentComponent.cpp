@@ -64,13 +64,14 @@ void UInoLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 
     if (StreamingWave != nullptr)
     {
-        // Drop pending bytes and stop any active source BP wired the
-        // wave into. RuntimeAudio's UStreamingSoundWave handles its
-        // own clean teardown via Parse() actively calling
-        // StopActiveSound on the audio thread when bStopSoundOnPlaybackFinish
-        // is true.
-        StreamingWave->ReleaseMemory();
+        // Stop any active source BP wired the wave into. Set the drain
+        // flag FIRST so the next Parse() (which RuntimeAudio runs on
+        // the audio thread per active sound) sees both conditions —
+        // bStopSoundOnPlaybackFinish=true AND playback finished —
+        // and calls AudioDevice->StopActiveSound. ReleaseMemory then
+        // makes "playback finished" instantly true.
         StreamingWave->SetStopSoundOnPlaybackFinish(true);
+        StreamingWave->ReleaseMemory();
         StreamingWave = nullptr;
     }
 

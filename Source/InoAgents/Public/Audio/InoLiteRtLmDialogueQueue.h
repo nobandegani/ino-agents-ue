@@ -165,6 +165,9 @@ private:
     UFUNCTION()
     void HandleSentenceFromConversation(FString RawText, FString CleanText);
 
+    UFUNCTION()
+    void HandleConversationComplete(FString FullText);
+
     // -----------------------------------------------------------------
     // Internal sentence / pause dispatch
     // -----------------------------------------------------------------
@@ -221,6 +224,13 @@ private:
      *  iterations don't re-fire it. Reset whenever new slots are
      *  enqueued or the queue is cleared. */
     bool bAllCompleteBroadcasted = false;
+
+    /** Set true when the bound conversation fires its OnComplete —
+     *  i.e. the LLM has finished streaming text. Without this gate,
+     *  OnAllComplete would fire prematurely whenever a TTS slot
+     *  finished before the next OnSentence arrived, flapping the
+     *  agent's status. Reset on Clear/StopAndReset. */
+    bool bLlmCompleted = false;
 
     void DrainReadySlots();
 };
