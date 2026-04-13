@@ -114,25 +114,6 @@ public:
               meta = (ClampMin = "0.0", ClampMax = "5.0"))
     float InterruptionDelaySec = 0.0f;
 
-    /** PCM sample rate applied to the streaming wave. Must match the
-     *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
-              meta = (ClampMin = "8000", ClampMax = "192000"))
-    int32 PcmSampleRate = 16000;
-
-    /** PCM channel count applied to the streaming wave. 1 = mono, 2 = stereo. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
-              meta = (ClampMin = "1", ClampMax = "2"))
-    int32 PcmNumChannels = 1;
-
-    /** Number of interleaved float samples per OnGeneratePCMData fire
-     *  on the underlying streaming wave. 160 = 10 ms at 16 kHz mono,
-     *  a standard cadence for lip-sync / viseme systems. Set to 0 to
-     *  disable batching (one broadcast per audio-engine poll). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
-              meta = (ClampMin = "0", ClampMax = "16384"))
-    int32 NumSamplesPerChunk = 160;
-
     /** Bitmask of boundaries that trigger OnSentence on the underlying
      *  conversation. Applied at conversation creation AND whenever the
      *  property is changed at runtime (Initialize re-sends it). See
@@ -165,9 +146,7 @@ public:
         const FString& InVoiceId,
         const FInoElevenLabsDialogueRequest& InTtsRequestTemplate,
         int32 InPauseDurationMs,
-        float InInterruptionDelaySec,
-        int32 InPcmSampleRate,
-        int32 InPcmNumChannels);
+        float InInterruptionDelaySec);
 
     /**
      * Load the model and create a conversation. Non-blocking.

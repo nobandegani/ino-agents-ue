@@ -122,11 +122,18 @@ void UInoLiteRtLmDialogueQueue::Initialize(
 
     // Pre-configure the wave's desired rate + channels for both
     // modes. MP3 will reconfirm on the first decoded frame; PCM
-    // accepts immediately.
+    // accepts immediately. Channels are always 1 (mono) — TTS
+    // output from ElevenLabs is single-channel regardless of format.
+    //
+    // NumSamplesPerChunk = rate / 100 gives a fixed 10 ms cadence
+    // for OnGeneratePCMData broadcasts on the wave, which is what
+    // viseme / lip-sync systems expect (e.g. 160 samples @ 16 kHz,
+    // 220 @ 22.05 kHz, 441 @ 44.1 kHz).
     if (StreamingWave != nullptr && DerivedSampleRate > 0)
     {
         StreamingWave->SetInitialDesiredSampleRate(DerivedSampleRate);
         StreamingWave->SetInitialDesiredNumOfChannels(DerivedNumChannels);
+        StreamingWave->SetNumSamplesPerChunk(DerivedSampleRate / 100);
     }
 
     BoundConversation = InConversation;

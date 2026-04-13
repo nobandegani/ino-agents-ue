@@ -39,13 +39,14 @@ void UInoLiteRtLmAgentComponent::BeginPlay()
     // The agent no longer owns a UAudioComponent — Blueprint is
     // expected to grab the wave via GetStreamingSoundWave() and plug
     // it into whatever audio component it wants. We only own the
-    // RuntimeAudioImporter UStreamingSoundWave and its format config;
-    // RuntimeAudio handles all of decoding, threading, and clean
-    // PIE-shutdown teardown.
+    // RuntimeAudioImporter UStreamingSoundWave; RuntimeAudio handles
+    // all of decoding, threading, and clean PIE-shutdown teardown.
+    //
+    // Sample rate / channels / NumSamplesPerChunk are configured by
+    // the dialogue queue's Initialize based on the ElevenLabs output
+    // format (mono, rate from format, chunk = rate/100 for 10 ms
+    // viseme cadence) — no need to set them here.
     StreamingWave = UStreamingSoundWave::CreateStreamingSoundWave();
-    StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-    StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
-    StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
 }
 
 void UInoLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
@@ -92,30 +93,20 @@ void UInoLiteRtLmAgentComponent::Initialize(
     const FString& InVoiceId,
     const FInoElevenLabsDialogueRequest& InTtsRequestTemplate,
     int32 InPauseDurationMs,
-    float InInterruptionDelaySec,
-    int32 InPcmSampleRate,
-    int32 InPcmNumChannels)
+    float InInterruptionDelaySec)
 {
     ModelConfig            = InModelConfig;
     VoiceId                = InVoiceId;
     TtsRequestTemplate     = InTtsRequestTemplate;
     PauseDurationMs        = FMath::Max(InPauseDurationMs, 0);
     InterruptionDelaySec   = FMath::Clamp(InInterruptionDelaySec, 0.0f, 5.0f);
-    PcmSampleRate          = FMath::Clamp(InPcmSampleRate, 8000, 192000);
-    PcmNumChannels         = FMath::Clamp(InPcmNumChannels, 1, 2);
-
-    if (StreamingWave != nullptr)
-    {
-        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-        StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
-    }
 
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoLiteRtLmAgentComponent::Initialize: model=%s, voice=%s, "
-                "outputFmt=%d, pauseMs=%d, pcm=%dHz/%dch"),
+                "outputFmt=%d, pauseMs=%d"),
            *ModelConfig.ModelFileName, *VoiceId,
            static_cast<int32>(TtsRequestTemplate.OutputFormat),
-           PauseDurationMs, PcmSampleRate, PcmNumChannels);
+           PauseDurationMs);
 }
 
 // ======================================================================
@@ -484,14 +475,11 @@ void UInoLiteRtLmAgentComponent::CreateConversationAndQueue()
     Conversation->OnToolCalled.AddDynamic(
         this, &UInoLiteRtLmAgentComponent::HandleToolCalled);
 
-    // Bind wave-level delegates for status transitions. The wave may
-    // have been re-created if the user tore down the actor and
-    // re-spawned; re-apply the PCM format each time.
+    // Bind wave-level delegates for status transitions. Format
+    // (rate / channels / chunk size) is configured by the dialogue
+    // queue's Initialize below — no need to apply it here.
     if (StreamingWave != nullptr)
     {
-        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
-        StreamingWave->SetInitialDesiredNumOfChannels(PcmNumChannels);
-        StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
         StreamingWave->OnPopulateAudioData.AddDynamic(
             this, &UInoLiteRtLmAgentComponent::HandleWavePopulateAudioData);
         StreamingWave->OnAudioPlaybackFinished.AddDynamic(
