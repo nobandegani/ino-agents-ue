@@ -195,12 +195,16 @@ bool UInoAgentsCapturableSoundWave::StartCapture(int32 DeviceId)
     // from any thread.
     TWeakObjectPtr<UInoAgentsCapturableSoundWave> WeakThis(this);
     Audio::FOnAudioCaptureFunction OnCapture =
-        [WeakThis](const void* InAudio, int32 NumFrames, int32 NumChannels,
-                   int32 SampleRate, double /*StreamTime*/, bool /*bOverflow*/)
+        [WeakThis](const void* InAudio, int32 InNumFrames, int32 InNumChannels,
+                   int32 InSampleRate, double /*StreamTime*/, bool /*bOverflow*/)
         {
+            // Lambda param names are prefixed In* to avoid shadowing
+            // USoundWave::NumChannels / USoundWave::SampleRate which
+            // are inherited members on this class (MSVC C4458 turned
+            // into an error by the engine's WarningsAsErrors policy).
             UInoAgentsCapturableSoundWave* Self = WeakThis.Get();
             if (Self == nullptr || !Self->bIsCapturing.Load()
-                || InAudio == nullptr || NumFrames <= 0 || NumChannels <= 0)
+                || InAudio == nullptr || InNumFrames <= 0 || InNumChannels <= 0)
             {
                 return;
             }
@@ -210,7 +214,7 @@ bool UInoAgentsCapturableSoundWave::StartCapture(int32 DeviceId)
             // AppendAudioDataFromRAW transcode (the transcoder for
             // Float32 is just clamp + copy).
             const int32 NumBytes =
-                NumFrames * NumChannels * static_cast<int32>(sizeof(float));
+                InNumFrames * InNumChannels * static_cast<int32>(sizeof(float));
             TArray<uint8> Bytes;
             Bytes.SetNumUninitialized(NumBytes);
             if (Self->bMuted.Load())
@@ -227,8 +231,8 @@ bool UInoAgentsCapturableSoundWave::StartCapture(int32 DeviceId)
             Self->AppendAudioDataFromRAW(
                 Bytes,
                 EInoAgentsRAWAudioFormat::Float32,
-                SampleRate,
-                NumChannels);
+                InSampleRate,
+                InNumChannels);
         };
 
     Audio::FAudioCaptureDeviceParams Params;
