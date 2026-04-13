@@ -125,6 +125,14 @@ public:
               meta = (ClampMin = "1", ClampMax = "2"))
     int32 PcmNumChannels = 1;
 
+    /** Number of interleaved float samples per OnGeneratePCMData fire
+     *  on the underlying streaming wave. 160 = 10 ms at 16 kHz mono,
+     *  a standard cadence for lip-sync / viseme systems. Set to 0 to
+     *  disable batching (one broadcast per audio-engine poll). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
+              meta = (ClampMin = "0", ClampMax = "16384"))
+    int32 NumSamplesPerChunk = 160;
+
     // =============================================================
     // Setup API
     // =============================================================

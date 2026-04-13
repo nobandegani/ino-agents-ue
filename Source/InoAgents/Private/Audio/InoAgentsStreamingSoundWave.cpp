@@ -357,8 +357,8 @@ void UInoAgentsStreamingSoundWave::PreAllocateAudioData(
             bool bOk = false;
             if (Self != nullptr && NumFloats > 0)
             {
-                FScopeLock Lock(&Self->DataGuard);
-                Self->PCMBuffer.Reserve(Self->PCMBuffer.Num() + NumFloats);
+                FScopeLock Lock(&Self->SharedPCM->Guard);
+                Self->SharedPCM->Data.Reserve(Self->SharedPCM->Data.Num() + NumFloats);
                 bOk = true;
             }
 
@@ -375,7 +375,7 @@ void UInoAgentsStreamingSoundWave::PreAllocateAudioData(
 
 void UInoAgentsStreamingSoundWave::SetStopSoundOnPlaybackFinish(bool bStop)
 {
-    FScopeLock Lock(&DataGuard);
+    FScopeLock Lock(&SharedPCM->Guard);
     bStopSoundOnPlaybackFinish = bStop;
     if (!bStop)
     {
@@ -407,11 +407,14 @@ void UInoAgentsStreamingSoundWave::ResetStreamingBuffer()
             // clean rolling buffer rather than mid-frame garbage.
             Self->Mp3State.Reset();
 
-            FScopeLock Lock(&Self->DataGuard);
-            Self->PCMBuffer.Reset();
-            Self->TotalFrames  = 0;
-            Self->PlayedFrames = 0;
-            Self->bPlaybackFinishedBroadcasted = false;
+            {
+                FScopeLock Lock(&Self->SharedPCM->Guard);
+                Self->SharedPCM->Data.Reset();
+                Self->SharedPCM->TotalFrames = 0;
+                Self->PlayedFrames = 0;
+                Self->bPlaybackFinishedBroadcasted = false;
+            }
+            Self->ResetVisualizationCarry();
         });
 }
 

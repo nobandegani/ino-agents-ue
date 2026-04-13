@@ -51,6 +51,7 @@ void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
         StreamingWave = UInoAgentsStreamingSoundWave::CreateStreamingSoundWave();
         StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
         StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
         AudioComp->SetSound(StreamingWave);
     }
 }
@@ -471,6 +472,7 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     {
         StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
         StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        StreamingWave->SetNumSamplesPerChunk(NumSamplesPerChunk);
         StreamingWave->OnPopulateAudioData.AddDynamic(
             this, &UInoAgentsLiteRtLmAgentComponent::HandleWavePopulateAudioData);
         StreamingWave->OnAudioPlaybackFinished.AddDynamic(

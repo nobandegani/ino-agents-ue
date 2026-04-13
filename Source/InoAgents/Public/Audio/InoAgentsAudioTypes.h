@@ -45,6 +45,41 @@ enum class EInoAgentsRAWAudioFormat : uint8
 };
 
 // =====================================================================
+// Audio header info (metadata snapshot)
+// =====================================================================
+
+/**
+ * Single-struct snapshot of a sound wave's current format + size.
+ * Populated by UInoAgentsImportedSoundWave::GetAudioHeaderInfo.
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoAgentsAudioHeaderInfo
+{
+    GENERATED_BODY()
+
+    /** Sample rate in Hz (e.g. 16000, 44100). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int32 SampleRate = 0;
+
+    /** Channel count (1 = mono, 2 = stereo). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int32 NumChannels = 0;
+
+    /** Duration in seconds of the currently-buffered audio. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    float DurationSeconds = 0.0f;
+
+    /** Complete frames currently in the PCM buffer. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int64 TotalFrames = 0;
+
+    /** Byte count of the PCM buffer (float32 interleaved, so
+     *  TotalFrames * NumChannels * 4). Useful for memory budgeting. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int64 PCMDataSizeBytes = 0;
+};
+
+// =====================================================================
 // Audio input device info (capture)
 // =====================================================================
 
