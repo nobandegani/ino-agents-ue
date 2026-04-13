@@ -3,11 +3,12 @@
 #include "LiteRtLm/LiteRtLmAgentComponent.h"
 
 #include "Audio/InoAgentsLiteRtLmDialogueQueue.h"
-#include "Audio/InoAgentsStreamingAudioComponent.h"
+#include "Audio/InoAgentsStreamingSoundWave.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
 #include "LiteRtLm/LiteRtLmSubsystem.h"
 
+#include "Components/AudioComponent.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -34,18 +35,23 @@ void UInoAgentsLiteRtLmAgentComponent::BeginPlay()
 {
     Super::BeginPlay();
 
-    // Create the audio component at runtime and attach to the owning
-    // actor's root. Using NewObject + RegisterComponent (not
-    // CreateDefaultSubobject) so it doesn't show as a duplicate in
-    // the details panel — the agent is an UActorComponent with no
-    // transform, the audio component is just an implementation detail.
+    // Create and attach the audio component + its streaming sound
+    // wave at runtime. Using NewObject + RegisterComponent (not
+    // CreateDefaultSubobject) so these don't show as duplicates in
+    // the details panel — the agent is a pure UActorComponent with
+    // no transform, the audio layer is an implementation detail.
     AActor* Owner = GetOwner();
     if (Owner != nullptr)
     {
-        AudioComp = NewObject<UInoAgentsStreamingAudioComponent>(Owner, TEXT("AgentStreamingAudio"));
-        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
+        AudioComp = NewObject<UAudioComponent>(Owner, TEXT("AgentAudio"));
+        AudioComp->bAutoActivate = false;
         AudioComp->SetupAttachment(Owner->GetRootComponent());
         AudioComp->RegisterComponent();
+
+        StreamingWave = UInoAgentsStreamingSoundWave::CreateStreamingSoundWave();
+        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
+        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        AudioComp->SetSound(StreamingWave);
     }
 }
 
@@ -64,10 +70,11 @@ void UInoAgentsLiteRtLmAgentComponent::EndPlay(EEndPlayReason::Type Reason)
 
     if (AudioComp != nullptr)
     {
-        AudioComp->StopAndReset();
+        AudioComp->Stop();
         AudioComp->DestroyComponent();
         AudioComp = nullptr;
     }
+    StreamingWave = nullptr;
 
     if (Conversation != nullptr)
     {
@@ -89,7 +96,6 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     const FElevenLabsDialogueRequest& InTtsRequestTemplate,
     int32 InPauseDurationMs,
     float InInterruptionDelaySec,
-    int32 InPreBufferMs,
     int32 InPcmSampleRate,
     int32 InPcmNumChannels)
 {
@@ -98,14 +104,13 @@ void UInoAgentsLiteRtLmAgentComponent::Initialize(
     TtsRequestTemplate     = InTtsRequestTemplate;
     PauseDurationMs        = FMath::Max(InPauseDurationMs, 0);
     InterruptionDelaySec   = FMath::Clamp(InInterruptionDelaySec, 0.0f, 5.0f);
-    PreBufferMs            = FMath::Clamp(InPreBufferMs, 0, 2000);
     PcmSampleRate          = FMath::Clamp(InPcmSampleRate, 8000, 192000);
     PcmNumChannels         = FMath::Clamp(InPcmNumChannels, 1, 2);
 
-    if (AudioComp != nullptr)
+    if (StreamingWave != nullptr)
     {
-        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
-        AudioComp->PreBufferMs = PreBufferMs;
+        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
+        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
     }
 
     UE_LOG(LogInoAgents, Log,
@@ -199,6 +204,9 @@ void UInoAgentsLiteRtLmAgentComponent::SendMessage(const FString& Text)
     {
         DialogueQueue->StopAndReset();
     }
+
+    // Each new message gets a fresh "first data → Talking" edge.
+    bTalkingLatched = false;
 
     // If the agent was talking, mark as interrupted. If there's a
     // delay configured, hold in Interrupted state for that duration
@@ -389,14 +397,26 @@ void UInoAgentsLiteRtLmAgentComponent::HandleToolCalled(
     OnToolCalled.Broadcast(ToolName, ArgumentsJson, ResultJson);
 }
 
-void UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay()
+void UInoAgentsLiteRtLmAgentComponent::HandleWavePopulateAudioData(
+    const TArray<float>& /*PopulatedAudioData*/)
 {
-    SetStatus(EInoAgentsAgentStatus::Talking);
+    // The streaming wave fires OnPopulateAudioData each time the queue
+    // appends a fresh chunk. Treat the first appearance after a
+    // SendMessage as the "audio is about to play" edge — that's when
+    // we flip from Thinking to Talking.
+    if (!bTalkingLatched)
+    {
+        bTalkingLatched = true;
+        SetStatus(EInoAgentsAgentStatus::Talking);
+    }
 }
 
 void UInoAgentsLiteRtLmAgentComponent::HandleAudioPlaybackFinished()
 {
-    // Audio component has fully drained — no more sound playing.
+    // Wave has fully drained — the queue set SetStopSoundOnPlaybackFinish
+    // when its last slot was dispatched, so this delegate firing is
+    // our authoritative "all audio played" signal.
+    bTalkingLatched = false;
     SetStatus(EInoAgentsAgentStatus::Idle);
     OnAudioFinished.Broadcast();
 }
@@ -444,15 +464,16 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     Conversation->OnToolCalled.AddDynamic(
         this, &UInoAgentsLiteRtLmAgentComponent::HandleToolCalled);
 
-    // Apply PCM format from config (handles the case where Initialize
-    // wasn't called and LoadModel uses details-panel defaults).
-    if (AudioComp != nullptr)
+    // Bind wave-level delegates for status transitions. The wave may
+    // have been re-created if the user tore down the actor and
+    // re-spawned; re-apply the PCM format each time.
+    if (StreamingWave != nullptr)
     {
-        AudioComp->SetPcmFormat(PcmSampleRate, PcmNumChannels);
-        AudioComp->PreBufferMs = PreBufferMs;
-        AudioComp->OnReadyToPlay.AddDynamic(
-            this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioReadyToPlay);
-        AudioComp->OnFinished.AddDynamic(
+        StreamingWave->SetInitialDesiredSampleRate(PcmSampleRate);
+        StreamingWave->SetInitialDesiredNumChannels(PcmNumChannels);
+        StreamingWave->OnPopulateAudioData.AddDynamic(
+            this, &UInoAgentsLiteRtLmAgentComponent::HandleWavePopulateAudioData);
+        StreamingWave->OnAudioPlaybackFinished.AddDynamic(
             this, &UInoAgentsLiteRtLmAgentComponent::HandleAudioPlaybackFinished);
     }
 
@@ -461,6 +482,7 @@ void UInoAgentsLiteRtLmAgentComponent::CreateConversationAndQueue()
     DialogueQueue->Initialize(
         this,
         AudioComp,
+        StreamingWave,
         Conversation,
         VoiceId,
         TtsRequestTemplate,

@@ -6,74 +6,157 @@
 
 #include "InoAgentsAudioTypes.generated.h"
 
+// =====================================================================
+// RAW PCM sample encoding
+// =====================================================================
+
 /**
- * Audio encoding (bit depth / compression) passed to
- * UInoAgentsStreamingAudioComponent::FeedAudioBytes.
+ * How each sample in a RAW PCM byte buffer is encoded.
  *
- * IMPORTANT: this enum only describes HOW each sample is encoded in the
- * byte stream. It does NOT cover sample rate or channel count — those
- * are separate concepts:
+ * Only describes the per-sample numeric type. Sample rate and channel
+ * count are separate parameters on AppendAudioDataFromRAW — RAW PCM
+ * bytes don't carry that metadata.
  *
- *   - Bit depth / encoding      -> this enum   (PcmInt16, PcmFloat32, Mp3)
- *   - Sample rate (Hz)          -> SetPcmFormat(rate, channels)
- *   - Channel count (mono / stereo) -> SetPcmFormat(rate, channels)
- *
- * For PCM streams the caller must configure the sample rate + channel
- * count via SetPcmFormat BEFORE the first FeedAudioBytes because raw
- * PCM bytes don't carry that metadata. For MP3 the component auto-
- * detects both from the first decoded frame header and SetPcmFormat
- * is ignored.
- *
- * Obsolete / pro-audio-only formats (int8, int24, int32) are
- * deliberately NOT exposed. If you genuinely need them, convert to
- * PcmInt16 or PcmFloat32 on your side before calling FeedAudioBytes.
+ * Obsolete / pro-audio-only formats (int8, int24, uint16, uint32) are
+ * not exposed. Convert to Int16 or Float32 on your side if you need
+ * them.
  */
 UENUM(BlueprintType)
-enum class EInoAgentsAudioFormat : uint8
+enum class EInoAgentsRAWAudioFormat : uint8
 {
-    /** Signed 16-bit integer PCM, little-endian, interleaved for stereo.
-     *  Two bytes per sample per channel. This is the universal standard
-     *  for runtime audio byte streams and the native input format for
-     *  USoundWaveProcedural — no conversion happens, the bytes queue
-     *  straight into the audio engine. */
-    PcmInt16            UMETA(DisplayName = "PCM 16-bit signed (int16 LE)"),
+    /** Signed 16-bit integer, little-endian, interleaved.
+     *  Universal standard for TTS / voice streams. 2 bytes per sample
+     *  per channel. */
+    Int16       UMETA(DisplayName = "Int16 (signed 16-bit)"),
 
-    /** IEEE 754 single-precision float PCM, interleaved for stereo.
-     *  Four bytes per sample per channel. Samples are expected to be
-     *  in the [-1.0, +1.0] range; out-of-range samples are clamped.
-     *  Converted to int16 internally before being queued. Common
-     *  output format for DSP pipelines and some TTS libraries. */
-    PcmFloat32          UMETA(DisplayName = "PCM 32-bit float (-1.0 to +1.0)"),
+    /** Signed 32-bit integer, little-endian, interleaved. 4 bytes per
+     *  sample per channel. Uncommon — most pipelines use Int16 or
+     *  Float32. */
+    Int32       UMETA(DisplayName = "Int32 (signed 32-bit)"),
 
-    /** MPEG-1 / 2 / 2.5 Layer III. Sample rate and channel count are
-     *  auto-detected from the first MP3 frame header — SetPcmFormat
-     *  is ignored for MP3 streams. */
-    Mp3                 UMETA(DisplayName = "MP3"),
+    /** Unsigned 8-bit, centered at 128, interleaved. 1 byte per sample
+     *  per channel. Low-bandwidth / legacy format. */
+    UInt8       UMETA(DisplayName = "UInt8 (unsigned 8-bit)"),
+
+    /** IEEE 754 single-precision float, interleaved. Samples in
+     *  [-1.0, +1.0]; out-of-range clamped. 4 bytes per sample per
+     *  channel. Native format for USoundWaveProcedural buffers. */
+    Float32     UMETA(DisplayName = "Float32 (-1.0 to +1.0)"),
 };
 
-/** Fires once per stream when enough decoded PCM is queued for playback
- *  to start. For PCM streams this is the first FeedAudioBytes with a
- *  non-empty buffer; for MP3 streams this is the first successfully-
- *  decoded frame. */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsAudioReadyToPlay);
+// =====================================================================
+// Audio input device info (capture)
+// =====================================================================
 
-/** Fires once per stream after the caller has called FinalizeStream AND
- *  USoundWaveProcedural's queue has fully drained. Not mutually exclusive
- *  with StopAndReset — StopAndReset does NOT fire this delegate. */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsAudioFinished);
+/**
+ * One entry in the list of available audio-input devices.
+ * Populated by UInoAgentsCapturableSoundWave::GetAvailableAudioInputDevices.
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoAgentsAudioInputDeviceInfo
+{
+    GENERATED_BODY()
 
-/** Fires once per stream on any failure: MP3 decode error, malformed
- *  input, or USoundWaveProcedural misconfiguration. After OnError fires
- *  the stream is considered finished — subsequent FeedAudioBytes calls
- *  start a new stream. */
+    /** Human-readable device name shown in system audio settings. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    FString DeviceName;
+
+    /** Opaque platform device identifier. Pass this to StartCapture. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    FString DeviceId;
+
+    /** Native channel count reported by the OS (1 = mono, 2 = stereo). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int32 InputChannels = 0;
+
+    /** Device's preferred sample rate (Hz). 0 = unknown. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    int32 PreferredSampleRate = 0;
+
+    /** True if the device reports hardware acoustic-echo cancellation
+     *  is enabled. Informational only — we don't toggle it. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Audio")
+    bool bSupportsHardwareAEC = false;
+};
+
+// =====================================================================
+// Delegates — dual form (Native + Dynamic) for every public callback
+// =====================================================================
+
+// ---- OnGeneratePCMData -----------------------------------------------
+// Fires during playback with the actual PCM samples the audio engine
+// is producing, as normalized floats [-1.0, +1.0]. Useful for waveform
+// visualization, lip-sync, VU metering. Runs on the audio render thread
+// internally but broadcasts are marshaled to the game thread.
+DECLARE_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsGeneratePCMDataNative,
+    const TArray<float>&);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsGeneratePCMData,
+    const TArray<float>&, PCMData);
+
+// ---- OnPopulateAudioData ---------------------------------------------
+// Fires when new PCM data is appended to the wave's buffer (via
+// AppendAudioDataFromRAW / AppendAudioDataFromMP3 / capture). Payload
+// is the newly-appended samples as float32. Use for real-time analysis
+// of incoming audio (e.g. waveform of mic input before it plays).
+DECLARE_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsPopulateAudioDataNative,
+    const TArray<float>&);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsPopulateAudioData,
+    const TArray<float>&, PopulatedAudioData);
+
+// ---- OnPopulateAudioState --------------------------------------------
+// Same trigger as OnPopulateAudioData but with no payload — cheaper for
+// listeners that only need to know "new data landed" and will read the
+// buffer themselves via GetPCMBuffer.
+DECLARE_MULTICAST_DELEGATE(FOnInoAgentsPopulateAudioStateNative);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsPopulateAudioState);
+
+// ---- OnAudioPlaybackFinished -----------------------------------------
+// Fires once per stream after the wave's PCM buffer has been fully
+// played through. Only fires when SetStopSoundOnPlaybackFinish(true) —
+// otherwise the wave plays silence indefinitely waiting for more data.
+DECLARE_MULTICAST_DELEGATE(FOnInoAgentsAudioPlaybackFinishedNative);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsAudioPlaybackFinished);
+
+// ---- OnAudioError ----------------------------------------------------
+// Fires on decode failure, capture failure, or other non-recoverable
+// errors. The wave remains valid; the caller decides whether to retry,
+// reset, or abandon.
+DECLARE_MULTICAST_DELEGATE_OneParam(
+    FOnInoAgentsAudioErrorNative,
+    const FString&);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
     FOnInoAgentsAudioError,
     FString, ErrorMessage);
 
-/** Fires during audio playback with PCM sample data as normalized
- *  floats (-1.0 to 1.0). Use for visualizations (waveform, lip sync,
- *  VU meter, etc.). Batch size controlled by NumVisualizationSamples
- *  on the audio component. */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
-    FOnInoAgentsGeneratePCMData,
-    const TArray<float>&, PCMData);
+// ---- OnPreAllocateAudioDataResult ------------------------------------
+// Single-shot callback from PreAllocateAudioData. Not multicast — it's
+// a completion notification for a specific call, not an event stream.
+DECLARE_DELEGATE_OneParam(
+    FOnInoAgentsPreAllocateAudioDataResultNative,
+    bool /*bSucceeded*/);
+DECLARE_DYNAMIC_DELEGATE_OneParam(
+    FOnInoAgentsPreAllocateAudioDataResult,
+    bool, bSucceeded);
+
+// ---- OnGetAvailableAudioInputDevicesResult ---------------------------
+// Single-shot callback from the static device-enumeration helper on
+// UInoAgentsCapturableSoundWave. Not multicast — device enumeration
+// is a one-shot query.
+DECLARE_DELEGATE_OneParam(
+    FOnInoAgentsGetAvailableAudioInputDevicesResultNative,
+    const TArray<FInoAgentsAudioInputDeviceInfo>&);
+DECLARE_DYNAMIC_DELEGATE_OneParam(
+    FOnInoAgentsGetAvailableAudioInputDevicesResult,
+    const TArray<FInoAgentsAudioInputDeviceInfo>&, AvailableDevices);
+
+// ---- OnCaptureStarted / OnCaptureStopped -----------------------------
+// Fire when a capture stream opens / closes on UInoAgentsCapturableSoundWave.
+DECLARE_MULTICAST_DELEGATE(FOnInoAgentsCaptureStartedNative);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsCaptureStarted);
+
+DECLARE_MULTICAST_DELEGATE(FOnInoAgentsCaptureStoppedNative);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInoAgentsCaptureStopped);

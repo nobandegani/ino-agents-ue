@@ -2,11 +2,12 @@
 
 #include "Audio/InoAgentsLiteRtLmDialogueQueue.h"
 
-#include "Audio/InoAgentsStreamingAudioComponent.h"
+#include "Audio/InoAgentsStreamingSoundWave.h"
 #include "ElevenLabs/ElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
 #include "LiteRtLm/LiteRtLmConversation.h"
 
+#include "Components/AudioComponent.h"
 #include "Containers/Ticker.h"
 
 // ======================================================================
@@ -45,9 +46,16 @@ void UInoAgentsLiteRtLmDialogueSlotObserver::HandleError(FString ErrorMessage)
 
 namespace
 {
+    /**
+     * Translate an ElevenLabs output format into the feed path used
+     * on the streaming wave. MP3 formats take the
+     * AppendAudioDataFromMP3 path (format auto-detected from the first
+     * decoded frame); RAW PCM formats take the AppendAudioDataFromRAW
+     * path with Int16 samples at the stated sample rate.
+     */
     void DeriveAudioFormat(
         EElevenLabsOutputFormat ElevenLabsFmt,
-        EInoAgentsAudioFormat&  OutFeedFormat,
+        bool&                   OutIsMP3,
         int32&                  OutPcmSampleRate)
     {
         switch (ElevenLabsFmt)
@@ -55,27 +63,27 @@ namespace
             case EElevenLabsOutputFormat::Mp3_44100_128:
             case EElevenLabsOutputFormat::Mp3_44100_64:
             case EElevenLabsOutputFormat::Mp3_22050_32:
-                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
+                OutIsMP3         = true;
                 OutPcmSampleRate = 0;
                 return;
 
             case EElevenLabsOutputFormat::Pcm_16000:
-                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutIsMP3         = false;
                 OutPcmSampleRate = 16000;
                 return;
 
             case EElevenLabsOutputFormat::Pcm_24000:
-                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutIsMP3         = false;
                 OutPcmSampleRate = 24000;
                 return;
 
             case EElevenLabsOutputFormat::Pcm_44100:
-                OutFeedFormat    = EInoAgentsAudioFormat::PcmInt16;
+                OutIsMP3         = false;
                 OutPcmSampleRate = 44100;
                 return;
 
             default:
-                OutFeedFormat    = EInoAgentsAudioFormat::Mp3;
+                OutIsMP3         = true;
                 OutPcmSampleRate = 0;
                 return;
         }
@@ -88,7 +96,8 @@ namespace
 
 void UInoAgentsLiteRtLmDialogueQueue::Initialize(
     UObject*                             WorldContextObject,
-    UInoAgentsStreamingAudioComponent*   InAudioComponent,
+    UAudioComponent*                     InAudioComponent,
+    UInoAgentsStreamingSoundWave*        InStreamingWave,
     ULiteRtLmConversation*               InConversation,
     const FString&                       InDefaultVoiceId,
     const FElevenLabsDialogueRequest&    InRequestTemplate,
@@ -99,17 +108,23 @@ void UInoAgentsLiteRtLmDialogueQueue::Initialize(
 
     WorldContextWeak        = WorldContextObject;
     AudioComponent          = InAudioComponent;
+    StreamingWave           = InStreamingWave;
     DefaultVoiceId          = InDefaultVoiceId;
     RequestTemplate         = InRequestTemplate;
     DefaultPauseDurationMs  = FMath::Max(InDefaultPauseDurationMs, 0);
 
-    // Derive audio feed format from the ElevenLabs output format.
-    int32 PcmRate = 0;
-    DeriveAudioFormat(RequestTemplate.OutputFormat, DerivedAudioFormat, PcmRate);
+    // Derive audio feed format from the ElevenLabs output format and
+    // pre-configure the wave when it's a RAW PCM format — MP3 auto-
+    // detects from the first frame so no up-front config is needed.
+    DerivedNumChannels = 1;
+    DeriveAudioFormat(RequestTemplate.OutputFormat,
+                      bDerivedFormatIsMP3,
+                      DerivedSampleRate);
 
-    if (DerivedAudioFormat == EInoAgentsAudioFormat::PcmInt16 && AudioComponent != nullptr)
+    if (!bDerivedFormatIsMP3 && StreamingWave != nullptr)
     {
-        AudioComponent->SetPcmFormat(PcmRate, /*NumChannels=*/1);
+        StreamingWave->SetInitialDesiredSampleRate(DerivedSampleRate);
+        StreamingWave->SetInitialDesiredNumChannels(DerivedNumChannels);
     }
 
     // Bind to the conversation's OnSentence and OnNewLine.
@@ -124,11 +139,12 @@ void UInoAgentsLiteRtLmDialogueQueue::Initialize(
 
     UE_LOG(LogInoAgents, Log,
            TEXT("UInoAgentsLiteRtLmDialogueQueue: initialized (voice=%s, model=%s, "
-                "outputFmt=%d, audioFeedFmt=%d, pauseMs=%d, conversation=%s)"),
+                "outputFmt=%d, feedIsMP3=%d, pcmRate=%d, pauseMs=%d, conversation=%s)"),
            *DefaultVoiceId,
            *RequestTemplate.ModelId,
            static_cast<int32>(RequestTemplate.OutputFormat),
-           static_cast<int32>(DerivedAudioFormat),
+           bDerivedFormatIsMP3 ? 1 : 0,
+           DerivedSampleRate,
            DefaultPauseDurationMs,
            InConversation ? *InConversation->GetName() : TEXT("none"));
 }
@@ -159,10 +175,21 @@ void UInoAgentsLiteRtLmDialogueQueue::Clear()
     bCurrentSlotStreaming  = false;
     bPauseTimerPending    = false;
 
-    if (AudioComponent != nullptr)
+    // Reset the wave's buffer so stale audio from the prior cycle
+    // doesn't leak into the next one. Turn the drain flag off so a
+    // future cycle doesn't spuriously fire OnAudioPlaybackFinished
+    // before any real data lands.
+    if (StreamingWave != nullptr)
     {
-        AudioComponent->StopAndReset();
+        StreamingWave->SetStopSoundOnPlaybackFinish(false);
+        StreamingWave->ResetStreamingBuffer();
     }
+
+    if (AudioComponent != nullptr && bPlaybackStarted)
+    {
+        AudioComponent->Stop();
+    }
+    bPlaybackStarted = false;
 }
 
 void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
@@ -182,10 +209,17 @@ void UInoAgentsLiteRtLmDialogueQueue::StopAndReset()
     bCurrentSlotStreaming  = false;
     bPauseTimerPending    = false;
 
-    if (AudioComponent != nullptr)
+    if (StreamingWave != nullptr)
     {
-        AudioComponent->StopAndReset();
+        StreamingWave->SetStopSoundOnPlaybackFinish(false);
+        StreamingWave->ResetStreamingBuffer();
     }
+
+    if (AudioComponent != nullptr && bPlaybackStarted)
+    {
+        AudioComponent->Stop();
+    }
+    bPlaybackStarted = false;
 }
 
 // ======================================================================
@@ -303,6 +337,43 @@ void UInoAgentsLiteRtLmDialogueQueue::EnqueuePauseInternal()
 }
 
 // ======================================================================
+// Wave feed helpers
+// ======================================================================
+
+void UInoAgentsLiteRtLmDialogueQueue::FeedBytesToWave(const TArray<uint8>& Bytes)
+{
+    if (StreamingWave == nullptr || Bytes.Num() == 0)
+    {
+        return;
+    }
+
+    EnsurePlaybackStarted();
+
+    if (bDerivedFormatIsMP3)
+    {
+        StreamingWave->AppendAudioDataFromMP3(Bytes);
+    }
+    else
+    {
+        StreamingWave->AppendAudioDataFromRAW(
+            Bytes,
+            EInoAgentsRAWAudioFormat::Int16,
+            DerivedSampleRate,
+            DerivedNumChannels);
+    }
+}
+
+void UInoAgentsLiteRtLmDialogueQueue::EnsurePlaybackStarted()
+{
+    if (bPlaybackStarted || AudioComponent == nullptr)
+    {
+        return;
+    }
+    AudioComponent->Play();
+    bPlaybackStarted = true;
+}
+
+// ======================================================================
 // Slot callbacks
 // ======================================================================
 
@@ -316,11 +387,8 @@ void UInoAgentsLiteRtLmDialogueQueue::OnSlotChunk(
 
     if (SlotIndex == CurrentPlayIndex)
     {
-        if (AudioComponent != nullptr)
-        {
-            AudioComponent->FeedAudioBytes(Bytes, DerivedAudioFormat);
-            bCurrentSlotStreaming = true;
-        }
+        FeedBytesToWave(Bytes);
+        bCurrentSlotStreaming = true;
     }
     else
     {
@@ -421,9 +489,9 @@ void UInoAgentsLiteRtLmDialogueQueue::DrainReadySlots()
         }
 
         // --- Audio slot: flush buffered bytes if any -----------------
-        if (!Slot.bErrored && Slot.BufferedBytes.Num() > 0 && AudioComponent != nullptr)
+        if (!Slot.bErrored && Slot.BufferedBytes.Num() > 0)
         {
-            AudioComponent->FeedAudioBytes(Slot.BufferedBytes, DerivedAudioFormat);
+            FeedBytesToWave(Slot.BufferedBytes);
         }
 
         Slot.BufferedBytes.Reset();
@@ -437,9 +505,12 @@ void UInoAgentsLiteRtLmDialogueQueue::DrainReadySlots()
 
     if (CurrentPlayIndex >= Slots.Num() && Slots.Num() > 0)
     {
-        if (AudioComponent != nullptr)
+        // All slots dispatched — flip the wave into drain mode so it
+        // emits OnAudioPlaybackFinished when the buffer empties, and
+        // the component naturally stops after the last sample plays.
+        if (StreamingWave != nullptr)
         {
-            AudioComponent->FinalizeStream();
+            StreamingWave->SetStopSoundOnPlaybackFinish(true);
         }
 
         UE_LOG(LogInoAgents, Log,

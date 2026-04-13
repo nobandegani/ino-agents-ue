@@ -11,7 +11,8 @@
 
 #include "LiteRtLmAgentComponent.generated.h"
 
-class UInoAgentsStreamingAudioComponent;
+class UAudioComponent;
+class UInoAgentsStreamingSoundWave;
 class UInoAgentsLiteRtLmDialogueQueue;
 class ULiteRtLmConversation;
 class ULiteRtLmSubsystem;
@@ -113,13 +114,6 @@ public:
               meta = (ClampMin = "0.0", ClampMax = "5.0"))
     float InterruptionDelaySec = 0.0f;
 
-    /** How many ms of audio to buffer before starting playback.
-     *  Higher = smoother start, lower = faster first word.
-     *  Set via Initialize or directly on the child audio component. */
-    UPROPERTY(BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
-              meta = (ClampMin = "0", ClampMax = "2000"))
-    int32 PreBufferMs = 250;
-
     /** PCM sample rate for the audio component. Must match the
      *  ElevenLabs output format (e.g. 16000 for Pcm_16000). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Agent|Audio",
@@ -150,7 +144,6 @@ public:
         const FElevenLabsDialogueRequest& InTtsRequestTemplate,
         int32 InPauseDurationMs,
         float InInterruptionDelaySec,
-        int32 InPreBufferMs,
         int32 InPcmSampleRate,
         int32 InPcmNumChannels);
 
@@ -233,7 +226,7 @@ public:
 
     /** Fires when all queued TTS audio has finished playing. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
-    FOnInoAgentsAudioFinished OnAudioFinished;
+    FOnInoAgentsAudioPlaybackFinished OnAudioFinished;
 
     /** Fires during model download. */
     UPROPERTY(BlueprintAssignable, Category = "InoAgents|Agent")
@@ -281,7 +274,14 @@ public:
 
     /** Access the child audio component. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
-    UInoAgentsStreamingAudioComponent* GetAudioComponent() const { return AudioComp; }
+    UAudioComponent* GetAudioComponent() const { return AudioComp; }
+
+    /** Access the streaming sound wave feeding the audio component.
+     *  Bind to its OnGeneratePCMData for playback visualization,
+     *  OnPopulateAudioData for incoming-data analysis, or
+     *  OnAudioPlaybackFinished for a true "audio ended" signal. */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
+    UInoAgentsStreamingSoundWave* GetStreamingSoundWave() const { return StreamingWave; }
 
     /** Access the internal dialogue queue. */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Agent")
@@ -294,7 +294,10 @@ public:
 
 private:
     UPROPERTY()
-    TObjectPtr<UInoAgentsStreamingAudioComponent> AudioComp;
+    TObjectPtr<UAudioComponent> AudioComp;
+
+    UPROPERTY()
+    TObjectPtr<UInoAgentsStreamingSoundWave> StreamingWave;
 
     UPROPERTY()
     TObjectPtr<ULiteRtLmConversation> Conversation;
@@ -324,9 +327,15 @@ private:
     UFUNCTION() void HandleComplete(FString FullText);
     UFUNCTION() void HandleError(FString ErrorMessage);
     UFUNCTION() void HandleToolCalled(FName ToolName, FString ArgumentsJson, FString ResultJson);
-    UFUNCTION() void HandleAudioReadyToPlay();
+    UFUNCTION() void HandleWavePopulateAudioData(const TArray<float>& PopulatedAudioData);
     UFUNCTION() void HandleAudioPlaybackFinished();
     UFUNCTION() void HandleDownloadProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
+
+    /** Latched so the first "data appeared on the wave" trip after a
+     *  SendMessage is what transitions us from Thinking to Talking.
+     *  Cleared on SendMessage + after OnAudioPlaybackFinished so the
+     *  next cycle sees it fresh. */
+    bool bTalkingLatched = false;
 
     void CreateConversationAndQueue();
 };

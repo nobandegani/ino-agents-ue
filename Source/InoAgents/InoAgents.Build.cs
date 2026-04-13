@@ -43,12 +43,12 @@ public class InoAgents : ModuleRules
 				// private headers directly.
 				Path.Combine(ModuleDirectory, "Private", "ElevenLabs"),
 
-				// Subdirectory of Private/ that holds the streaming audio
-				// component implementation plus its MP3 decoder wrapper.
-				// Added so InoAgentsStreamingAudioComponent.cpp can
-				// #include "InoAgentsAudioMp3Decoder.h" without a relative
-				// path, matching the convention used for every other
-				// private subtree.
+				// Subdirectory of Private/ that holds the sound-wave
+				// implementations plus the MP3 decoder wrapper. Added so
+				// InoAgentsStreamingSoundWave.cpp can #include
+				// "InoAgentsAudioMp3Decoder.h" without a relative path,
+				// matching the convention used for every other private
+				// subtree.
 				Path.Combine(ModuleDirectory, "Private", "Audio"),
 
 				// Third-party single-header libraries (currently: minimp3).
@@ -89,9 +89,17 @@ public class InoAgents : ModuleRules
 				"Slate",
 				"SlateCore",
 
-				// UInoAgentsProceduralWave subclasses USoundWaveProcedural which
+				// UInoAgentsImportedSoundWave subclasses USoundWaveProcedural which
 				// inherits IAudioProxyDataFactory from AudioExtensions.
 				"AudioExtensions",
+
+				// Audio::FResampler for sample-rate conversion inside the
+				// streaming wave's RAW append path.
+				"SignalProcessing",
+
+				// FAudioCapture base class + FAudioCaptureDeviceInfo struct —
+				// used by UInoAgentsCapturableSoundWave.
+				"AudioCaptureCore",
 
 				// Required for EKeys::Enter / EKeys::Escape constants used by the
 				// chat input's Enter-to-send and ESC-to-dismiss handling. Forgetting
@@ -99,6 +107,17 @@ public class InoAgents : ModuleRules
 				"InputCore",
 			}
 			);
+
+		// Platform-specific capture backend. FAudioCapture is an abstract
+		// interface — the concrete implementation differs per platform.
+		// Only Windows + Mac use AudioCaptureRtAudio; iOS/Android have
+		// their own backends (not wired up until those platforms are
+		// supported).
+		if (Target.Platform == UnrealTargetPlatform.Win64
+		 || Target.Platform == UnrealTargetPlatform.Mac)
+		{
+			PrivateDependencyModuleNames.Add("AudioCaptureRtAudio");
+		}
 
 		// FEditorDelegates::PrePIEEnded is editor-only — used by the chat panel's
 		// Show/Hide console commands to tear the panel down BEFORE the GameViewport
