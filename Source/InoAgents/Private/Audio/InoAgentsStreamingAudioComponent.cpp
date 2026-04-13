@@ -246,16 +246,30 @@ void UInoAgentsStreamingAudioComponent::TickComponent(
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    // Poll for "stream finalized AND queue fully drained". Cheap —
-    // one integer load per frame. Once the condition fires we
-    // disable our own tick so idle components cost nothing.
-    if (bStreamFinalized && ProceduralWave != nullptr)
+    // Two-phase drain detection:
+    //   Phase 1: Queue empty → call Stop() to tell the audio engine
+    //            to finish playing remaining AudioBuffer samples and
+    //            stop calling GeneratePCMData. Set bDrainStopIssued.
+    //   Phase 2: Audio engine has stopped (IsPlaying() == false) →
+    //            fire OnFinished and reset.
+    //
+    // This ensures we don't fire OnFinished while the audio engine
+    // still has samples in its internal buffer being played.
+    if (bStreamFinalized && bPlaybackStarted && ProceduralWave != nullptr)
     {
-        const int32 Available = ProceduralWave->GetAvailableAudioByteCount();
-        if (Available == 0)
+        if (!bDrainStopIssued)
+        {
+            const int32 Available = ProceduralWave->GetAvailableAudioByteCount();
+            if (Available == 0)
+            {
+                Stop();
+                bDrainStopIssued = true;
+            }
+        }
+        else if (!IsPlaying())
         {
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("UInoAgentsStreamingAudioComponent: queue drained; firing OnFinished"));
+                   TEXT("UInoAgentsStreamingAudioComponent: playback finished; firing OnFinished"));
 
             const bool bWasActive = bStreamActive;
             ResetInternalState();
@@ -422,14 +436,10 @@ void UInoAgentsStreamingAudioComponent::ResetInternalState()
     bStreamActive        = false;
     bStreamFinalized     = false;
     bPlaybackStarted     = false;
+    bDrainStopIssued     = false;
     PreBufferTargetBytes = 0;
     PcmPendingBytes.Reset();
     CurrentFormat        = EInoAgentsAudioFormat::PcmInt16;
-
-    // Stop the audio engine so it stops calling GeneratePCMData.
-    // Without this, the engine keeps pulling zero-filled samples
-    // (underrun protection) indefinitely after the queue drains.
-    Stop();
 
     // Drop the decoder state so the next stream starts fresh. A
     // brand-new mp3dec_t is cheap (just a zero-init of a small

@@ -220,6 +220,7 @@ private:
     bool bStreamActive     = false;
     bool bStreamFinalized  = false;
     bool bPlaybackStarted  = false;
+    bool bDrainStopIssued  = false;
 
     /**
      * Pre-buffer target in bytes. Computed from
