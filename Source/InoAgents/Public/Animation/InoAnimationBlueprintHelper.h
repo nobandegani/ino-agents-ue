@@ -79,6 +79,30 @@ public:
      *                           ~35 degrees. Clamped to [1, 90].
      * @return                   Eight blend shape weights, all in [0, 1].
      */
+    /**
+     * Calculate ARKit-style eye look blend shape weights from a
+     * world-space look-at target, with optional frame-rate-independent
+     * smoothing.
+     *
+     * Pass the previous frame's output as PreviousWeights and a
+     * non-zero InterpSpeed to get smooth eye movement. On the first
+     * frame (or when you want instant snap), pass a default/zeroed
+     * FInoEyeLookWeights and InterpSpeed = 0.
+     *
+     * @param LookAtTarget       World-space point the eyes should look at.
+     * @param LeftEyeWorldPos    World position of the left eye socket.
+     * @param RightEyeWorldPos   World position of the right eye socket.
+     * @param HeadForwardVector  Head's forward direction (neutral gaze).
+     * @param HeadUpVector       Head's up direction.
+     * @param DeltaTime          Frame delta time (seconds).
+     * @param PreviousWeights    Output from the previous frame, used
+     *                           for interpolation.
+     * @param MaxAngleDegrees    Full-deflection angle. Default 35.
+     * @param InterpSpeed        Interpolation speed (units/sec). Higher
+     *                           = faster tracking. 0 = instant snap.
+     *                           Good starting value: 8–15.
+     * @return                   Eight blend shape weights, all in [0, 1].
+     */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Animation",
               meta = (DisplayName = "Calculate Eye Look Weights"))
     static FInoEyeLookWeights CalculateEyeLookWeights(
@@ -87,5 +111,8 @@ public:
         FVector RightEyeWorldPos,
         FVector HeadForwardVector,
         FVector HeadUpVector,
-        float MaxAngleDegrees = 35.f);
+        float DeltaTime,
+        const FInoEyeLookWeights& PreviousWeights,
+        float MaxAngleDegrees = 35.f,
+        float InterpSpeed = 10.f);
 };

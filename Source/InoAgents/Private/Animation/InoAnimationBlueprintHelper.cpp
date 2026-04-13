@@ -38,9 +38,12 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
     FVector RightEyeWorldPos,
     FVector HeadForwardVector,
     FVector HeadUpVector,
-    float MaxAngleDegrees)
+    float DeltaTime,
+    const FInoEyeLookWeights& PreviousWeights,
+    float MaxAngleDegrees,
+    float InterpSpeed)
 {
-    FInoEyeLookWeights Result;
+    FInoEyeLookWeights Target;
 
     MaxAngleDegrees = FMath::Clamp(MaxAngleDegrees, 1.f, 90.f);
     const float MaxAngleRad = FMath::DegreesToRadians(MaxAngleDegrees);
@@ -49,7 +52,7 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
     const FVector Forward = HeadForwardVector.GetSafeNormal();
     if (Forward.IsNearlyZero())
     {
-        return Result;
+        return Target;
     }
 
     FVector Up = HeadUpVector.GetSafeNormal();
@@ -75,14 +78,14 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
             const float PitchWeight = FMath::Clamp(FMath::Abs(Pitch) / MaxAngleRad, 0.f, 1.f);
 
             if (Yaw < 0.f)
-                Result.EyeLookLeftL  = YawWeight;
+                Target.EyeLookLeftL  = YawWeight;
             else
-                Result.EyeLookRightL = YawWeight;
+                Target.EyeLookRightL = YawWeight;
 
             if (Pitch > 0.f)
-                Result.EyeLookUpL   = PitchWeight;
+                Target.EyeLookUpL   = PitchWeight;
             else
-                Result.EyeLookDownL = PitchWeight;
+                Target.EyeLookDownL = PitchWeight;
         }
     }
 
@@ -98,16 +101,33 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
             const float PitchWeight = FMath::Clamp(FMath::Abs(Pitch) / MaxAngleRad, 0.f, 1.f);
 
             if (Yaw < 0.f)
-                Result.EyeLookLeftR  = YawWeight;
+                Target.EyeLookLeftR  = YawWeight;
             else
-                Result.EyeLookRightR = YawWeight;
+                Target.EyeLookRightR = YawWeight;
 
             if (Pitch > 0.f)
-                Result.EyeLookUpR   = PitchWeight;
+                Target.EyeLookUpR   = PitchWeight;
             else
-                Result.EyeLookDownR = PitchWeight;
+                Target.EyeLookDownR = PitchWeight;
         }
     }
 
+    // Interpolate from previous weights toward the target for smooth motion.
+    if (InterpSpeed <= 0.f || DeltaTime <= 0.f)
+    {
+        return Target;
+    }
+
+    const float Alpha = FMath::Clamp(DeltaTime * InterpSpeed, 0.f, 1.f);
+
+    FInoEyeLookWeights Result;
+    Result.EyeLookUpL    = FMath::Lerp(PreviousWeights.EyeLookUpL,    Target.EyeLookUpL,    Alpha);
+    Result.EyeLookDownL  = FMath::Lerp(PreviousWeights.EyeLookDownL,  Target.EyeLookDownL,  Alpha);
+    Result.EyeLookLeftL  = FMath::Lerp(PreviousWeights.EyeLookLeftL,  Target.EyeLookLeftL,  Alpha);
+    Result.EyeLookRightL = FMath::Lerp(PreviousWeights.EyeLookRightL, Target.EyeLookRightL, Alpha);
+    Result.EyeLookUpR    = FMath::Lerp(PreviousWeights.EyeLookUpR,    Target.EyeLookUpR,    Alpha);
+    Result.EyeLookDownR  = FMath::Lerp(PreviousWeights.EyeLookDownR,  Target.EyeLookDownR,  Alpha);
+    Result.EyeLookLeftR  = FMath::Lerp(PreviousWeights.EyeLookLeftR,  Target.EyeLookLeftR,  Alpha);
+    Result.EyeLookRightR = FMath::Lerp(PreviousWeights.EyeLookRightR, Target.EyeLookRightR, Alpha);
     return Result;
 }
