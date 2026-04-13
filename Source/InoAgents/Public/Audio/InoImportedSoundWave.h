@@ -71,6 +71,29 @@ public:
     virtual void  BeginDestroy() override;
     //~ End USoundWaveProcedural interface
 
+    //~ USoundWave interface
+    /**
+     * Per-tick parse, called by the audio engine on the audio thread
+     * for each FActiveSound playing this wave. We override to ACTIVELY
+     * stop the active sound when:
+     *   1. bActive has been flipped false (force-stop / teardown), or
+     *   2. The buffer has fully drained AND
+     *      bStopSoundOnPlaybackFinish is true.
+     *
+     * The active stop is what cleanly drains the audio mixer's source-
+     * command queue on PIE shutdown — without it, returning 0 from
+     * GeneratePCMData alone leaves the source in limbo and the mixer
+     * times out waiting to flush its commands.
+     *
+     * Pattern lifted from RuntimeAudio's UImportedSoundWave::Parse.
+     */
+    virtual void Parse(class FAudioDevice* AudioDevice,
+                       const UPTRINT NodeWaveInstanceHash,
+                       struct FActiveSound& ActiveSound,
+                       const struct FSoundParseParameters& ParseParams,
+                       TArray<struct FWaveInstance*>& WaveInstances) override;
+    //~ End USoundWave interface
+
     // =================================================================
     // Factory
     // =================================================================

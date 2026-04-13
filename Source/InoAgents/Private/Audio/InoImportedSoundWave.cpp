@@ -5,6 +5,8 @@
 #include "InoAgentsLog.h"
 
 #include "Async/Async.h"
+#include "AudioDevice.h"
+#include "ActiveSound.h"
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -29,16 +31,76 @@ UInoImportedSoundWave::UInoImportedSoundWave(const FObjectInitializer& ObjectIni
 
 void UInoImportedSoundWave::BeginDestroy()
 {
-    // Close the visualization gate so any in-flight audio-thread
-    // GeneratePCMData short-circuits before dereferencing delegates.
+    // Close the visualization gate. The audio thread checks this
+    // atomic at the top of GeneratePCMData and Parse, returning
+    // immediately / actively stopping the FActiveSound when false.
+    //
+    // KEPT MINIMAL on purpose (matches RuntimeAudio pattern). Buffer
+    // clearing happens via ForceStopPlayback when the agent decides
+    // to fully tear us down; doing it here too would race with
+    // any audio-thread call that's between the bActive check and
+    // the SharedPCM->Guard acquisition.
     bActive.Store(false);
 
-    // Drop any partial visualization batch so the next stream (if
-    // this wave is reused) doesn't start with stale audio in the
-    // carry.
-    ResetVisualizationCarry();
-
     Super::BeginDestroy();
+}
+
+// ---------------------------------------------------------------------------
+// Parse — actively stop FActiveSound on drain or teardown
+// ---------------------------------------------------------------------------
+
+void UInoImportedSoundWave::Parse(
+    FAudioDevice*                   AudioDevice,
+    const UPTRINT                   NodeWaveInstanceHash,
+    FActiveSound&                   ActiveSound,
+    const FSoundParseParameters&    ParseParams,
+    TArray<FWaveInstance*>&         WaveInstances)
+{
+    // Force-stop path: bActive flipped false from BeginDestroy /
+    // ForceStopPlayback. Active-stop the FActiveSound RIGHT HERE on
+    // the audio thread — that's what cleanly drains the audio mixer's
+    // source-command queue. Returning 0 from GeneratePCMData on the
+    // same condition is the passive backup; without StopActiveSound
+    // the mixer command queue can hang on PIE shutdown.
+    if (AudioDevice != nullptr && !bActive.Load())
+    {
+        AudioDevice->StopActiveSound(&ActiveSound);
+        return;
+    }
+
+    // Drain path: streaming caller flipped bStopSoundOnPlaybackFinish
+    // and the buffer has been fully consumed. Broadcast the finished
+    // delegate (once) and stop the active sound.
+    bool bIsDrained = false;
+    bool bShouldBroadcastFinished = false;
+    {
+        FScopeLock Lock(&SharedPCM->Guard);
+        if (bStopSoundOnPlaybackFinish
+            && SharedPCM->TotalFrames > 0
+            && PlayedFrames >= SharedPCM->TotalFrames)
+        {
+            bIsDrained = true;
+            if (!bPlaybackFinishedBroadcasted)
+            {
+                bPlaybackFinishedBroadcasted = true;
+                bShouldBroadcastFinished = true;
+            }
+        }
+    }
+
+    if (bShouldBroadcastFinished)
+    {
+        BroadcastPlaybackFinished();
+    }
+    if (bIsDrained && AudioDevice != nullptr)
+    {
+        AudioDevice->StopActiveSound(&ActiveSound);
+        return;
+    }
+
+    // Normal playback — let the engine pull samples via GeneratePCMData
+    // through the parent's standard wave-instance setup.
+    Super::Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, ParseParams, WaveInstances);
 }
 
 // ---------------------------------------------------------------------------
