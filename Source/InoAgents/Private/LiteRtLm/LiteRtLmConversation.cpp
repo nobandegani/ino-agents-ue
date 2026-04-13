@@ -531,24 +531,60 @@ void ULiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 
     SentenceBuffer += Chunk;
 
-    // Split on newline only — each line becomes one OnSentence.
+    // Split on sentence boundaries: newline, or punctuation followed
+    // by a space (". ", ", ", "? ", "! "). This gives the dialogue
+    // queue smaller chunks for faster TTS dispatch and more granular
+    // OnSentence events for lip sync / subtitles.
     while (true)
     {
-        const int32 NewlineIndex = SentenceBuffer.Find(TEXT("\n"));
-        if (NewlineIndex == INDEX_NONE)
+        // Find the earliest split point.
+        int32 SplitIndex = INDEX_NONE;
+        int32 SplitLen = 0;     // how many chars the delimiter consumes
+        bool  bIsNewline = false;
+
+        // Check newline first.
+        const int32 NlIdx = SentenceBuffer.Find(TEXT("\n"));
+        if (NlIdx != INDEX_NONE)
+        {
+            SplitIndex = NlIdx;
+            SplitLen = 1;
+            bIsNewline = true;
+        }
+
+        // Check punctuation+space delimiters. Use the earliest one.
+        static const TCHAR* const Delimiters[] = {
+            TEXT(". "), TEXT(", "), TEXT("? "), TEXT("! ")
+        };
+        for (const TCHAR* Delim : Delimiters)
+        {
+            const int32 Idx = SentenceBuffer.Find(Delim);
+            if (Idx != INDEX_NONE && (SplitIndex == INDEX_NONE || Idx < SplitIndex))
+            {
+                SplitIndex = Idx;
+                SplitLen = 2;  // punctuation + space
+                bIsNewline = false;
+            }
+        }
+
+        if (SplitIndex == INDEX_NONE)
         {
             break;
         }
 
-        FString RawLine = SentenceBuffer.Left(NewlineIndex).TrimStartAndEnd();
-        SentenceBuffer.MidInline(NewlineIndex + 1);
+        // Include the punctuation in the sentence (split after it).
+        const int32 SentenceEnd = (SplitLen == 2) ? SplitIndex + 1 : SplitIndex;
+        FString RawLine = SentenceBuffer.Left(SentenceEnd).TrimStartAndEnd();
+        SentenceBuffer.MidInline(SplitIndex + SplitLen);
 
         if (!RawLine.IsEmpty())
         {
             const FString CleanLine = StripTags(RawLine);
             OnSentence.Broadcast(RawLine, CleanLine);
         }
-        OnNewLine.Broadcast();
+        if (bIsNewline)
+        {
+            OnNewLine.Broadcast();
+        }
     }
 }
 
