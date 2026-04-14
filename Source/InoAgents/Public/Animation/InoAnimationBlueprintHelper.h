@@ -12,11 +12,18 @@
  * Each weight is in [0, 1]. For a given eye only one horizontal
  * (Left / Right) and one vertical (Up / Down) weight will be
  * non-zero at a time — the opposite direction is clamped to 0.
+ *
+ * The Yaw/Pitch fields carry the smoothed gaze angles (radians)
+ * between frames. Wire the whole struct back as PreviousWeights
+ * — the angle fields drive the interpolation, the blend shape
+ * weights are derived from them each frame.
  */
 USTRUCT(BlueprintType)
 struct INOAGENTS_API FInoEyeLookWeights
 {
     GENERATED_BODY()
+
+    // ---- blend shape outputs (read these) ----
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
     float EyeLookUpL = 0.f;
@@ -41,6 +48,20 @@ struct INOAGENTS_API FInoEyeLookWeights
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
     float EyeLookRightR = 0.f;
+
+    // ---- interpolation state (feed back as PreviousWeights) ----
+
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float LeftEyeYaw = 0.f;
+
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float LeftEyePitch = 0.f;
+
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float RightEyeYaw = 0.f;
+
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float RightEyePitch = 0.f;
 };
 
 /**
@@ -54,40 +75,14 @@ class INOAGENTS_API UInoAnimationBlueprintHelper : public UBlueprintFunctionLibr
 public:
     /**
      * Calculate ARKit-style eye look blend shape weights from a
-     * world-space look-at target.
+     * world-space look-at target, with frame-rate-independent smoothing.
      *
-     * For each eye the function computes a local gaze direction
-     * relative to the head's orientation, decomposes it into yaw
-     * (left/right) and pitch (up/down), and maps the angles to
-     * [0, 1] weights using MaxAngleDegrees as the full-deflection
-     * angle.
+     * Interpolation happens in angle space (yaw / pitch per eye),
+     * then the smoothed angles are converted to blend shape weights.
+     * This avoids jitter at direction crossings.
      *
-     * Because each eye has its own world position, vergence
-     * (convergence on near targets) is handled naturally.
-     *
-     * @param LookAtTarget       World-space point the eyes should look at.
-     * @param LeftEyeWorldPos    World position of the left eye socket.
-     * @param RightEyeWorldPos   World position of the right eye socket.
-     * @param HeadForwardVector  Head's forward direction (neutral gaze).
-     *                           Does NOT need to be normalized — the
-     *                           function normalizes internally.
-     * @param HeadUpVector       Head's up direction. Does NOT need to
-     *                           be normalized.
-     * @param MaxAngleDegrees    Eye rotation range in degrees. Gaze
-     *                           deflection at this angle produces
-     *                           weight = 1. Typical human range is
-     *                           ~35 degrees. Clamped to [1, 90].
-     * @return                   Eight blend shape weights, all in [0, 1].
-     */
-    /**
-     * Calculate ARKit-style eye look blend shape weights from a
-     * world-space look-at target, with optional frame-rate-independent
-     * smoothing.
-     *
-     * Pass the previous frame's output as PreviousWeights and a
-     * non-zero InterpSpeed to get smooth eye movement. On the first
-     * frame (or when you want instant snap), pass a default/zeroed
-     * FInoEyeLookWeights and InterpSpeed = 0.
+     * Pass the previous frame's output as PreviousWeights. On the
+     * first frame, pass a default-constructed (zeroed) FInoEyeLookWeights.
      *
      * @param LookAtTarget       World-space point the eyes should look at.
      * @param LeftEyeWorldPos    World position of the left eye socket.
@@ -95,13 +90,12 @@ public:
      * @param HeadForwardVector  Head's forward direction (neutral gaze).
      * @param HeadUpVector       Head's up direction.
      * @param DeltaTime          Frame delta time (seconds).
-     * @param PreviousWeights    Output from the previous frame, used
-     *                           for interpolation.
+     * @param PreviousWeights    Output from the previous frame.
      * @param MaxAngleDegrees    Full-deflection angle. Default 35.
      * @param InterpSpeed        Interpolation speed (units/sec). Higher
      *                           = faster tracking. 0 = instant snap.
      *                           Good starting value: 8–15.
-     * @return                   Eight blend shape weights, all in [0, 1].
+     * @return                   Blend shape weights + smoothed angles.
      */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Animation",
               meta = (DisplayName = "Calculate Eye Look Weights"))
