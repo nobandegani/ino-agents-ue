@@ -65,6 +65,59 @@ struct INOAGENTS_API FInoEyeLookWeights
 };
 
 /**
+ * Procedural eye blink state. Feed back as PreviousState each frame.
+ *
+ * Simulates natural human blinking:
+ *   - Random interval between blinks (~2–6 s)
+ *   - Fast close (~75 ms), brief hold (~50 ms), slower open (~150 ms)
+ *   - Occasional double blinks
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoBlinkState
+{
+    GENERATED_BODY()
+
+    /** Current blink weight: 0 = fully open, 1 = fully closed. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float BlinkWeight = 0.f;
+
+    // ---- internal state (feed back via PreviousState, don't modify) ----
+
+    UPROPERTY()
+    float Timer = 0.f;
+
+    UPROPERTY()
+    float NextBlinkTime = 0.f;
+
+    /** 0 = idle, 1 = closing, 2 = hold, 3 = opening. */
+    UPROPERTY()
+    int32 Phase = 0;
+
+    UPROPERTY()
+    float PhaseTimer = 0.f;
+
+    UPROPERTY()
+    float CloseDuration = 0.f;
+
+    UPROPERTY()
+    float HoldDuration = 0.f;
+
+    UPROPERTY()
+    float OpenDuration = 0.f;
+
+    /** Remaining double-blinks to perform after the current one. */
+    UPROPERTY()
+    int32 PendingDoubleBlinks = 0;
+
+    /** Whether the RNG has been seeded (first-frame init). */
+    UPROPERTY()
+    bool bSeeded = false;
+
+    UPROPERTY()
+    int32 Seed = 0;
+};
+
+/**
  * Animation helper functions exposed to Blueprint.
  */
 UCLASS()
@@ -109,4 +162,21 @@ public:
         const FInoEyeLookWeights& PreviousWeights,
         float MaxAngleDegrees = 35.f,
         float InterpSpeed = 10.f);
+
+    /**
+     * Procedural eye blink simulation.
+     *
+     * Call every frame, feed the output back as PreviousState.
+     * Produces a natural blink pattern: random intervals,
+     * asymmetric close/open speed, occasional double blinks.
+     *
+     * @param DeltaTime      Frame delta time (seconds).
+     * @param PreviousState  Output from the previous frame.
+     * @return               Updated state with BlinkWeight in [0, 1].
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Animation",
+              meta = (DisplayName = "Calculate Blink Weight"))
+    static FInoBlinkState CalculateBlinkWeight(
+        float DeltaTime,
+        const FInoBlinkState& PreviousState);
 };

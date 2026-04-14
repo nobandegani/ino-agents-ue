@@ -30,6 +30,36 @@ namespace
     {
         return FMath::Clamp(FMath::Abs(AngleRad) / MaxAngleRad, 0.f, 1.f);
     }
+
+    /** Random float in [Min, Max] using a deterministic stream. */
+    float RandRange(FRandomStream& Rng, float Min, float Max)
+    {
+        return Min + Rng.FRand() * (Max - Min);
+    }
+
+    /** Pick the next random interval before a blink. */
+    float PickNextBlinkInterval(FRandomStream& Rng)
+    {
+        // Humans blink every ~2–6 seconds on average.
+        return RandRange(Rng, 2.0f, 6.0f);
+    }
+
+    /** Randomise per-blink durations (seconds). */
+    void PickBlinkDurations(FRandomStream& Rng, float& OutClose, float& OutHold, float& OutOpen)
+    {
+        // Close: fast (~50–100 ms). Hold: brief (~30–70 ms). Open: slower (~100–200 ms).
+        OutClose = RandRange(Rng, 0.05f, 0.10f);
+        OutHold  = RandRange(Rng, 0.03f, 0.07f);
+        OutOpen  = RandRange(Rng, 0.10f, 0.20f);
+    }
+
+    /** Smooth ease curve: fast start/end, smooth through 0→1. */
+    float EaseInOut(float T)
+    {
+        // Hermite smoothstep.
+        T = FMath::Clamp(T, 0.f, 1.f);
+        return T * T * (3.f - 2.f * T);
+    }
 }
 
 FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
@@ -129,4 +159,112 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
         Result.EyeLookDownR = AngleToWeight(SmoothedRPitch, MaxAngleRad);
 
     return Result;
+}
+
+FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
+    float DeltaTime,
+    const FInoBlinkState& PreviousState)
+{
+    FInoBlinkState S = PreviousState;
+
+    // First-frame init: seed the RNG and pick the first blink time.
+    if (!S.bSeeded)
+    {
+        S.Seed = FMath::Rand();
+        S.bSeeded = true;
+        FRandomStream Rng(S.Seed);
+        // Advance the seed so subsequent calls get different values.
+        S.Seed = Rng.RandHelper(MAX_int32);
+        S.NextBlinkTime = PickNextBlinkInterval(Rng);
+        S.Seed = Rng.RandHelper(MAX_int32);
+        S.Timer = 0.f;
+        S.Phase = 0;
+        S.BlinkWeight = 0.f;
+        return S;
+    }
+
+    FRandomStream Rng(S.Seed);
+
+    if (S.Phase == 0)
+    {
+        // Idle — waiting for next blink.
+        S.Timer += DeltaTime;
+        S.BlinkWeight = 0.f;
+
+        if (S.Timer >= S.NextBlinkTime)
+        {
+            // Start closing.
+            S.Phase = 1;
+            S.PhaseTimer = 0.f;
+            PickBlinkDurations(Rng, S.CloseDuration, S.HoldDuration, S.OpenDuration);
+            S.Seed = Rng.RandHelper(MAX_int32);
+
+            // ~20% chance of a double blink.
+            if (S.PendingDoubleBlinks == 0 && Rng.FRand() < 0.20f)
+            {
+                S.PendingDoubleBlinks = 1;
+            }
+            S.Seed = Rng.RandHelper(MAX_int32);
+        }
+    }
+
+    if (S.Phase == 1)
+    {
+        // Closing.
+        S.PhaseTimer += DeltaTime;
+        const float T = FMath::Clamp(S.PhaseTimer / FMath::Max(S.CloseDuration, 0.001f), 0.f, 1.f);
+        S.BlinkWeight = EaseInOut(T);
+
+        if (S.PhaseTimer >= S.CloseDuration)
+        {
+            S.Phase = 2;
+            S.PhaseTimer = 0.f;
+            S.BlinkWeight = 1.f;
+        }
+    }
+    else if (S.Phase == 2)
+    {
+        // Hold closed.
+        S.PhaseTimer += DeltaTime;
+        S.BlinkWeight = 1.f;
+
+        if (S.PhaseTimer >= S.HoldDuration)
+        {
+            S.Phase = 3;
+            S.PhaseTimer = 0.f;
+        }
+    }
+    else if (S.Phase == 3)
+    {
+        // Opening.
+        S.PhaseTimer += DeltaTime;
+        const float T = FMath::Clamp(S.PhaseTimer / FMath::Max(S.OpenDuration, 0.001f), 0.f, 1.f);
+        S.BlinkWeight = 1.f - EaseInOut(T);
+
+        if (S.PhaseTimer >= S.OpenDuration)
+        {
+            // Blink complete.
+            S.BlinkWeight = 0.f;
+
+            if (S.PendingDoubleBlinks > 0)
+            {
+                // Immediately start another blink (double blink).
+                S.PendingDoubleBlinks--;
+                S.Phase = 1;
+                S.PhaseTimer = 0.f;
+                PickBlinkDurations(Rng, S.CloseDuration, S.HoldDuration, S.OpenDuration);
+                S.Seed = Rng.RandHelper(MAX_int32);
+            }
+            else
+            {
+                // Back to idle.
+                S.Phase = 0;
+                S.Timer = 0.f;
+                S.NextBlinkTime = PickNextBlinkInterval(Rng);
+                S.Seed = Rng.RandHelper(MAX_int32);
+            }
+        }
+    }
+
+    return S;
 }
