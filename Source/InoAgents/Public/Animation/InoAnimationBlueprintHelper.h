@@ -64,6 +64,49 @@ struct INOAGENTS_API FInoEyeLookWeights
     float RightEyePitch = 0.f;
 };
 
+/** Configuration for procedural blink timing. */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoBlinkConfig
+{
+    GENERATED_BODY()
+
+    /** Minimum seconds between blinks. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MinInterval = 2.f;
+
+    /** Maximum seconds between blinks. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MaxInterval = 6.f;
+
+    /** Minimum eyelid close duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MinCloseDuration = 0.05f;
+
+    /** Maximum eyelid close duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MaxCloseDuration = 0.10f;
+
+    /** Minimum hold-closed duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MinHoldDuration = 0.03f;
+
+    /** Maximum hold-closed duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MaxHoldDuration = 0.07f;
+
+    /** Minimum eyelid open duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MinOpenDuration = 0.10f;
+
+    /** Maximum eyelid open duration (seconds). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation")
+    float MaxOpenDuration = 0.20f;
+
+    /** Chance of a double blink (0.0 – 1.0). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DoubleBlinkChance = 0.20f;
+};
+
 /**
  * Procedural eye blink state. Feed back as PreviousState each frame.
  *
@@ -178,5 +221,6 @@ public:
               meta = (DisplayName = "Calculate Blink Weight"))
     static FInoBlinkState CalculateBlinkWeight(
         float DeltaTime,
-        const FInoBlinkState& PreviousState);
+        const FInoBlinkState& PreviousState,
+        const FInoBlinkConfig& Config);
 };

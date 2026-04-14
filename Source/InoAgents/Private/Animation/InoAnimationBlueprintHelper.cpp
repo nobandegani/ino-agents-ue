@@ -38,19 +38,18 @@ namespace
     }
 
     /** Pick the next random interval before a blink. */
-    float PickNextBlinkInterval(FRandomStream& Rng)
+    float PickNextBlinkInterval(FRandomStream& Rng, const FInoBlinkConfig& Cfg)
     {
-        // Humans blink every ~2–6 seconds on average.
-        return RandRange(Rng, 2.0f, 6.0f);
+        return RandRange(Rng, Cfg.MinInterval, Cfg.MaxInterval);
     }
 
     /** Randomise per-blink durations (seconds). */
-    void PickBlinkDurations(FRandomStream& Rng, float& OutClose, float& OutHold, float& OutOpen)
+    void PickBlinkDurations(FRandomStream& Rng, const FInoBlinkConfig& Cfg,
+                            float& OutClose, float& OutHold, float& OutOpen)
     {
-        // Close: fast (~50–100 ms). Hold: brief (~30–70 ms). Open: slower (~100–200 ms).
-        OutClose = RandRange(Rng, 0.05f, 0.10f);
-        OutHold  = RandRange(Rng, 0.03f, 0.07f);
-        OutOpen  = RandRange(Rng, 0.10f, 0.20f);
+        OutClose = RandRange(Rng, Cfg.MinCloseDuration, Cfg.MaxCloseDuration);
+        OutHold  = RandRange(Rng, Cfg.MinHoldDuration,  Cfg.MaxHoldDuration);
+        OutOpen  = RandRange(Rng, Cfg.MinOpenDuration,   Cfg.MaxOpenDuration);
     }
 
     /** Smooth ease curve: fast start/end, smooth through 0→1. */
@@ -163,7 +162,8 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
 
 FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
     float DeltaTime,
-    const FInoBlinkState& PreviousState)
+    const FInoBlinkState& PreviousState,
+    const FInoBlinkConfig& Config)
 {
     FInoBlinkState S = PreviousState;
 
@@ -175,7 +175,7 @@ FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
         FRandomStream Rng(S.Seed);
         // Advance the seed so subsequent calls get different values.
         S.Seed = Rng.RandHelper(MAX_int32);
-        S.NextBlinkTime = PickNextBlinkInterval(Rng);
+        S.NextBlinkTime = PickNextBlinkInterval(Rng, Config);
         S.Seed = Rng.RandHelper(MAX_int32);
         S.Timer = 0.f;
         S.Phase = 0;
@@ -196,11 +196,10 @@ FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
             // Start closing.
             S.Phase = 1;
             S.PhaseTimer = 0.f;
-            PickBlinkDurations(Rng, S.CloseDuration, S.HoldDuration, S.OpenDuration);
+            PickBlinkDurations(Rng, Config, S.CloseDuration, S.HoldDuration, S.OpenDuration);
             S.Seed = Rng.RandHelper(MAX_int32);
 
-            // ~20% chance of a double blink.
-            if (S.PendingDoubleBlinks == 0 && Rng.FRand() < 0.20f)
+            if (S.PendingDoubleBlinks == 0 && Rng.FRand() < Config.DoubleBlinkChance)
             {
                 S.PendingDoubleBlinks = 1;
             }
@@ -252,7 +251,7 @@ FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
                 S.PendingDoubleBlinks--;
                 S.Phase = 1;
                 S.PhaseTimer = 0.f;
-                PickBlinkDurations(Rng, S.CloseDuration, S.HoldDuration, S.OpenDuration);
+                PickBlinkDurations(Rng, Config, S.CloseDuration, S.HoldDuration, S.OpenDuration);
                 S.Seed = Rng.RandHelper(MAX_int32);
             }
             else
@@ -260,7 +259,7 @@ FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
                 // Back to idle.
                 S.Phase = 0;
                 S.Timer = 0.f;
-                S.NextBlinkTime = PickNextBlinkInterval(Rng);
+                S.NextBlinkTime = PickNextBlinkInterval(Rng, Config);
                 S.Seed = Rng.RandHelper(MAX_int32);
             }
         }
