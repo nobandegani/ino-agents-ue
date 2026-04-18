@@ -124,6 +124,7 @@ try {
         --disk_cache=$BazelDiskCache `
         --define=litert_link_capi_so=true `
         --define=resolve_symbols_in_exec=false `
+        --define=protobuf_allow_msvc=true `
         --host_cxxopt=/std:c++20 `
         --verbose_failures
     if ($LASTEXITCODE -ne 0) {
