@@ -57,6 +57,8 @@ try {
         build //ino:LiteRtLm `
         --disk_cache=$BazelDiskCache `
         --build_tag_filters=-nowindows `
+        --define=litert_link_capi_so=true `
+        --define=resolve_symbols_in_exec=false `
         --verbose_failures
     if ($LASTEXITCODE -ne 0) {
         throw "bazelisk build failed (exit code $LASTEXITCODE)"
