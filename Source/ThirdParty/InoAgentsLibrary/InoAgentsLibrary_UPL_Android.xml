@@ -35,7 +35,7 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 	before the game's main .so starts executing.
 
 	NOTE: No libLiteRt.so on Android. Upstream's build:android forces
-	static linking (--dynamic_mode=off) so all LiteRT core code is
+	static linking (dynamic_mode=off) so all LiteRT core code is
 	statically linked into libLiteRtLm.so instead of being split out.
 	Our Bazel build produces a monolithic ~49 MB libLiteRtLm.so.
 
