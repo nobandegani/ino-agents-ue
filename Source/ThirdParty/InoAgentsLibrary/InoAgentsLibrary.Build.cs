@@ -89,10 +89,19 @@ public class InoAgentsLibrary : ModuleRules
 			// lib/arm64-v8a/ directory. Without this, the .so files never
 			// make it into the APK and the app crashes at launch with
 			// "library libLiteRtLm.so not found".
+			// NOTE: no libLiteRt.so on Android. Unlike Windows where
+			// litert_link_capi_so=true splits LiteRT core into a
+			// separate libLiteRt.dll, upstream's build:android forces
+			// --dynamic_mode=off which link-statics everything into
+			// libLiteRtLm.so. That makes CPU backend work (all
+			// litert_lm_* symbols in a single .so) but means the
+			// prebuilt GPU accelerator .so files can't resolve their
+			// DT_NEEDED(libLiteRt.so) at runtime. backend=gpu is
+			// currently non-functional on Android until upstream
+			// ships proper Android GPU artifacts or we rebuild them.
 			string[] AndroidRuntimeSoFiles = new string[]
 			{
-				"libLiteRtLm.so",
-				"libLiteRt.so",                        // LiteRT core (Bazel-built)
+				"libLiteRtLm.so",                      // Bazel-built (monolithic ~49 MB)
 				"libGemmaModelConstraintProvider.so",  // prebuilt, constraint provider
 				"libLiteRtGpuAccelerator.so",          // prebuilt, general GPU accelerator
 				"libLiteRtOpenClAccelerator.so",       // prebuilt, OpenCL-specific

@@ -205,22 +205,29 @@ if (-not $SoSrc) {
 Copy-Item -Path $SoSrc -Destination (Join-Path $Arm64BinDst "libLiteRtLm.so") -Force
 Write-Host "  [STAGE] libLiteRtLm.so (from $(Split-Path $SoSrc -Leaf)) -> $Arm64BinDst"
 
-# libLiteRt.so — LiteRT core runtime, dynamically linked by libLiteRtLm.so
-# Bazel produces this as part of the litert_link_capi_so=true build.
-$LiteRtSoSrc = Join-Path $BazelBinIno "libLiteRt.so"
-if (Test-Path $LiteRtSoSrc) {
-    Copy-Item -Path $LiteRtSoSrc -Destination (Join-Path $Arm64BinDst "libLiteRt.so") -Force
-    Write-Host "  [STAGE] libLiteRt.so -> $Arm64BinDst"
-} else {
-    # Some builds produce it in a different location — scan for it.
-    $Found = Get-ChildItem $BazelBinIno -Filter "libLiteRt.so" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($Found) {
-        Copy-Item -Path $Found.FullName -Destination (Join-Path $Arm64BinDst "libLiteRt.so") -Force
-        Write-Host "  [STAGE] libLiteRt.so (from $($Found.FullName)) -> $Arm64BinDst"
-    } else {
-        Write-Warning "libLiteRt.so not found in bazel-bin — Android runtime linking may fail"
-    }
-}
+# libLiteRt.so — NOT produced on Android.
+#
+# Unlike Windows where `litert_link_capi_so=true` splits LiteRT core
+# into libLiteRt.dll, upstream's build:android config sets
+# `--dynamic_mode=off` which forces all deps to link statically into
+# a single monolithic .so for deployment. Our libLiteRtLm.so (~49 MB
+# vs ~14 MB on Windows) contains everything, so no libLiteRt.so file
+# is needed for CPU inference.
+#
+# Consequence for GPU: the prebuilt GPU accelerator .so files were
+# built with DT_NEEDED entries pointing to libLiteRt.so as a separate
+# file. When the LiteRT engine dlopens them at runtime (backend=gpu),
+# Android's dynamic linker will fail to find libLiteRt.so and abort
+# the load. backend=cpu is unaffected — its code path never dlopens
+# the GPU accelerators.
+#
+# TODO: revisit GPU on Android. Possible fixes:
+#   - Create libLiteRt.so as a copy/symlink of libLiteRtLm.so
+#     (wastes ~49 MB APK space but satisfies the linker).
+#   - Rebuild the GPU accelerator .so files from source with
+#     upstream's Android OpenCL/WebGPU accelerator targets.
+#   - Wait for upstream to ship a proper Android libLiteRt.so
+#     artifact alongside the GPU accelerators.
 
 # Prebuilt GPU accelerator + constraint provider .so files from upstream
 # prebuilt/android_arm64/. These are dynamically loaded by the LiteRT

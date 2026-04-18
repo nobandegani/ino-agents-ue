@@ -34,18 +34,23 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 	call in the Java launcher activity, so the library is loaded
 	before the game's main .so starts executing.
 
+	NOTE: No libLiteRt.so on Android. Upstream's build:android forces
+	static linking (--dynamic_mode=off) so all LiteRT core code is
+	statically linked into libLiteRtLm.so instead of being split out.
+	Our Bazel build produces a monolithic ~49 MB libLiteRtLm.so.
+
 	Order matters:
-	  1. libLiteRt.so — LiteRT core (other .so files import from it)
-	  2. libGemmaModelConstraintProvider.so — independent, no deps on others
-	  3. libLiteRtLm.so — imports from libLiteRt.so (must be loaded AFTER)
+	  1. libGemmaModelConstraintProvider.so — standalone, no deps on others
+	  2. libLiteRtLm.so — the monolithic LiteRT + LiteRT-LM bundle
 
 	The GPU accelerator .so files are NOT preloaded here — they are
 	loaded on demand via dlopen by the LiteRT engine itself when
-	backend=gpu is requested. But they still need to be packaged into
-	the APK, which happens via <resourceCopies> below.
+	backend=gpu is requested. They are packaged into the APK via
+	<resourceCopies> below, but loading them will currently fail
+	because they were built expecting a separate libLiteRt.so file
+	that we don't produce on Android. backend=cpu is unaffected.
 	-->
 	<soLoadLibrary>
-		<loadLibrary name="LiteRt" failmsg="Failed to load libLiteRt.so"/>
 		<loadLibrary name="GemmaModelConstraintProvider" failmsg="Failed to load libGemmaModelConstraintProvider.so"/>
 		<loadLibrary name="LiteRtLm" failmsg="Failed to load libLiteRtLm.so"/>
 	</soLoadLibrary>
