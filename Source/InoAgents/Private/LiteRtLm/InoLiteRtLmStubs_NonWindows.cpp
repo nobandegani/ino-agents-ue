@@ -35,20 +35,7 @@
 // component, and all other plugin features unrelated to local LLM
 // inference continue to work normally on those platforms.
 
-// TEMPORARY (2026-04-19): Android LiteRT-LM native integration is disabled
-// while we diagnose the SplashActivity launch failure. Android now falls
-// through to the same stub path as iOS / Linux / macOS — every LiteRT-LM
-// call becomes a no-op and the rest of the plugin (ElevenLabs, streaming
-// audio, chat panel) works normally.
-//
-// To re-enable Android:
-//   1. Restore this guard to `#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`
-//   2. Restore the matching `#endif` at the bottom of this file
-//   3. Flip bAndroidLiteRtLmEnabled back to true in
-//      Source/ThirdParty/InoAgentsLibrary/InoAgentsLibrary.Build.cs
-//   4. Restore the `#elif PLATFORM_ANDROID` branch in
-//      Source/InoAgents/Private/InoAgents.cpp
-#if !PLATFORM_WINDOWS
+#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID
 
 #include "CoreMinimal.h"
 
@@ -329,4 +316,4 @@ extern "C" LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     return nullptr;
 }
 
-#endif  // !PLATFORM_WINDOWS  (Android temporarily included — see top of file)
+#endif  // !PLATFORM_WINDOWS && !PLATFORM_ANDROID

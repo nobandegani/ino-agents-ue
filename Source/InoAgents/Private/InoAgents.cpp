@@ -116,18 +116,27 @@ void FInoAgentsModule::StartupModule()
     }
 
     const bool bCanCallLiteRtLm = (LiteRtLmHandle != nullptr);
-#else
-    // iOS / Linux / macOS / (temporarily) Android: stubs in
-    // InoLiteRtLmStubs_NonWindows.cpp provide no-op implementations.
-    // Everything is linkable but every call returns nullptr / fails
-    // gracefully.
+#elif PLATFORM_ANDROID
+    // On Android, the .so files are loaded automatically by Android's
+    // dynamic linker at process startup. Our game's main library
+    // (libUnreal.so) links against libLiteRtLm.so via
+    // PublicAdditionalLibraries in InoAgentsLibrary.Build.cs, so the
+    // symbols resolve through the normal Android linker path — no
+    // FPlatformProcess::GetDllHandle() calls needed. The UPL XML's
+    // <soLoadLibrary> additionally asks the GameActivity Java side to
+    // preload the libs (harmless but redundant given the DT_NEEDED
+    // walk the linker already performs).
     //
-    // TEMPORARY (2026-04-19): Android LiteRT-LM integration is disabled
-    // while we diagnose the SplashActivity launch failure. When Android
-    // is re-enabled, restore the `#elif PLATFORM_ANDROID` branch with
-    // the same `bCanCallLiteRtLm = true` body plus the explanation that
-    // the Android dynamic linker + UPL <soLoadLibrary> handle preloading
-    // before StartupModule runs, so GetDllHandle() is not needed.
+    // The GPU accelerator .so files are also in the APK's lib/arm64-v8a/
+    // (via the <resourceCopies> directive in the UPL XML). When the
+    // LiteRT engine calls dlopen("libLiteRtWebGpuAccelerator.so")
+    // internally, Android's linker finds them in the standard library
+    // search path for the process.
+    const bool bCanCallLiteRtLm = true;
+#else
+    // iOS / Linux / macOS: stubs in InoLiteRtLmStubs_NonWindows.cpp
+    // provide no-op implementations. Everything is linkable but every
+    // call returns nullptr / fails gracefully.
     const bool bCanCallLiteRtLm = true;
 #endif
 
