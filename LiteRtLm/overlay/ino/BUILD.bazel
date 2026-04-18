@@ -41,11 +41,18 @@ cc_binary(
     srcs = ["LiteRtLm_exports.cc"],
     linkshared = 1,
     linkstatic = 1,
-    # /EXPORT: linker flags are ADDITIVE to __declspec(dllexport) — they add
-    # symbols to the DLL's export table without replacing the compiler-driven
-    # exports (unlike /DEF: which is exclusive). Use them only to work around
-    # upstream bugs where a specific function's definition is compiled without
-    # the dllexport attribute.
+    # Per-platform linkopts. Two distinct concerns:
+    #   Windows: /EXPORT: flags are ADDITIVE to __declspec(dllexport) — they
+    #     add symbols to the DLL export table without replacing the
+    #     compiler-driven exports (unlike /DEF: which is exclusive).
+    #   Android: the //c:engine dep graph brings in EGL/GLES3 calls that
+    #     would otherwise be undefined at load time. Upstream's own
+    #     //runtime/engine:litert_lm_main target links -lEGL -lGLESv3
+    #     on Android (see runtime/engine/BUILD, select on @platforms//os:android);
+    #     we do the same here for parity. Without these the produced .so may
+    #     still link (missing symbols are deferred to dlopen time on Android)
+    #     but then crash with "cannot locate symbol eglGetCurrentContext"
+    #     when Android's dynamic linker actually maps it into a process.
     linkopts = select({
         "@platforms//os:windows": [
             # Upstream bug (LiteRT-LM v0.10.1): c/litert_lm_logging.h declares
@@ -58,6 +65,10 @@ cc_binary(
             # flag tells link.exe to export the symbol anyway. Remove this
             # line when upstream adds the dllexport to litert_lm_logging.h.
             "/EXPORT:litert_lm_set_min_log_level",
+        ],
+        "@platforms//os:android": [
+            "-lEGL",
+            "-lGLESv3",
         ],
         "//conditions:default": [],
     }),

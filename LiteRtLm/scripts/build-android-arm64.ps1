@@ -78,20 +78,42 @@ if ($LASTEXITCODE -ne 0) { throw "setup.ps1 failed" }
 #---------------------------------------------------------------------
 # 3. Bazel build
 #---------------------------------------------------------------------
-# Same defines as Win64 (see build-win64.ps1 for the full rationale):
-#   --define=litert_link_capi_so=true  — link libLiteRt.so dynamically
-#                                         so GPU accelerator .so files
-#                                         share one LiteRT instance
-#   --define=resolve_symbols_in_exec=false — our output is a .so, not
-#                                             an executable
+# Android build configuration. INTENTIONALLY DIVERGES from Win64 on two
+# defines — see comments below.
 #
-# Additional Android specifics:
 #   --config=android_arm64  — picks the arm64-v8a toolchain via
-#                              upstream's .bazelrc
-#   --define=xnn_enable_avxvnniint8=false — already set by
-#                                            build:android in upstream
-#                                            .bazelrc (required for
-#                                            clang < 20)
+#                              upstream's .bazelrc. This config sets
+#                              --dynamic_mode=off which force-statics
+#                              every transitive dep into the final .so.
+#                              As a result, on Android we intentionally
+#                              produce ONE monolithic libLiteRtLm.so and
+#                              no separate libLiteRt.so.
+#
+#   --define=xnn_enable_avxvnniint8=false — already set by build:android
+#                                            in upstream .bazelrc (required
+#                                            for clang < 20)
+#
+# NOT passed on Android (unlike Win64):
+#
+#   --define=litert_link_capi_so=true — DELIBERATELY OMITTED. On Windows
+#     this splits LiteRT core into a separate libLiteRt.dll so the
+#     prebuilt GPU accelerators and our LiteRtLm.dll share one LiteRT
+#     instance. On Android upstream's --dynamic_mode=off forces static
+#     linking, so no separate libLiteRt.so is actually produced — but
+#     the define still drives select() branches in the dep graph to
+#     reference a dynamic libLiteRt.so that doesn't exist. The result
+#     is a libLiteRtLm.so with a phantom DT_NEEDED(libLiteRt.so) that
+#     causes the Android dynamic linker to abort() during dlopen with
+#     no recoverable error — which manifests as the app crashing at
+#     launch. Verify the build is clean with:
+#         llvm-readelf -d libLiteRtLm.so | grep NEEDED
+#     should show ONLY system libs (libdl, liblog, libm, libc) plus
+#     libGemmaModelConstraintProvider.so, and NOT libLiteRt.so.
+#
+#   --define=resolve_symbols_in_exec=false — DELIBERATELY OMITTED. This
+#     only makes sense alongside litert_link_capi_so=true's dynamic
+#     split. For our monolithic Android .so the default
+#     (resolve_symbols_in_exec=true) is correct.
 
 $BazelOutputBase = "C:/b/ino-android"   # different from Win64 to avoid
                                          # cache-key conflicts between the
@@ -142,8 +164,6 @@ try {
         build //ino:LiteRtLm `
         --config=android_arm64 `
         --disk_cache=$BazelDiskCache `
-        --define=litert_link_capi_so=true `
-        --define=resolve_symbols_in_exec=false `
         --define=protobuf_allow_msvc=true `
         --host_cxxopt=/std:c++20 `
         --shell_executable="C:/Program Files/Git/bin/bash.exe" `
