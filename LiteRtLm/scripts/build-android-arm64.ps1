@@ -108,16 +108,36 @@ Write-Host ""
 
 Push-Location $SubmoduleDir
 try {
-    # --host_cxxopt=/std:c++20 — upstream's build:android sets
-    #   --host_cxxopt=-std=c++20
-    # which assumes the build host uses clang syntax. On Windows the
-    # host is MSVC (cl.exe), which ignores -std=c++20 with a D9002
-    # warning and falls back to the default (C++14), failing absl's
-    # policy_checks.h C++17 minimum. Passing /std:c++20 additionally
-    # gives MSVC the correct flag — Bazel accumulates cxxopts, so both
-    # are passed to the compiler and MSVC uses whichever it recognises
-    # (/std:c++20). Upstream CI only cross-compiles Android from Linux,
-    # so this Windows host quirk isn't in their config.
+    # Cross-compiling Android from Windows — upstream's build:android
+    # sets --noenable_platform_specific_config which disables the
+    # automatic build:windows flags on the host. We manually replay
+    # the subset of host-only flags that are needed to compile the
+    # protobuf / flatbuffers / abseil host tools on MSVC.
+    #
+    # Each flag below corresponds to one in upstream's build:windows
+    # in LiteRT-LM/.bazelrc. Flags that affect TARGET compilation
+    # (Android arm64 via clang) are deliberately NOT included here —
+    # build:android handles those.
+    #
+    #   --host_cxxopt=/std:c++20 — MSVC syntax for C++20 (build:android
+    #     sets --host_cxxopt=-std=c++20 which MSVC ignores with a
+    #     D9002 warning, breaking absl's C++17-minimum check).
+    #   --define=protobuf_allow_msvc=true — protobuf refuses to
+    #     compile on MSVC+Bazel without this.
+    #   --shell_executable — build:android falls back to WSL's bash
+    #     at C:\Windows\System32\bash.exe which can't handle Windows
+    #     paths in genrule $f variables; use Git Bash like Windows
+    #     builds do.
+    #   --host_copt=/W0 — suppress noisy host warnings.
+    #   --host_copt=/Zc:__cplusplus — make __cplusplus macro reflect
+    #     the actual standard (MSVC defaults to 199711L without this).
+    #   --host_copt=/D_USE_MATH_DEFINES — M_PI etc.
+    #   --host_copt=-D_ENABLE_EXTENDED_ALIGNED_STORAGE — avoid
+    #     libc++ aligned_storage deprecation warnings.
+    #   --host_copt=-DWIN32_LEAN_AND_MEAN --host_copt=-DNOGDI —
+    #     slim down windows.h to avoid name collisions.
+    #   --host_copt=/Zc:preprocessor — conforming preprocessor mode
+    #     (required by some absl / protobuf macros).
     & bazelisk --output_base=$BazelOutputBase `
         build //ino:LiteRtLm `
         --config=android_arm64 `
@@ -126,6 +146,14 @@ try {
         --define=resolve_symbols_in_exec=false `
         --define=protobuf_allow_msvc=true `
         --host_cxxopt=/std:c++20 `
+        --shell_executable="C:/Program Files/Git/bin/bash.exe" `
+        --host_copt=/W0 `
+        --host_copt=/Zc:__cplusplus `
+        --host_copt=/D_USE_MATH_DEFINES `
+        --host_copt=-D_ENABLE_EXTENDED_ALIGNED_STORAGE `
+        --host_copt=-DWIN32_LEAN_AND_MEAN `
+        --host_copt=-DNOGDI `
+        --host_copt=/Zc:preprocessor `
         --verbose_failures
     if ($LASTEXITCODE -ne 0) {
         throw "bazelisk build failed (exit code $LASTEXITCODE)"
