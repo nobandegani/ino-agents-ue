@@ -108,12 +108,23 @@ Write-Host ""
 
 Push-Location $SubmoduleDir
 try {
+    # --host_cxxopt=/std:c++20 — upstream's build:android sets
+    #   --host_cxxopt=-std=c++20
+    # which assumes the build host uses clang syntax. On Windows the
+    # host is MSVC (cl.exe), which ignores -std=c++20 with a D9002
+    # warning and falls back to the default (C++14), failing absl's
+    # policy_checks.h C++17 minimum. Passing /std:c++20 additionally
+    # gives MSVC the correct flag — Bazel accumulates cxxopts, so both
+    # are passed to the compiler and MSVC uses whichever it recognises
+    # (/std:c++20). Upstream CI only cross-compiles Android from Linux,
+    # so this Windows host quirk isn't in their config.
     & bazelisk --output_base=$BazelOutputBase `
         build //ino:LiteRtLm `
         --config=android_arm64 `
         --disk_cache=$BazelDiskCache `
         --define=litert_link_capi_so=true `
         --define=resolve_symbols_in_exec=false `
+        --host_cxxopt=/std:c++20 `
         --verbose_failures
     if ($LASTEXITCODE -ne 0) {
         throw "bazelisk build failed (exit code $LASTEXITCODE)"
