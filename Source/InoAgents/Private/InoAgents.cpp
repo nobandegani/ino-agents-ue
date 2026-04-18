@@ -89,26 +89,25 @@ namespace
 
 void FInoAgentsModule::StartupModule()
 {
-    // LiteRtLm.dll depends on libGemmaModelConstraintProvider.dll at runtime.
-    // Load the constraint provider FIRST so it is already resolved in memory
-    // when Windows processes LiteRtLm.dll's import table.
+    // Load order is critical — each DLL must be in memory before any
+    // DLL that imports from it:
+    //
+    //   1. libGemmaModelConstraintProvider.dll (standalone, no deps on others)
+    //   2. libLiteRt.dll                       (LiteRT core runtime)
+    //   3. LiteRtLm.dll                        (imports from libLiteRt.dll)
+    //   4. libLiteRtWebGpuAccelerator.dll      (imports from libLiteRt.dll)
+    //   5. libLiteRtTopKWebGpuSampler.dll      (imports from libLiteRt.dll)
+    //
+    // With --define=litert_link_capi_so=true, LiteRtLm.dll dynamically
+    // links against libLiteRt.dll (instead of statically including it),
+    // so libLiteRt.dll MUST be loaded before LiteRtLm.dll or Windows
+    // will fail with "Missing import: libLiteRt.dll" (GetLastError=126).
     GemmaConstraintProviderHandle = LoadStagedDll(TEXT("libGemmaModelConstraintProvider.dll"));
+    LiteRtHandle                  = LoadStagedDll(TEXT("libLiteRt.dll"));
     LiteRtLmHandle                = LoadStagedDll(TEXT("LiteRtLm.dll"));
 
-    // GPU accelerator DLLs — pre-load them so LiteRT's engine can find
-    // them when it internally calls LoadLibraryA("libLiteRtWebGpu...dll").
-    // Without pre-loading, LoadLibraryA searches relative to the
-    // process executable (UE's Engine/Binaries/Win64/) and fails
-    // because the DLLs live in our plugin directory instead.
-    //
-    // Load order matters: libLiteRt.dll first (the GPU DLLs import
-    // from it), then the accelerator and sampler. If any are missing
-    // (e.g. the user didn't run build-win64.ps1 with prebuilt staging),
-    // we just log a warning and skip — CPU backend still works fine.
-    //
-    // Unlike the core DLLs above, these use a soft-load pattern:
-    // failure is not an error, just a "GPU not available" warning.
-    LiteRtHandle = LoadStagedDll(TEXT("libLiteRt.dll"));
+    // GPU accelerator DLLs — pre-load them so LiteRT's engine can
+    // find them when it internally calls LoadLibraryA by filename.
     if (LiteRtHandle)
     {
         WebGpuAcceleratorHandle  = LoadStagedDll(TEXT("libLiteRtWebGpuAccelerator.dll"));
