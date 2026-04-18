@@ -11,7 +11,7 @@
 # Do not edit the copy inside the submodule — edit the overlay source instead.
 #
 # Export mechanism (Windows):
-#   The C API in //c:engine_cpu's engine.h already annotates every public
+#   The C API in //c:engine's engine.h already annotates every public
 #   function with __declspec(dllexport) via the LITERT_LM_C_API_EXPORT macro
 #   (enabled on _WIN32). Because we do NOT pass a /DEF: file to the linker,
 #   MSVC's linker uses these annotations as the authoritative export list and
@@ -27,11 +27,10 @@
 #         the .def file get exported, and /OPT:REF dead-strips everything else.
 #         Building with both resulted in a 12 MB DLL with zero litert_lm_*
 #         exports.
-#     (b) For //c:engine_cpu there is no separate accelerator DLL, so the
-#         LiteRt* accelerator ABI does not need to be exported at all.
-#     (c) If/when we move to //c:engine (with GPU) and a standalone accelerator
-#         DLL is required, we will produce a combined .def file listing both
-#         LiteRt* and litert_lm_* symbols and add it back.
+#     (b) We use --config=monolithic (set by upstream .bazelrc's build:windows
+#         config) which links the GPU accelerator statically into our DLL. No
+#         separate accelerator DLL is produced, so the LiteRt* accelerator ABI
+#         does not need to be exported.
 
 package(default_visibility = ["//visibility:private"])
 
@@ -63,9 +62,12 @@ cc_binary(
         "//conditions:default": [],
     }),
     deps = [
-        # Start with the CPU-only engine for the first build. Swap to
-        # "//c:engine" (full, with GPU backend) once end-to-end UE integration
-        # is verified working.
-        "//c:engine_cpu",
+        # Full engine with both CPU and GPU (Vulkan on Windows) backends.
+        # Runtime selection via the backend_str parameter to
+        # litert_lm_engine_settings_create ("cpu" or "gpu"). The CPU path
+        # is always available; the GPU path requires Vulkan drivers.
+        # Swapped from //c:engine_cpu (CPU-only) after Milestone D verified
+        # the full UE integration end-to-end.
+        "//c:engine",
     ],
 )
