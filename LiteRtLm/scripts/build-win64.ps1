@@ -128,6 +128,31 @@ if (-not $libSrc) {
     Write-Host "  [STAGE] $(Split-Path $libSrc -Leaf) -> $Win64LibDst\LiteRtLm.lib"
 }
 
+# GPU accelerator prebuilt DLLs — shipped by upstream in prebuilt/windows_x86_64/.
+# These are dynamically loaded by the LiteRT engine at runtime when backend="gpu"
+# is requested. The engine's SharedLibrary::Load converts .so → .dll on Windows
+# and calls LoadLibraryA, so the DLLs just need to be findable (same directory as
+# the host DLL or on PATH).
+#
+# libLiteRt.dll:                    LiteRT core runtime (the GPU DLLs import from this)
+# libLiteRtWebGpuAccelerator.dll:   WebGPU → D3D12 GPU accelerator
+# libLiteRtTopKWebGpuSampler.dll:   GPU-side top-K sampling
+$GpuPrebuiltDir = Join-Path $SubmoduleDir "prebuilt\windows_x86_64"
+$GpuDlls = @(
+    "libLiteRt.dll",
+    "libLiteRtWebGpuAccelerator.dll",
+    "libLiteRtTopKWebGpuSampler.dll"
+)
+foreach ($dll in $GpuDlls) {
+    $src = Join-Path $GpuPrebuiltDir $dll
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination (Join-Path $Win64BinDst $dll) -Force
+        Write-Host "  [STAGE] $dll -> $Win64BinDst"
+    } else {
+        Write-Warning "GPU prebuilt not found: $src (GPU backend will not be available)"
+    }
+}
+
 # Headers
 $headerSrc = Join-Path $SubmoduleDir "c\engine.h"
 if (Test-Path $headerSrc) {

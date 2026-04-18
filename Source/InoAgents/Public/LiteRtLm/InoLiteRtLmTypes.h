@@ -15,7 +15,7 @@ UENUM(BlueprintType)
 enum class EInoLiteRtLmBackend : uint8
 {
     Cpu  UMETA(DisplayName="CPU"),
-    Gpu  UMETA(DisplayName="GPU (not yet available — upstream stub)"),
+    Gpu  UMETA(DisplayName="GPU (D3D12 via WebGPU on Windows)"),
 };
 
 /**

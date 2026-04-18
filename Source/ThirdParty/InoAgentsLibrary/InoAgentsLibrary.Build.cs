@@ -45,9 +45,22 @@ public class InoAgentsLibrary : ModuleRules
 			PublicDelayLoadDLLs.Add("LiteRtLm.dll");
 			PublicDelayLoadDLLs.Add("libGemmaModelConstraintProvider.dll");
 
+			// GPU accelerator DLLs (delay-loaded on demand by the LiteRT engine
+			// when backend="gpu" is requested). These are upstream LiteRT-LM
+			// prebuilt binaries from prebuilt/windows_x86_64/. The engine
+			// dynamically loads them via LoadLibraryA at runtime — they do NOT
+			// need to be loaded by our StartupModule, but they must be staged
+			// alongside the other DLLs so LoadLibraryA can find them.
+			PublicDelayLoadDLLs.Add("libLiteRt.dll");
+			PublicDelayLoadDLLs.Add("libLiteRtWebGpuAccelerator.dll");
+			PublicDelayLoadDLLs.Add("libLiteRtTopKWebGpuSampler.dll");
+
 			// --- Runtime staging (copied next to the executable at cook/package time) ---
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/LiteRtLm.dll");
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libGemmaModelConstraintProvider.dll");
+			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRt.dll");
+			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtWebGpuAccelerator.dll");
+			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtTopKWebGpuSampler.dll");
 		}
 		else
 		{
