@@ -20,6 +20,23 @@ using UnrealBuildTool;
 /// </summary>
 public class InoAgentsLibrary : ModuleRules
 {
+	// ---------------------------------------------------------------------
+	// TEMPORARY (2026-04-19): Android LiteRT-LM native integration is
+	// disabled while we diagnose the SplashActivity launch failure.
+	// With this flag set to false, the Android branch below is skipped
+	// and Android builds fall through to the `else` stub path — same
+	// treatment as iOS / Linux / macOS.
+	//
+	// To re-enable:
+	//   1. Flip this to true
+	//   2. Restore the `#elif PLATFORM_ANDROID` branch in
+	//      Source/InoAgents/Private/InoAgents.cpp
+	//   3. Restore the guard in
+	//      Source/InoAgents/Private/LiteRtLm/InoLiteRtLmStubs_NonWindows.cpp
+	//      to `#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`
+	// ---------------------------------------------------------------------
+	private const bool bAndroidLiteRtLmEnabled = false;
+
 	public InoAgentsLibrary(ReadOnlyTargetRules Target) : base(Target)
 	{
 		Type = ModuleType.External;
@@ -62,7 +79,7 @@ public class InoAgentsLibrary : ModuleRules
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtWebGpuAccelerator.dll");
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtTopKWebGpuSampler.dll");
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Android)
+		else if (Target.Platform == UnrealTargetPlatform.Android && bAndroidLiteRtLmEnabled)
 		{
 			// Android arm64-v8a artifacts produced by
 			//   Plugins/InoAgents/LiteRtLm/scripts/build-android-arm64.ps1
