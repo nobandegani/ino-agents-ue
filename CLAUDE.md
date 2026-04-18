@@ -80,7 +80,7 @@ Gemma 4's **31B dense** and **26B A4B MoE** server-class variants are **intentio
 Plugins/InoAgents/
 ├── InoAgents.uplugin
 ├── LiteRtLm/                                      ← Bazel build workspace (self-contained)
-│   ├── vendor/LiteRT-LM/                          ← git submodule, upstream pinned at v0.10.1 (c7b77b5)
+│   ├── vendor/LiteRT-LM/                          ← git submodule, upstream pinned at v0.10.2 (476c0bd)
 │   ├── overlay/                                   ← files staged into the submodule before each build
 │   │   └── ino/
 │   │       ├── BUILD.bazel                        ← //ino:LiteRtLm target, deps //c:engine_cpu
@@ -111,7 +111,7 @@ Plugins/InoAgents/
     └── libGemmaModelConstraintProvider.dll        ← required sibling runtime DLL (~13 MB, gitignored)
 ```
 
-**`LiteRtLm/vendor/LiteRT-LM/`** is a git submodule (`https://github.com/google-ai-edge/LiteRT-LM.git`) pinned at tag **v0.10.1** (commit `c7b77b5`). We never edit files inside the submodule directly. Version bumps happen via `LiteRtLm/scripts/update-litert.ps1`, which updates the submodule pointer and re-runs the overlay + build.
+**`LiteRtLm/vendor/LiteRT-LM/`** is a git submodule (`https://github.com/google-ai-edge/LiteRT-LM.git`) pinned at tag **v0.10.2** (commit `476c0bd`). We never edit files inside the submodule directly. Version bumps happen via `LiteRtLm/scripts/update-litert.ps1`, which updates the submodule pointer and re-runs the overlay + build.
 
 **`LiteRtLm/overlay/`** holds files that need to land inside the submodule's source tree at build time (for example, a custom `BUILD.bazel` target that produces our DLL). The overlay is tracked in the plugin repo. `setup.ps1` copies overlay files into the submodule and adds them to the submodule's `.git/info/exclude` so the submodule working tree stays clean from git's perspective.
 

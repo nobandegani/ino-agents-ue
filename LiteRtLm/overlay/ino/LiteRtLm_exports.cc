@@ -74,6 +74,7 @@ volatile InoAgentsFn kInoAgentsForceKeep[] = {
     reinterpret_cast<InoAgentsFn>(&litert_lm_engine_settings_enable_benchmark),
     reinterpret_cast<InoAgentsFn>(&litert_lm_engine_settings_set_num_prefill_tokens),
     reinterpret_cast<InoAgentsFn>(&litert_lm_engine_settings_set_num_decode_tokens),
+    reinterpret_cast<InoAgentsFn>(&litert_lm_engine_settings_set_parallel_file_section_loading),  // v0.10.2
 
     // Engine lifecycle
     reinterpret_cast<InoAgentsFn>(&litert_lm_engine_create),
