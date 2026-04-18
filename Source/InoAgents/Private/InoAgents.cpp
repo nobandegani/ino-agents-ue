@@ -95,6 +95,26 @@ void FInoAgentsModule::StartupModule()
     GemmaConstraintProviderHandle = LoadStagedDll(TEXT("libGemmaModelConstraintProvider.dll"));
     LiteRtLmHandle                = LoadStagedDll(TEXT("LiteRtLm.dll"));
 
+    // GPU accelerator DLLs — pre-load them so LiteRT's engine can find
+    // them when it internally calls LoadLibraryA("libLiteRtWebGpu...dll").
+    // Without pre-loading, LoadLibraryA searches relative to the
+    // process executable (UE's Engine/Binaries/Win64/) and fails
+    // because the DLLs live in our plugin directory instead.
+    //
+    // Load order matters: libLiteRt.dll first (the GPU DLLs import
+    // from it), then the accelerator and sampler. If any are missing
+    // (e.g. the user didn't run build-win64.ps1 with prebuilt staging),
+    // we just log a warning and skip — CPU backend still works fine.
+    //
+    // Unlike the core DLLs above, these use a soft-load pattern:
+    // failure is not an error, just a "GPU not available" warning.
+    LiteRtHandle = LoadStagedDll(TEXT("libLiteRt.dll"));
+    if (LiteRtHandle)
+    {
+        WebGpuAcceleratorHandle  = LoadStagedDll(TEXT("libLiteRtWebGpuAccelerator.dll"));
+        TopKWebGpuSamplerHandle = LoadStagedDll(TEXT("libLiteRtTopKWebGpuSampler.dll"));
+    }
+
     // --------------------------------------------------------------
     // Trivial startup smoke test: call one cheap C API function so we know
     // that
@@ -124,8 +144,24 @@ void FInoAgentsModule::StartupModule()
 
 void FInoAgentsModule::ShutdownModule()
 {
-    // Unload in reverse order of dependency: the main DLL first, then the
-    // sibling it depends on.
+    // Unload in reverse dependency order: GPU DLLs first (they import
+    // from libLiteRt), then libLiteRt, then our main DLL, then the
+    // constraint provider.
+    if (TopKWebGpuSamplerHandle)
+    {
+        FPlatformProcess::FreeDllHandle(TopKWebGpuSamplerHandle);
+        TopKWebGpuSamplerHandle = nullptr;
+    }
+    if (WebGpuAcceleratorHandle)
+    {
+        FPlatformProcess::FreeDllHandle(WebGpuAcceleratorHandle);
+        WebGpuAcceleratorHandle = nullptr;
+    }
+    if (LiteRtHandle)
+    {
+        FPlatformProcess::FreeDllHandle(LiteRtHandle);
+        LiteRtHandle = nullptr;
+    }
     if (LiteRtLmHandle)
     {
         FPlatformProcess::FreeDllHandle(LiteRtLmHandle);
