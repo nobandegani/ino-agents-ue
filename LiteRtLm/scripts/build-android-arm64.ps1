@@ -49,6 +49,21 @@ if ($NdkCandidates.Count -eq 0) {
 }
 
 $AndroidNdkHome = $NdkCandidates[0].FullName
+
+# CRITICAL: Bazel's rules_android_ndk has a Windows path-slash bug
+# (bazelbuild/rules_android_ndk@rules.bzl:106-116): it concatenates
+# ndk_path + "/" + subdir, then tries to strip ndk_path from the
+# output of str(ctx.path(...)) — but str() returns forward slashes
+# while ndk_path has backslashes, so the strip fails and Bazel sees
+# an absolute path like "C:/Users/.../AndroidVersion.txt" as a
+# symlink destination and errors with "Cannot write outside of the
+# repository directory for path ...".
+#
+# Fix: pass ANDROID_NDK_HOME with forward slashes. Bazel's path
+# handling treats forward slashes consistently across platforms, so
+# the string comparison in rules_android_ndk works correctly.
+$AndroidNdkHome = $AndroidNdkHome.Replace('\', '/')
+
 Write-Host ""
 Write-Host "=== Android build preflight ===" -ForegroundColor Cyan
 Write-Host "  ANDROID_NDK_HOME: $AndroidNdkHome"
