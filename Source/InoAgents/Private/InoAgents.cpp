@@ -89,6 +89,7 @@ namespace
 
 void FInoAgentsModule::StartupModule()
 {
+#if PLATFORM_WINDOWS
     // Load order is critical — each DLL must be in memory before any
     // DLL that imports from it:
     //
@@ -114,26 +115,42 @@ void FInoAgentsModule::StartupModule()
         TopKWebGpuSamplerHandle = LoadStagedDll(TEXT("libLiteRtTopKWebGpuSampler.dll"));
     }
 
+    const bool bCanCallLiteRtLm = (LiteRtLmHandle != nullptr);
+#elif PLATFORM_ANDROID
+    // On Android, the .so files are loaded automatically by Android's
+    // dynamic linker at process startup via the <soLoadLibrary> entries
+    // in InoAgentsLibrary_UPL_Android.xml. Our game's main library
+    // (libUnrealGame.so) links against libLiteRtLm.so via
+    // PublicAdditionalLibraries in InoAgentsLibrary.Build.cs, so the
+    // symbols resolve through the normal Android linker path — no
+    // FPlatformProcess::GetDllHandle() calls needed.
+    //
+    // The GPU accelerator .so files are also in the APK's lib/arm64-v8a/
+    // (via the <resourceCopies> directive in the UPL XML). When the
+    // LiteRT engine calls dlopen("libLiteRtWebGpuAccelerator.so")
+    // internally, Android's linker finds them in the standard library
+    // search path for the process.
+    const bool bCanCallLiteRtLm = true;
+#else
+    // iOS / Linux / macOS: stubs in InoLiteRtLmStubs_NonWindows.cpp
+    // provide no-op implementations. Everything is linkable but every
+    // call returns nullptr / fails gracefully.
+    const bool bCanCallLiteRtLm = true;
+#endif
+
     // --------------------------------------------------------------
-    // Trivial startup smoke test: call one cheap C API function so we know
-    // that
-    //   (a) InoAgentsLibrary.Build.cs's import lib is wired correctly,
-    //   (b) the /EXPORT: workaround actually produces a callable symbol,
-    //   (c) delay-load trampolines resolve on first call without crashing,
-    //   (d) UE -> LiteRT-LM calling convention works end-to-end.
-    //
-    // litert_lm_set_min_log_level is the cheapest function in the public
-    // API: no state, no allocation, no model file required. It just forwards
-    // to absl::SetMinLogLevel. Arg 0 = INFO (no change in log verbosity).
-    //
-    // If this crashes, stop here — everything downstream depends on DLL
-    // calls working.
+    // Trivial startup smoke test: call one cheap C API function so we
+    // know the LiteRT-LM library is loaded and callable. On Windows
+    // this proves the delay-load trampolines and import lib wiring.
+    // On Android this proves the UPL-driven loadLibrary calls worked.
+    // On stub platforms this is a no-op (the stub returns without doing
+    // anything) which still proves the build linked successfully.
     //
     // The more substantial smoke tests (LoadEngineTest, GenerateTest,
-    // ConversationTest, ToolCallTest, StreamTest) are registered as console
-    // commands from files under Private/SmokeTests/ and run on demand.
+    // ConversationTest, ToolCallTest, StreamTest) are registered as
+    // console commands from files under Private/SmokeTests/.
     // --------------------------------------------------------------
-    if (LiteRtLmHandle)
+    if (bCanCallLiteRtLm)
     {
         litert_lm_set_min_log_level(0);
         UE_LOG(LogInoAgents, Log,
@@ -143,6 +160,7 @@ void FInoAgentsModule::StartupModule()
 
 void FInoAgentsModule::ShutdownModule()
 {
+#if PLATFORM_WINDOWS
     // Unload in reverse dependency order: GPU DLLs first (they import
     // from libLiteRt), then libLiteRt, then our main DLL, then the
     // constraint provider.
@@ -171,6 +189,11 @@ void FInoAgentsModule::ShutdownModule()
         FPlatformProcess::FreeDllHandle(GemmaConstraintProviderHandle);
         GemmaConstraintProviderHandle = nullptr;
     }
+#endif  // PLATFORM_WINDOWS
+
+    // On Android / iOS / Linux / macOS: nothing to unload — the shared
+    // libraries are managed by the OS dynamic linker and freed at
+    // process exit along with the rest of the game process.
 }
 
 IMPLEMENT_MODULE(FInoAgentsModule, InoAgents)

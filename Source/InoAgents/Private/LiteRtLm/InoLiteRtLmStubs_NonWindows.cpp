@@ -22,17 +22,20 @@
 //   - Int-returning functions return 0 (or a non-zero failure code for
 //     stream-start functions).
 //
-// When Milestone E ports LiteRT-LM to Android / iOS / Linux / macOS, this
-// file is deleted from the build on the corresponding platform and the
-// real libraries take over.
+// When LiteRT-LM is ported to each platform, this file skips compilation
+// on that platform and real libraries take over:
+//   - Android: ported via LiteRtLm/scripts/build-android-arm64.ps1
+//              producing libLiteRtLm.so (see InoAgentsLibrary.Build.cs
+//              Android branch). Stubs skipped when PLATFORM_ANDROID.
+//   - iOS / Linux / macOS: not yet ported, stubs still apply.
 //
-// Status note: as of Milestone D, calling any LiteRT-LM feature on Android
-// will produce an immediate "Native engine failed" error via the subsystem's
-// OnLoaded delegate. ElevenLabs, the streaming-audio component, and all
-// other plugin features unrelated to local LLM inference continue to work
-// normally on Android.
+// Status note: on iOS / Linux / macOS, calling any LiteRT-LM feature
+// will produce an immediate "Native engine failed" error via the
+// subsystem's OnLoaded delegate. ElevenLabs, the streaming-audio
+// component, and all other plugin features unrelated to local LLM
+// inference continue to work normally on those platforms.
 
-#if !PLATFORM_WINDOWS
+#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID
 
 #include "CoreMinimal.h"
 
@@ -313,4 +316,4 @@ extern "C" LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     return nullptr;
 }
 
-#endif  // !PLATFORM_WINDOWS
+#endif  // !PLATFORM_WINDOWS && !PLATFORM_ANDROID

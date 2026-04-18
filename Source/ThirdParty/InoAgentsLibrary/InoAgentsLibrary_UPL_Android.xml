@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+
+InoAgents plugin — Unreal Plugin Language (UPL) file for Android packaging.
+
+This file is referenced from InoAgentsLibrary.Build.cs via
+    AdditionalPropertiesForReceipt.Add("AndroidPlugin", "<this file>")
+and processed by UE's APK build step to inject per-plugin Android
+manifest entries, gradle tweaks, and native library packaging.
+
+Purpose: tell UE's APK builder to include every LiteRT-LM .so file
+under Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/ in
+the APK's lib/arm64-v8a/ directory, so that Android's dynamic
+linker can find them at process startup.
+
+RuntimeDependencies in Build.cs also stages the files, but that's
+cook-time staging (into the Staged/ output); UPL's <soLoadLibrary>
+is what handles APK packaging and explicit System.loadLibrary
+calls from Java/JNI.
+
+Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage/
+
+-->
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+
+	<!-- File trace for debugging: UE prints a line whenever this UPL is
+	     processed so you can see it's being picked up. -->
+	<trace enable="true"/>
+
+	<!--
+	soLoadLibrary: copy the .so file from its source directory into
+	the APK's lib/arm64-v8a/ directory AND emit a
+	    System.loadLibrary("<name>")
+	call in the Java launcher activity, so the library is loaded
+	before the game's main .so starts executing.
+
+	Order matters:
+	  1. libLiteRt.so — LiteRT core (other .so files import from it)
+	  2. libGemmaModelConstraintProvider.so — independent, no deps on others
+	  3. libLiteRtLm.so — imports from libLiteRt.so (must be loaded AFTER)
+
+	The GPU accelerator .so files are NOT preloaded here — they are
+	loaded on demand via dlopen by the LiteRT engine itself when
+	backend=gpu is requested. But they still need to be packaged into
+	the APK, which happens via <resourceCopies> below.
+	-->
+	<soLoadLibrary>
+		<loadLibrary name="LiteRt" failmsg="Failed to load libLiteRt.so"/>
+		<loadLibrary name="GemmaModelConstraintProvider" failmsg="Failed to load libGemmaModelConstraintProvider.so"/>
+		<loadLibrary name="LiteRtLm" failmsg="Failed to load libLiteRtLm.so"/>
+	</soLoadLibrary>
+
+	<!--
+	resourceCopies: copy additional .so files into the APK's
+	lib/arm64-v8a/ directory WITHOUT emitting a loadLibrary call.
+	These are the GPU accelerator libraries that the LiteRT engine
+	loads dynamically via dlopen when the model is configured with
+	backend=gpu.
+	-->
+	<resourceCopies>
+		<copyFile
+			src="$S(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/libLiteRtGpuAccelerator.so"
+			dst="$S(BuildDir)/libs/arm64-v8a/libLiteRtGpuAccelerator.so"/>
+		<copyFile
+			src="$S(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/libLiteRtOpenClAccelerator.so"
+			dst="$S(BuildDir)/libs/arm64-v8a/libLiteRtOpenClAccelerator.so"/>
+		<copyFile
+			src="$S(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/libLiteRtTopKOpenClSampler.so"
+			dst="$S(BuildDir)/libs/arm64-v8a/libLiteRtTopKOpenClSampler.so"/>
+		<copyFile
+			src="$S(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/libLiteRtTopKWebGpuSampler.so"
+			dst="$S(BuildDir)/libs/arm64-v8a/libLiteRtTopKWebGpuSampler.so"/>
+		<copyFile
+			src="$S(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/libLiteRtWebGpuAccelerator.so"
+			dst="$S(BuildDir)/libs/arm64-v8a/libLiteRtWebGpuAccelerator.so"/>
+	</resourceCopies>
+
+</root>

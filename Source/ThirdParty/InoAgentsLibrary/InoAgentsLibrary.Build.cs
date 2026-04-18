@@ -62,14 +62,72 @@ public class InoAgentsLibrary : ModuleRules
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtWebGpuAccelerator.dll");
 			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoAgentsLibrary/Win64/libLiteRtTopKWebGpuSampler.dll");
 		}
+		else if (Target.Platform == UnrealTargetPlatform.Android)
+		{
+			// Android arm64-v8a artifacts produced by
+			//   Plugins/InoAgents/LiteRtLm/scripts/build-android-arm64.ps1
+			// The Bazel-built libLiteRtLm.so + libLiteRt.so + prebuilt GPU
+			// accelerator .so files are staged into
+			//   Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a/
+			// UE's Android packaging picks them up via RuntimeDependencies
+			// below and copies them into the APK's lib/arm64-v8a/ directory,
+			// where Android's dynamic linker finds them at process startup.
+			//
+			// Unlike Windows, Android does NOT use import libraries — .so
+			// files are linked directly with PublicAdditionalLibraries at
+			// UE build time, and the linker resolves symbols against the
+			// .so's export table.
+			string Arm64BinDir = Path.Combine(
+				PluginDirectory, "Binaries/ThirdParty/InoAgentsLibrary/Android/arm64-v8a");
+
+			// Link against our Bazel output. PublicAdditionalLibraries with
+			// a .so path tells UBT to add it to the linker command line.
+			PublicAdditionalLibraries.Add(Path.Combine(Arm64BinDir, "libLiteRtLm.so"));
+
+			// RuntimeDependencies with StageAsReferenceFromBinaryDir tells
+			// the Android packaging step to include each .so in the APK's
+			// lib/arm64-v8a/ directory. Without this, the .so files never
+			// make it into the APK and the app crashes at launch with
+			// "library libLiteRtLm.so not found".
+			string[] AndroidRuntimeSoFiles = new string[]
+			{
+				"libLiteRtLm.so",
+				"libLiteRt.so",                        // LiteRT core (Bazel-built)
+				"libGemmaModelConstraintProvider.so",  // prebuilt, constraint provider
+				"libLiteRtGpuAccelerator.so",          // prebuilt, general GPU accelerator
+				"libLiteRtOpenClAccelerator.so",       // prebuilt, OpenCL-specific
+				"libLiteRtTopKOpenClSampler.so",       // prebuilt, OpenCL top-K sampler
+				"libLiteRtTopKWebGpuSampler.so",       // prebuilt, WebGPU top-K sampler
+				"libLiteRtWebGpuAccelerator.so",       // prebuilt, WebGPU accelerator
+			};
+			foreach (string So in AndroidRuntimeSoFiles)
+			{
+				string SoPath = Path.Combine(Arm64BinDir, So);
+				if (File.Exists(SoPath))
+				{
+					RuntimeDependencies.Add(SoPath);
+				}
+			}
+
+			// Apply the AndroidManifest.xml additions + build.gradle tweaks
+			// that tell UE's APK packager to bundle our native libraries.
+			// This is the mechanism Unreal uses to inject per-plugin Android
+			// build customization — we ship a UPL (Unreal Plugin Language)
+			// XML file next to this Build.cs that declares the native libs
+			// and, if needed, any extra JNI_OnLoad hooks.
+			AdditionalPropertiesForReceipt.Add(
+				"AndroidPlugin",
+				Path.Combine(ModuleDirectory, "InoAgentsLibrary_UPL_Android.xml"));
+		}
 		else
 		{
-			// Phases 2-5 (Android, iOS, Linux, macOS) are not yet implemented.
-			// The same Bazel build workspace at Plugins/InoAgents/LiteRtLm/ will
-			// produce the corresponding libraries once each platform is ported.
-			// For now, building the plugin for any non-Win64 platform will fail
-			// with a missing-symbol link error, which is the correct behavior
-			// during phase 1.
+			// iOS / Linux / macOS not yet implemented. Building for those
+			// platforms falls through to the stub file at
+			// Source/InoAgents/Private/LiteRtLm/InoLiteRtLmStubs_NonWindows.cpp
+			// which satisfies the linker with no-op implementations. Every
+			// LiteRT-LM call will gracefully return nullptr / failure at
+			// runtime. All other plugin features (ElevenLabs, streaming
+			// audio, chat panel) continue to work.
 		}
 	}
 }
