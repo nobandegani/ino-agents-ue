@@ -83,9 +83,11 @@ Plugins/InoAgents/
 │   ├── vendor/LiteRT-LM/                          ← git submodule, upstream pinned at v0.10.2 (476c0bd)
 │   ├── overlay/                                   ← files staged into the submodule before each build
 │   │   └── ino/
-│   │       ├── BUILD.bazel                        ← //ino:LiteRtLm target, deps //c:engine_cpu
+│   │       ├── BUILD.bazel                        ← //ino:LiteRtLm target, deps //c:engine
 │   │       └── LiteRtLm_exports.cc                ← force-reference stub (see "Custom Bazel target")
-│   ├── scripts/                                   ← setup.ps1, build-win64.ps1, update-litert.ps1, clean.ps1
+│   ├── scripts/                                   ← setup.ps1, build-win64.ps1,
+│   │                                                 build-android-arm64.ps1,
+│   │                                                 update-litert.ps1, clean.ps1
 │   ├── LITERT_LM_TAG
 │   └── README.md
 ├── Source/
@@ -105,17 +107,32 @@ Plugins/InoAgents/
 │   │           └── InoStreamTest.cpp        ← Ino.StreamTest
 │   └── ThirdParty/InoAgentsLibrary/               ← External module consuming the built artifacts
 │       ├── Public/litert/lm/engine.h              ← staged header (copy of vendor/LiteRT-LM/c/engine.h)
-│       └── Win64/LiteRtLm.lib                     ← staged import library (~108 KB)
-└── Binaries/ThirdParty/InoAgentsLibrary/Win64/
-    ├── LiteRtLm.dll                               ← main runtime DLL (~17 MB, gitignored)
-    └── libGemmaModelConstraintProvider.dll        ← required sibling runtime DLL (~13 MB, gitignored)
+│       ├── Win64/LiteRtLm.lib                     ← staged import library (~59 KB)
+│       ├── InoAgentsLibrary.Build.cs              ← per-platform branches (Win64 + Android)
+│       └── InoAgentsLibrary_UPL_Android.xml       ← Unreal Plugin Language file for APK packaging
+└── Binaries/ThirdParty/InoAgentsLibrary/
+    ├── Win64/                                     ← Windows runtime DLLs (all gitignored)
+    │   ├── LiteRtLm.dll                           ← Bazel-built wrapper (~14 MB)
+    │   ├── libLiteRt.dll                          ← LiteRT core (~11 MB)
+    │   ├── libGemmaModelConstraintProvider.dll    ← prebuilt constraint provider (~13 MB)
+    │   ├── libLiteRtWebGpuAccelerator.dll         ← prebuilt GPU accelerator (~21 MB)
+    │   └── libLiteRtTopKWebGpuSampler.dll         ← prebuilt GPU sampler (~17 MB)
+    └── Android/arm64-v8a/                         ← Android runtime .so files (all gitignored)
+        ├── libLiteRtLm.so                         ← Bazel-built wrapper
+        ├── libLiteRt.so                           ← Bazel-built LiteRT core
+        ├── libGemmaModelConstraintProvider.so     ← prebuilt (~20 MB)
+        ├── libLiteRtGpuAccelerator.so             ← prebuilt
+        ├── libLiteRtOpenClAccelerator.so          ← prebuilt (OpenCL path)
+        ├── libLiteRtTopKOpenClSampler.so          ← prebuilt
+        ├── libLiteRtTopKWebGpuSampler.so          ← prebuilt (WebGPU path)
+        └── libLiteRtWebGpuAccelerator.so          ← prebuilt
 ```
 
 **`LiteRtLm/vendor/LiteRT-LM/`** is a git submodule (`https://github.com/google-ai-edge/LiteRT-LM.git`) pinned at tag **v0.10.2** (commit `476c0bd`). We never edit files inside the submodule directly. Version bumps happen via `LiteRtLm/scripts/update-litert.ps1`, which updates the submodule pointer and re-runs the overlay + build.
 
 **`LiteRtLm/overlay/`** holds files that need to land inside the submodule's source tree at build time (for example, a custom `BUILD.bazel` target that produces our DLL). The overlay is tracked in the plugin repo. `setup.ps1` copies overlay files into the submodule and adds them to the submodule's `.git/info/exclude` so the submodule working tree stays clean from git's perspective.
 
-**`Source/ThirdParty/InoAgentsLibrary/`** is the existing UE `External` module, extended to consume LiteRT-LM. The stock `ExampleLibrary` scaffold that shipped with the plugin template is the starting pattern — `PublicAdditionalLibraries.Add(...)` for the import lib, `PublicDelayLoadDLLs.Add(...)` for the runtime DLL, `RuntimeDependencies.Add(...)` for staging into `Binaries/ThirdParty/...`. The `Build.cs` is rewritten to point at LiteRT-LM's artifacts instead of `ExampleLibrary`'s.
+**`Source/ThirdParty/InoAgentsLibrary/`** is a UE `External` module that tells UBT how to link and stage LiteRT-LM's libraries on each platform. Win64 branch uses the classic UE Third-Party pattern: `PublicAdditionalLibraries.Add(...)` for the `.lib` import library, `PublicDelayLoadDLLs.Add(...)` for the runtime `.dll`s, `RuntimeDependencies.Add(...)` for packaging. Android branch is different: `PublicAdditionalLibraries.Add(<path>.so)` directly (no import libs on Android — the `.so`'s export table is the link target), `RuntimeDependencies.Add(...)` for staging, and `AdditionalPropertiesForReceipt.Add("AndroidPlugin", <UPL XML>)` for injecting `<soLoadLibrary>` + `<resourceCopies>` into UE's APK packager. See the "Platform support → Android specifics" section below.
 
 ## Build system: Bazel 7.6.1 via bazelisk
 
@@ -132,13 +149,13 @@ Key facts about the upstream Bazel setup:
   - `--copt=/DLITERT_DISABLE_OPENCL_SUPPORT=1` — OpenCL disabled (we use D3D12 anyway)
   - `--shell_executable="C:/Program Files/Git/bin/bash.exe"` — **upstream hardcodes Git at this exact path** for shell genrules
   - `startup --windows_enable_symlinks` + `--enable_runfiles` — requires Developer Mode enabled
-- **Windows static-library export quirk (IMPORTANT).** Upstream `build:windows --legacy_whole_archive=0` disables `--whole-archive` on Windows (upstream bug `b/469455895`). This has a non-obvious consequence: when our `cc_binary(linkshared=1)` target depends on a `cc_library` like `//c:engine_cpu`, **MSVC's linker only pulls in `.obj` files from that static library that are referenced by already-included code**. A `__declspec(dllexport)` annotation on a function in an otherwise-unreferenced `.obj` is silently dropped — the build succeeds, but the function never reaches the DLL's export table. See "Custom Bazel target" for how we work around this with a force-reference stub.
+- **Windows static-library export quirk (IMPORTANT).** Upstream `build:windows --legacy_whole_archive=0` disables `--whole-archive` on Windows (upstream bug `b/469455895`). This has a non-obvious consequence: when our `cc_binary(linkshared=1)` target depends on a `cc_library` like `//c:engine`, **MSVC's linker only pulls in `.obj` files from that static library that are referenced by already-included code**. A `__declspec(dllexport)` annotation on a function in an otherwise-unreferenced `.obj` is silently dropped — the build succeeds, but the function never reaches the DLL's export table. See "Custom Bazel target" for how we work around this with a force-reference stub.
 
 ## Custom Bazel target
 
 We define exactly one new Bazel target via the overlay, in a new package inside the submodule:
 
-- **`//ino:LiteRtLm`** — a `cc_binary(linkshared=1, linkstatic=1)` that depends on `//c:engine_cpu` (start with CPU-only; swap to `//c:engine` when GPU support is added in a later iteration)
+- **`//ino:LiteRtLm`** — a `cc_binary(linkshared=1, linkstatic=1)` that depends on `//c:engine` (the full CPU + GPU target). We originally started with `//c:engine_cpu` during Milestone D bring-up and swapped to `//c:engine` once end-to-end UE integration was verified working.
 - Built output: `LiteRtLm.dll` (automatic Windows naming from `cc_binary(linkshared=1)`)
 - Reuses `build:windows --config=monolithic` from upstream `.bazelrc` — all transitive deps link statically into the single DLL
 - **We do NOT use a `/DEF:` file** (unlike upstream's `runtime/engine:litert_lm_main`). `/DEF:` is *exclusive* — it overrides `__declspec(dllexport)` and the linker's `/OPT:REF` dead-strips anything not listed. Trying it produced a 12 MB DLL with zero `litert_lm_*` exports.
@@ -148,7 +165,7 @@ We define exactly one new Bazel target via the overlay, in a new package inside 
 Bazel's `cc_binary` rule requires at least one source file. Ours, `overlay/ino/LiteRtLm_exports.cc`, serves two roles:
 
 1. **DllMain stub** (standard Windows DLL entry point).
-2. **Force-reference of every `litert_lm_*` C API function** — a `volatile` array of function pointers that takes the address of each exported API function. Because `LiteRtLm_exports.cc` is part of the `cc_binary`'s own `srcs` (not a static library), its `.obj` is always linked. Taking the address of each function creates hard link-time references, forcing MSVC to pull in the `.obj` files from `//c:engine_cpu`'s static archive. Once those `.obj` files are pulled in, the `__declspec(dllexport)` annotations on their symbols (via `LITERT_LM_C_API_EXPORT` in `c/engine.h`) drive the export table.
+2. **Force-reference of every `litert_lm_*` C API function** — a `volatile` array of function pointers that takes the address of each exported API function. Because `LiteRtLm_exports.cc` is part of the `cc_binary`'s own `srcs` (not a static library), its `.obj` is always linked. Taking the address of each function creates hard link-time references, forcing MSVC to pull in the `.obj` files from `//c:engine`'s static archive. Once those `.obj` files are pulled in, the `__declspec(dllexport)` annotations on their symbols (via `LITERT_LM_C_API_EXPORT` in `c/engine.h`) drive the export table.
 
 **Maintenance:** the force-reference array must be kept in sync with the functions declared in `c/engine.h`. When LiteRT-LM is upgraded, re-extract the current list with:
 
@@ -167,11 +184,11 @@ and reconcile against `LiteRtLm_exports.cc`. A missing entry results in the corr
 
 ### `libGemmaModelConstraintProvider.dll`
 
-Our `LiteRtLm.dll` depends on `libGemmaModelConstraintProvider.dll` at runtime. This is an upstream **prebuilt** (LFS-tracked) binary at `vendor/LiteRT-LM/prebuilt/windows_x86_64/libGemmaModelConstraintProvider.dll`, ~13 MB. Some `cc_library` target in the `//c:engine_cpu` dep graph declares it as a data dependency, and Bazel symlinks it into `bazel-bin/ino/` alongside our DLL. `build-win64.ps1` copies the symlink target (the real file) into `Binaries/ThirdParty/InoAgentsLibrary/Win64/`. `InoAgentsLibrary.Build.cs` must list it in `PublicDelayLoadDLLs` and `RuntimeDependencies` so UE stages it alongside the executable. Without it, `LiteRtLm.dll` fails to load at runtime.
+Our `LiteRtLm.dll` depends on `libGemmaModelConstraintProvider.dll` at runtime. This is an upstream **prebuilt** (LFS-tracked) binary at `vendor/LiteRT-LM/prebuilt/windows_x86_64/libGemmaModelConstraintProvider.dll`, ~13 MB. Some `cc_library` target in the `//c:engine` dep graph declares it as a data dependency, and Bazel symlinks it into `bazel-bin/ino/` alongside our DLL. `build-win64.ps1` copies the symlink target (the real file) into `Binaries/ThirdParty/InoAgentsLibrary/Win64/`. `InoAgentsLibrary.Build.cs` must list it in `PublicDelayLoadDLLs` and `RuntimeDependencies` so UE stages it alongside the executable. Without it, `LiteRtLm.dll` fails to load at runtime. The same file (`.so` form) ships in `prebuilt/android_arm64/libGemmaModelConstraintProvider.so` for the Android build.
 
 ## Toolchain requirements (Windows host)
 
-A developer machine needs all of the following before `scripts/build-win64.ps1` can succeed:
+A developer machine needs all of the following before `scripts/build-win64.ps1` or `scripts/build-android-arm64.ps1` can succeed. All Android builds use the Windows host as the cross-compilation host — we do not build LiteRT-LM on Android itself.
 
 | Requirement | How |
 |---|---|
@@ -186,7 +203,15 @@ A developer machine needs all of the following before `scripts/build-win64.ps1` 
 | **Short Bazel `--output_base`** (MANDATORY, not optional) | `scripts/build-win64.ps1` passes `bazelisk --output_base=C:/b/ino build ...`. Matches upstream CI's pattern (`D:/w-<hash>/`) from `.github/workflows/ci-build-win.yml`. Without this, intermediate filenames like `…/crate_index__macro_rules_attribute-proc_macro-0.2.2/…cgu.0.rcgu.o` exceed 260 chars and `link.exe` fails with `LNK1181: cannot open input file`. `setup.ps1` creates `C:/b/ino` on first run — no admin needed on a modern Windows 10/11 user profile. |
 | **Antivirus exclusion for `C:\b\`** | Real-time scanning of Bazel's output root slows cold builds 3–5x. Not mandatory but strongly recommended. |
 
-The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and should be the first thing a new dev runs.
+For Android cross-compilation (`build-android-arm64.ps1`), additionally:
+
+| Requirement | How |
+|---|---|
+| **Android SDK** (any modern version) | Install via Android Studio. UE 5.7's `SetupAndroid.bat` also auto-installs it to `%LOCALAPPDATA%\Android\Sdk\` if the editor's Android packaging has been run at least once. |
+| **Android NDK r28b or newer** | Install via Android Studio's SDK Manager → SDK Tools → NDK (Side by side) → check "Show Package Details" → select 28.0 or newer. Do **not** use UE's NDK r27.2 — LiteRT-LM's Bazel config requires r28+. The two NDKs coexist under `%LOCALAPPDATA%\Android\Sdk\ndk\` as separate subdirectories; `build-android-arm64.ps1` auto-detects the newest r28+ and points `ANDROID_NDK_HOME` at it for the child Bazel process only. |
+| **Second Bazel output base** | `build-android-arm64.ps1` uses `C:/b/ino-android` instead of `C:/b/ino` so the Android and Windows builds don't fight over the same action cache. Same MAX_PATH rationale. |
+
+The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and should be the first thing a new dev runs. The Android script does its own additional preflight (NDK detection, version parsing) when invoked.
 
 ## UE-side integration architecture
 
@@ -350,19 +375,41 @@ Smoke tests are compiled into every build configuration. For now they're gated b
 
 ## Platform support
 
-Currently **Windows (Win64, MSVC)** only. CPU inference works end-to-end. GPU path (`//c:engine`) builds but is untested — swap the Bazel target when enabling.
+| Platform | Status | Build script | Artifacts |
+|---|---|---|---|
+| **Windows (Win64, MSVC)** | ✅ full (CPU + GPU via D3D12/WebGPU) | `LiteRtLm/scripts/build-win64.ps1` | `LiteRtLm.dll` + `libLiteRt.dll` + 3 prebuilt `.dll` files |
+| **Android (arm64-v8a)** | ✅ full (CPU + GPU via OpenCL / WebGPU) | `LiteRtLm/scripts/build-android-arm64.ps1` | `libLiteRtLm.so` + `libLiteRt.so` + 6 prebuilt `.so` files |
+| iOS | ⏳ stubs only | — | `InoLiteRtLmStubs_NonWindows.cpp` returns nullptr |
+| Linux | ⏳ stubs only | — | same |
+| macOS | ⏳ stubs only | — | same |
 
-Future platforms (Android, iOS, Linux, macOS) each require porting `InoAgentsLibrary.Build.cs` with a platform branch. Upstream `.bazelrc` already has `--config=android_arm64`, `--config=ios_arm64`, and `build:macos_arm64`. The UE API and Bazel recipe are identical across platforms — only the Build.cs branch differs.
+The UE API (subsystem, conversation, tools, delegates) is **identical across platforms**. Only the platform branch in `InoAgentsLibrary.Build.cs` differs. On unimplemented platforms, the plugin still links cleanly — calls to `LoadModelAsync` fail gracefully with a "Native engine failed" error via the `FOnInoLiteRtLmModelLoaded` delegate, and every other feature (ElevenLabs TTS, streaming audio, chat panel) works normally.
+
+### Android specifics
+
+- **NDK coexistence.** UE 5.7 requires NDK **r27.2** (hardcoded in `SetupAndroid.bat`) for the UE C++ build. LiteRT-LM's Bazel build requires NDK **r28b or newer**. The two NDKs install side-by-side under `%LOCALAPPDATA%\Android\Sdk\ndk\` as separate subdirectories and coexist without conflict — UBT uses the 27.2 tree, `build-android-arm64.ps1` auto-detects and uses the newest r28+. Do NOT point both at the same NDK; UE 5.7 is tightly coupled to r27.2 and LiteRT-LM wants r28+.
+- **Two Bazel output bases.** `C:/b/ino` for Win64, `C:/b/ino-android` for Android arm64. Same `--disk_cache` pattern, different action-cache keys so the two platform builds don't thrash each other.
+- **UPL (Unreal Plugin Language) XML.** `Source/ThirdParty/InoAgentsLibrary/InoAgentsLibrary_UPL_Android.xml` drives the APK packaging — `<soLoadLibrary>` emits `System.loadLibrary()` calls in the Java launcher in the correct order (`libLiteRt` → `libGemmaModelConstraintProvider` → `libLiteRtLm`, because `libLiteRtLm.so` imports from `libLiteRt.so`), and `<resourceCopies>` stages the 5 on-demand GPU accelerator `.so` files into `lib/arm64-v8a/` without explicit preloading (the LiteRT engine `dlopen`s them at runtime when `backend=gpu` is requested).
+- **`FInoAgentsModule::StartupModule` path.** Windows code explicitly `FPlatformProcess::GetDllHandle`s five DLLs in a specific order. Android code skips that entirely — the Android linker + UPL's `<soLoadLibrary>` handle preloading before `StartupModule` even runs. StartupModule on Android does the same `litert_lm_set_min_log_level(0)` smoke test as Windows, which proves the link resolved correctly.
+- **Two GPU accelerator paths.** Windows ships only WebGPU (→ D3D12 via Dawn). Android ships **both** WebGPU and OpenCL accelerator `.so` files — LiteRT picks whichever works on the target device at runtime. This means the Android APK is larger (~41 MB of prebuilt GPU `.so` files vs ~38 MB on Windows) but works on a wider range of GPUs (older Adreno / Mali that lack WebGPU drivers but have OpenCL).
+- **Model file.** The 2.6–5 GB `.litertlm` model file cannot ship inside the APK (Play Store limit is 200 MB base APK). Use the same auto-download-to-`PersistentDownloadDir` mechanism as Windows — `FPaths::ProjectPersistentDownloadDir()` resolves correctly on Android and the UE HTTP module works over Wi-Fi and cellular without any Android-specific setup beyond adding `android.permission.INTERNET` to the project's Android permissions (already done for ElevenLabs).
+- **Stubs.** `InoLiteRtLmStubs_NonWindows.cpp` is guarded by `#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`. When the Android `.so` is present, Android builds link against the real symbols. Remove the guard on a per-platform basis as each new platform is ported.
+
+Future platforms (iOS, Linux, macOS): upstream `.bazelrc` already has `--config=ios_arm64`, `build:linux_x86_64`, and `build:macos_arm64`. The pattern will be the same — write a `build-<platform>.ps1`, add a platform branch in `InoAgentsLibrary.Build.cs`, tighten the stubs guard.
 
 ## Windows gotchas
 
-- **Runtime DLLs to ship alongside the executable.** Two files must end up in `Binaries/ThirdParty/InoAgentsLibrary/Win64/`:
-  - `LiteRtLm.dll` (~17 MB) — our monolithic output
-  - `libGemmaModelConstraintProvider.dll` (~13 MB) — upstream prebuilt, required sibling. See "Custom Bazel target → libGemmaModelConstraintProvider.dll".
-  Both are handled by `build-win64.ps1` on the Bazel side and by `InoAgentsLibrary.Build.cs` on the UE side (both listed in `PublicDelayLoadDLLs` and `RuntimeDependencies`).
-- **DXC runtime DLLs (conditional).** If/when we enable GPU inference by swapping the BUILD target to `//c:engine`, LiteRT-LM's D3D12 shader compilation at runtime may require `dxil.dll` + `dxcompiler.dll` from Microsoft's [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) releases. These are **not** Bazel outputs. With the current CPU-only build (`//c:engine_cpu`) they are not needed and not shipped. Revisit when switching to GPU.
-- **Delay-load the DLLs.** `InoAgentsLibrary.Build.cs` uses `PublicDelayLoadDLLs.Add(...)` for both runtime DLLs so the game / editor launches even if they're missing. `FInoAgentsModule::StartupModule` calls `FPlatformProcess::GetDllHandle` explicitly and surfaces a `UE_LOG` error on failure — **no `FMessageDialog` fallback.** The original plugin template showed a blocking dialog on missing DLL; that dialog must be removed.
-- **Monolithic DLL.** Upstream `build:windows --config=monolithic` links all transitive dependencies (absl, protobuf, tensorflow lite, xnnpack, tokenizers_cpp, llguidance, minja, miniaudio, sentencepiece, etc.) statically into `LiteRtLm.dll`. We do not ship separate dependency DLLs except for `libGemmaModelConstraintProvider.dll`, which is a prebuilt upstream binary outside the Bazel graph.
+- **Five runtime DLLs to ship alongside the executable.** All must end up in `Binaries/ThirdParty/InoAgentsLibrary/Win64/`:
+  - `LiteRtLm.dll` (~14 MB) — our Bazel-built wrapper, dynamically links against `libLiteRt.dll`
+  - `libLiteRt.dll` (~11 MB) — LiteRT core runtime (Bazel-built; produced because we pass `--define=litert_link_capi_so=true`)
+  - `libGemmaModelConstraintProvider.dll` (~13 MB) — upstream prebuilt constraint provider
+  - `libLiteRtWebGpuAccelerator.dll` (~21 MB) — upstream prebuilt WebGPU → D3D12 accelerator
+  - `libLiteRtTopKWebGpuSampler.dll` (~17 MB) — upstream prebuilt GPU top-K sampler
+  All five are handled by `build-win64.ps1` on the Bazel side and by `InoAgentsLibrary.Build.cs` on the UE side (listed in both `PublicDelayLoadDLLs` and `RuntimeDependencies`).
+- **DLL load order is critical.** With `--define=litert_link_capi_so=true`, `LiteRtLm.dll` imports from `libLiteRt.dll`. Windows resolves imports at `LoadLibrary` time, so `FInoAgentsModule::StartupModule` must load `libLiteRt.dll` **before** `LiteRtLm.dll` or the load fails with `GetLastError=126` (missing import). Order: `libGemmaModelConstraintProvider.dll` → `libLiteRt.dll` → `LiteRtLm.dll` → two GPU accelerator DLLs.
+- **GPU accelerator DLLs must be pre-loaded too.** LiteRT's engine internally calls `LoadLibraryA("libLiteRtWebGpuAccelerator.dll")` by filename when `backend=gpu` is requested. Windows searches relative to the process executable (UE's `Engine/Binaries/Win64/`), not the plugin's DLL directory. If the GPU DLLs aren't pre-loaded with full paths first, the engine's internal `LoadLibraryA` returns null and GPU init crashes silently. Pre-loading by full path puts the module into the process's cached loaded-modules table, and subsequent `LoadLibraryA` calls by filename resolve to the already-loaded module.
+- **Dual LiteRT instance problem.** Before `--define=litert_link_capi_so=true`, our `LiteRtLm.dll` statically linked the full LiteRT core, AND `libLiteRt.dll` was also loaded for the GPU accelerators. Two copies of LiteRT in the same process caused heap corruption when objects crossed the boundary. The `litert_link_capi_so=true` build tells Bazel to externalize the LiteRT core into `libLiteRt.dll` so everyone (our wrapper, the GPU DLLs) shares one instance. Do NOT remove this define or GPU inference crashes.
+- **Delay-load the DLLs.** `InoAgentsLibrary.Build.cs` uses `PublicDelayLoadDLLs.Add(...)` for all five DLLs so the game / editor launches even if they're missing. `StartupModule` calls `FPlatformProcess::GetDllHandle` explicitly and surfaces a `UE_LOG` error on failure — no `FMessageDialog` fallback.
 - **MSVC runtime.** Build with `/MD` (dynamic CRT) to match UE. `/MT` would link successfully but produce two CRTs in the same process at runtime, causing silent heap corruption across allocator boundaries. Upstream `build:windows` already handles this correctly — no explicit override needed in our overlay.
 - **Force-reference the C API symbols.** See "Custom Bazel target → Why `LiteRtLm_exports.cc` exists". Without this, the DLL builds but exports no `litert_lm_*` functions because MSVC drops unreferenced `.obj` files from static libraries, and upstream disables `--whole-archive` on Windows.
 
