@@ -1,6 +1,7 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 #include "InoOnnxModule.h"
+#include "InoOnnxInternal.h"
 
 #include "InoAgentsLog.h"
 
@@ -232,7 +233,12 @@ void* Init()
 
 void Shutdown(void* Handle)
 {
-    // Clear the cached OrtApi pointer first so any late callers of
+    // Release the global OrtEnv (if any) BEFORE clearing GOrtApi — the
+    // release calls Api->ReleaseEnv, which needs a valid API pointer.
+    // ReleaseGlobalOrtEnv is a no-op if the env was never lazy-created.
+    Internal::ReleaseGlobalOrtEnv();
+
+    // Clear the cached OrtApi pointer next so any late callers of
     // GetApi() see nullptr rather than a vtable belonging to a DLL
     // we are about to unload. Happens-before ordering matters here.
     GOrtApi = nullptr;
