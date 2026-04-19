@@ -516,4 +516,158 @@ namespace
         TEXT("and dump the fp32 embedding stats. Args: [variant] [text...]. ")
         TEXT("Variant defaults to fp16; text defaults to \"Hello world\"."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunEmbedTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.EmbedRawTest — diagnostic: embed raw integer IDs
+    // ========================================================================
+    //
+    // This is a debugging tool, not part of the normal pipeline. It lets
+    // us probe the embed_tokens.onnx graph with arbitrary integer IDs
+    // (no tokenizer in the loop) to figure out what ID ranges the graph
+    // actually accepts. Background: the first attempt to run
+    // Ino.Chatterbox.EmbedTest with canonical GPT-2 text IDs
+    // (15496="Hello", 995=" world") failed with:
+    //   "Gather node '/speech_emb/Gather': idx=15496 out of bounds
+    //    [-6563,6562]"
+    // which suggests the graph's speech-embedding path is wired
+    // unconditionally — text IDs either need routing we're missing, or
+    // the graph is speech-only in practice. This command helps tell
+    // which.
+    //
+    // Usage: Ino.Chatterbox.EmbedRawTest <variant> <id1> [id2] [id3] ...
+    //        Ino.Chatterbox.EmbedRawTest fp16 0          # id 0 — safe for any table
+    //        Ino.Chatterbox.EmbedRawTest fp16 6561       # START_SPEECH_TOKEN
+    //        Ino.Chatterbox.EmbedRawTest fp16 6562       # STOP_SPEECH_TOKEN
+    //        Ino.Chatterbox.EmbedRawTest fp16 15496      # text "Hello"
+    //        Ino.Chatterbox.EmbedRawTest fp16 6561 4299  # START then SILENCE
+
+    void RunEmbedRawTest(const TArray<FString>& Args)
+    {
+        if (Args.Num() < 2)
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("Ino.Chatterbox.EmbedRawTest: usage: <variant> <id1> [id2] [id3] ..."));
+            return;
+        }
+        const FString Variant = Args[0];
+
+        TArray<int64> Ids;
+        Ids.Reserve(Args.Num() - 1);
+        for (int32 i = 1; i < Args.Num(); ++i)
+        {
+            // FCString::Atoi64 returns 0 on parse failure; accept that —
+            // 0 is a legal ID and the caller explicitly chose these.
+            Ids.Add((int64)FCString::Atoi64(*Args[i]));
+        }
+
+        const FString Dir = ResolveChatterboxDir(Variant);
+        const FString EmbedOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("embed_tokens_%s.onnx"), *Variant));
+
+        FString IdStr;
+        for (int32 i = 0; i < Ids.Num(); ++i)
+        {
+            IdStr += FString::Printf(TEXT("%s%lld"), i == 0 ? TEXT("") : TEXT(", "), Ids[i]);
+        }
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.EmbedRawTest: variant=%s ids=[%s]"), *Variant, *IdStr);
+        UE_LOG(LogInoAgents, Log, TEXT("Ino.Chatterbox.EmbedRawTest: dispatched."));
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, Ids, EmbedOnnxPath]()
+        {
+            FInoOnnxSessionOptions Opts;
+            Opts.GraphOptimization = EInoOnnxGraphOptimizationLevel::Disabled;
+
+            FString SessErr;
+            TUniquePtr<FInoOnnxSession> Sess =
+                FInoOnnxSession::Create(EmbedOnnxPath, Opts, &SessErr);
+            if (!Sess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EmbedRawTest: FAILED session load: %s"), *SessErr);
+                return;
+            }
+
+            const TArray<int64> InShape = { 1, (int64)Ids.Num() };
+            FInoOnnxTensor InputIds = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                InShape, MakeArrayView(Ids));
+            if (!InputIds.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EmbedRawTest: FAILED to build int64 input tensor"));
+                return;
+            }
+
+            TArray<FInoOnnxTensor> Inputs;
+            Inputs.Add(MoveTemp(InputIds));
+
+            TArray<FInoOnnxTensor> Outputs;
+            FString RunErr;
+            const bool bRan = Sess->Run(Inputs, Outputs, &RunErr);
+            if (!bRan)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EmbedRawTest: FAILED Run: %s"), *RunErr);
+                return;
+            }
+            if (Outputs.Num() != 1 || !Outputs[0].IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EmbedRawTest: FAILED — no output tensor"));
+                return;
+            }
+
+            const FInoOnnxTensor& Embeds = Outputs[0];
+            const TArray<int64>& OutShape = Embeds.GetShape();
+            FString ShapeStr;
+            for (int32 i = 0; i < OutShape.Num(); ++i)
+            {
+                ShapeStr += FString::Printf(TEXT("%s%lld"),
+                                            i == 0 ? TEXT("") : TEXT(", "), OutShape[i]);
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EmbedRawTest: Run OK — output shape=[%s] dtype=%d"),
+                   *ShapeStr, (int32)Embeds.GetDtype());
+
+            if (Embeds.GetDtype() == EInoOnnxDtype::Float32)
+            {
+                const float* Data = Embeds.GetData<float>();
+                if (Data != nullptr && OutShape.Num() == 3 && OutShape[2] > 0)
+                {
+                    // First 8 dims of token[0]'s vector.
+                    FString Preview;
+                    for (int64 i = 0; i < 8 && i < OutShape[2]; ++i)
+                    {
+                        Preview += FString::Printf(TEXT("%s%+.4f"),
+                                                   i == 0 ? TEXT("") : TEXT(", "), Data[i]);
+                    }
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("  token[0] first 8 dims: [%s]"), *Preview);
+
+                    // Also dump first 8 dims of each subsequent token for quick
+                    // side-by-side comparison when the caller passes multiple IDs.
+                    for (int64 Tok = 1; Tok < OutShape[1] && Tok < 4; ++Tok)
+                    {
+                        const float* TokData = Data + (Tok * OutShape[2]);
+                        FString P;
+                        for (int64 d = 0; d < 8 && d < OutShape[2]; ++d)
+                        {
+                            P += FString::Printf(TEXT("%s%+.4f"),
+                                                 d == 0 ? TEXT("") : TEXT(", "), TokData[d]);
+                        }
+                        UE_LOG(LogInoAgents, Log,
+                               TEXT("  token[%lld] first 8 dims: [%s]"), Tok, *P);
+                    }
+                }
+            }
+            UE_LOG(LogInoAgents, Log, TEXT("Ino.Chatterbox.EmbedRawTest: PASS"));
+        });
+    }
+
+    FAutoConsoleCommand GEmbedRawTestCmd(
+        TEXT("Ino.Chatterbox.EmbedRawTest"),
+        TEXT("Diagnostic: feed raw integer IDs to embed_tokens to probe which ID ")
+        TEXT("ranges the graph accepts. Args: <variant> <id1> [id2] [id3] ..."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunEmbedRawTest));
 }
