@@ -69,42 +69,42 @@ Docs: https://docs.unrealengine.com/en-US/Sharing/Reference/UnrealPluginLanguage
 	</init>
 
 	<!--
-	soLoadLibrary: emit System.loadLibrary("onnxruntime") in the Java
-	launcher activity so ORT is mapped into the process before
-	libUnreal.so begins executing.
+	soLoadLibrary: emit System.loadLibrary("InoOnnxRuntime") in the
+	Java launcher activity so the ORT .so is resident by the time
+	InoOnnxModule::Init's dlopen call runs.
 
-	Strictly speaking Android's dynamic linker will find libonnxruntime.so
-	on its own via libUnreal.so's DT_NEEDED entry (because our Build.cs
-	lists libonnxruntime.so in PublicAdditionalLibraries). But preloading
-	via System.loadLibrary is belt-and-suspenders — it surfaces any load
-	failure as a catchable UnsatisfiedLinkError in Java rather than a
-	process-killing SIGABRT from the dynamic linker, which is a markedly
-	better diagnostic experience.
+	Since we no longer PublicAdditionalLibraries on Android, libUnreal.so
+	does NOT DT_NEEDED our library — the dynamic linker wouldn't pick
+	it up automatically. The soLoadLibrary preload here is what gets
+	it mapped into the process. If it fails we get a catchable Java
+	UnsatisfiedLinkError rather than a silent native abort.
+
+	Named "InoOnnxRuntime" to match the renamed .so file
+	(libInoOnnxRuntime.so, Android convention lib<name>.so →
+	System.loadLibrary("<name>")).
 
 	failmsg surfaces in logcat as
-	    "AndroidJNI failed to load library 'onnxruntime'. Reason: <failmsg>"
-	so keep it short and actionable.
+	    "AndroidJNI failed to load library 'InoOnnxRuntime'. Reason: <failmsg>"
 	-->
 	<soLoadLibrary>
-		<loadLibrary name="onnxruntime" failmsg="Failed to load libonnxruntime.so — ensure OnnxRuntime/scripts/setup-onnxruntime.ps1 has been run and the APK re-packaged."/>
+		<loadLibrary name="InoOnnxRuntime" failmsg="Failed to load libInoOnnxRuntime.so — ensure OnnxRuntime/scripts/setup-onnxruntime.ps1 has been run and the APK re-packaged."/>
 	</soLoadLibrary>
 
 	<!--
-	resourceCopies: copy libonnxruntime.so into the APK's
-	lib/arm64-v8a/ directory. Without this, libUnreal.so's
-	DT_NEEDED(libonnxruntime.so) fails to resolve at process start
-	and the app crashes before any Java / UE code runs. See the
-	LiteRT-LM disabled-then-re-enabled debugging history (commits
-	ed733d0 through 7435e0a) for the full diagnosis of this class
-	of failure.
+	resourceCopies: copy libInoOnnxRuntime.so (our renamed ORT runtime)
+	into the APK's lib/arm64-v8a/ directory. The rename to a unique
+	filename lets our .so coexist in the same APK with any marketplace
+	plugin's libonnxruntime.so — which would otherwise be a filename
+	collision in the lib/<arch>/ directory, and the last-writer would
+	clobber the other.
 	-->
 	<resourceCopies>
 		<if condition="bSupported">
 			<true>
 				<copyFile
-					src="$S(AbsPluginDir)/../../../Binaries/ThirdParty/InoOnnxRuntime/Android/$S(Architecture)/libonnxruntime.so"
-					dst="$S(BuildDir)/libs/$S(Architecture)/libonnxruntime.so"/>
-				<log text="InoOnnxRuntime: copied libonnxruntime.so"/>
+					src="$S(AbsPluginDir)/../../../Binaries/ThirdParty/InoOnnxRuntime/Android/$S(Architecture)/libInoOnnxRuntime.so"
+					dst="$S(BuildDir)/libs/$S(Architecture)/libInoOnnxRuntime.so"/>
+				<log text="InoOnnxRuntime: copied libInoOnnxRuntime.so"/>
 			</true>
 		</if>
 	</resourceCopies>

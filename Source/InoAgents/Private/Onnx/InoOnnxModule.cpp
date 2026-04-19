@@ -30,22 +30,39 @@ namespace
      *  Accessed via GetApi() from all ORT-consuming .cpps in the plugin. */
     const OrtApi* GOrtApi = nullptr;
 
-#if PLATFORM_WINDOWS
-    /** Compute the absolute path to our renamed ORT runtime DLL. */
-    FString ResolveOnnxDllPath()
+    /**
+     * Per-platform library name we feed to FPlatformProcess::GetDllHandle.
+     *
+     * Windows: our renamed DLL at an absolute path. We resolve the full
+     *   path via IPluginManager so the loader can't be confused with any
+     *   other onnxruntime.dll on the system.
+     *
+     * Android: bare soname. Android's dynamic linker resolves this via
+     *   the APK's lib/<abi>/ dir (which is in LD_LIBRARY_PATH for the
+     *   process). We can't build an absolute path because the APK's
+     *   on-device lib dir ("/data/app/.../lib/arm64-v8a") isn't known
+     *   at build time. The UPL's soLoadLibrary preload has already
+     *   mapped the .so into the process by this point, so dlopen just
+     *   returns the existing handle.
+     */
+    FString ResolveOnnxLibraryName()
     {
+#if PLATFORM_WINDOWS
         const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
         if (!Plugin.IsValid())
         {
             return FString();
         }
-
         return FPaths::Combine(
             Plugin->GetBaseDir(),
             TEXT("Binaries/ThirdParty/InoOnnxRuntime/Win64"),
             TEXT("InoOnnxRuntime.dll"));
-    }
+#elif PLATFORM_ANDROID
+        return FString(TEXT("libInoOnnxRuntime.so"));
+#else
+        return FString();
 #endif
+    }
 
     /**
      * Call OrtApi::GetAvailableProviders and log the returned provider
@@ -141,39 +158,53 @@ namespace
 
 void* Init()
 {
-#if PLATFORM_WINDOWS
-    const FString Path = ResolveOnnxDllPath();
-    if (Path.IsEmpty())
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+    // Unified dlopen + dlsym path. We deliberately DO NOT link libUnreal
+    // against our ORT .so on either platform — doing so on Android caused
+    // clang's linker to resolve OrtGetApiBase against a marketplace
+    // plugin's OLDER libonnxruntime.so (1.19.2) that was also on the
+    // link path, recording the versioned symbol reference
+    // OrtGetApiBase@VERS_1.19.2 in libUnreal.so. At runtime on device,
+    // only OUR 1.24.3 .so (with OrtGetApiBase@@VERS_1.24.3) lives in the
+    // APK, and the dynamic linker aborts the process when it can't find
+    // the older version. By using GetDllExport("OrtGetApiBase") at
+    // runtime we bypass the static linker entirely and bind to whatever
+    // version our specific DLL/.so provides.
+    const FString LibName = ResolveOnnxLibraryName();
+    if (LibName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("InoAgents: could not resolve InoOnnxRuntime.dll path (plugin not found via IPluginManager?)."));
+               TEXT("InoAgents: could not resolve ONNX Runtime library name (IPluginManager failed?)."));
         return nullptr;
     }
 
-    void* Handle = FPlatformProcess::GetDllHandle(*Path);
+    void* Handle = FPlatformProcess::GetDllHandle(*LibName);
     if (Handle == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: failed to load InoOnnxRuntime.dll from %s. ")
-               TEXT("Did you run Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1?"),
-               *Path);
+               TEXT("InoAgents: failed to load %s. ")
+               TEXT("Did you run Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
+               TEXT("and re-package?"),
+               *LibName);
         return nullptr;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("InoAgents: loaded InoOnnxRuntime.dll from %s"),
-           *Path);
+           TEXT("InoAgents: loaded %s"),
+           *LibName);
 
-    // Resolve the single entry-point symbol we need from our isolated
-    // DLL. GetDllExport is UE's cross-platform wrapper over
-    // GetProcAddress / dlsym; on Windows it's GetProcAddress here.
+    // Resolve the single entry-point symbol we need. Everything else
+    // goes through the OrtApi vtable returned by GetApiBase()->GetApi().
+    // GetDllExport is UE's cross-platform wrapper over
+    // GetProcAddress (Windows) / dlsym (Android).
     using OrtGetApiBaseFn = const OrtApiBase* (*)();
     void* EntryPoint = FPlatformProcess::GetDllExport(Handle, TEXT("OrtGetApiBase"));
     if (EntryPoint == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: InoOnnxRuntime.dll does not export OrtGetApiBase. ")
-               TEXT("The DLL is malformed or the rename step in setup-onnxruntime.ps1 picked up the wrong file."));
+               TEXT("InoAgents: %s does not export OrtGetApiBase. ")
+               TEXT("The library is malformed or the setup script picked up the wrong file."),
+               *LibName);
         FPlatformProcess::FreeDllHandle(Handle);
         return nullptr;
     }
@@ -189,29 +220,10 @@ void* Init()
     LogAvailableProviders(GOrtApi);
     return Handle;
 
-#elif PLATFORM_ANDROID
-    // On Android, libonnxruntime.so is resident by the time we get here:
-    //   (a) It is DT_NEEDED by libUnreal.so (our Build.cs adds
-    //       libonnxruntime.so via PublicAdditionalLibraries on the
-    //       Android branch). Android's dynamic linker maps it
-    //       recursively when libUnreal.so is loaded via
-    //       System.loadLibrary("Unreal").
-    //   (b) Our UPL XML additionally emits System.loadLibrary("onnxruntime")
-    //       before that, as belt-and-suspenders.
-    //
-    // So OrtGetApiBase is a regular linker-resolved call from our TU —
-    // no GetProcAddress/dlsym dance needed.
-    const OrtApiBase* ApiBase = OrtGetApiBase();
-    GOrtApi = SelectOrtApi(ApiBase);
-    if (GOrtApi != nullptr)
-    {
-        LogAvailableProviders(GOrtApi);
-    }
-    return nullptr;
-
 #else
     // iOS / Linux / macOS: InoOnnxRuntime.Build.cs has no platform branch
-    // yet, so any Ort* call will fail to link before we even get here.
+    // yet, so the .so/.dylib isn't staged. Any GetApi() caller will see
+    // nullptr and handle it gracefully.
     UE_LOG(LogInoAgents, Warning,
            TEXT("InoAgents: ONNX Runtime is not yet available on this platform."));
     return nullptr;
@@ -225,15 +237,21 @@ void Shutdown(void* Handle)
     // we are about to unload. Happens-before ordering matters here.
     GOrtApi = nullptr;
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+    // We opened the handle via GetDllHandle (LoadLibrary / dlopen), so
+    // we own a refcount and must release it here. On Android this
+    // doesn't actually unmap the .so at process-shutdown time (the UPL
+    // soLoadLibrary preload holds a separate refcount from the Java
+    // side), but it keeps our bookkeeping clean and symmetric with
+    // Windows, and avoids a leaked handle at editor-mode
+    // module-unload/reload cycles.
     if (Handle != nullptr)
     {
         FPlatformProcess::FreeDllHandle(Handle);
     }
 #else
-    // No-op on Android / iOS / Linux / macOS: the shared library is
-    // managed by the OS dynamic linker and freed at process exit along
-    // with the rest of the game process.
+    // iOS / Linux / macOS: nothing to free — Init() returned nullptr
+    // before opening anything on those platforms.
     (void)Handle;
 #endif
 }

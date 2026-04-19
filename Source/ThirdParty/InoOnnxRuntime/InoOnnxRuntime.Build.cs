@@ -79,32 +79,48 @@ public class InoOnnxRuntime : ModuleRules
 		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{
 			// Android arm64-v8a artifacts staged by setup-onnxruntime.ps1
-			// under Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/.
-			// Android does NOT use import libraries — .so files are linked
-			// directly with PublicAdditionalLibraries at UE build time, and
-			// the linker resolves symbols against the .so's export table.
+			// under Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a/,
+			// RENAMED from libonnxruntime.so to libInoOnnxRuntime.so.
+			//
+			// Unlike Phase 2's original draft, we do NOT use
+			// PublicAdditionalLibraries on Android. Rationale:
+			//
+			// UE 5.7 ships a Marketplace plugin (RuntimeM558be8d6854bV8,
+			// the RuntimeMetaHumanLipSync variant) that distributes its
+			// own libonnxruntime.so for Android arm64 at ORT v1.19.2.
+			// If it's enabled in the project, UBT adds THAT .so to the
+			// link path for libUnreal.so. When our C++ code references
+			// OrtGetApiBase, clang's linker resolves against whichever
+			// libonnxruntime.so it sees first — often the 1.19.2 one —
+			// and records a versioned symbol reference
+			//     U OrtGetApiBase@VERS_1.19.2
+			// in libUnreal.so. At runtime the Android dynamic linker
+			// can't satisfy that version against OUR 1.24.3 .so and
+			// aborts the process before UE's logger is up. No stack
+			// trace, no .log file, same silent-death as the Windows
+			// NNE DLL-cache collision we hit in Phase 3.
+			//
+			// Fix: isolate. Rename our .so, drop it from the link
+			// command entirely, and dlopen + dlsym at runtime. The
+			// marketplace plugin's ORT (if any) stays in libUnreal.so's
+			// DT_NEEDED chain for THEIR consumers; ours never touches
+			// the link line. Full isolation.
 			string Arm64BinDir = Path.Combine(
 				PluginDirectory, "Binaries/ThirdParty/InoOnnxRuntime/Android/arm64-v8a");
 
-			PublicAdditionalLibraries.Add(Path.Combine(Arm64BinDir, "libonnxruntime.so"));
-
-			// RuntimeDependencies on Android does NOT actually stage the .so
-			// into the APK's lib/arm64-v8a/ directory — that only happens via
-			// the UPL's <resourceCopies> <copyFile> directive. We still list
-			// the .so in RuntimeDependencies so the UE packaging manifest
-			// knows about it (cook-time staging into Staged/), but the UPL
-			// is what gets it into the final APK. Lesson learned from the
-			// LiteRT-LM integration, see InoAgentsLibrary.Build.cs for the
-			// full story.
-			string SoPath = Path.Combine(Arm64BinDir, "libonnxruntime.so");
+			// RuntimeDependencies keeps the .so in the UE packaging
+			// manifest (cook-time staging into Saved/). The actual
+			// APK inclusion happens via the UPL XML's <resourceCopies>.
+			string SoPath = Path.Combine(Arm64BinDir, "libInoOnnxRuntime.so");
 			if (File.Exists(SoPath))
 			{
 				RuntimeDependencies.Add(SoPath);
 			}
 
 			// Apply the UPL (Unreal Plugin Language) XML that tells UE's
-			// APK packager to bundle libonnxruntime.so into lib/arm64-v8a/
-			// and inject the corresponding System.loadLibrary() call.
+			// APK packager to copy libInoOnnxRuntime.so into lib/arm64-v8a/
+			// and emit a System.loadLibrary("InoOnnxRuntime") call so the
+			// .so is resident by the time InoOnnxModule::Init runs.
 			AdditionalPropertiesForReceipt.Add(
 				"AndroidPlugin",
 				Path.Combine(ModuleDirectory, "InoOnnxRuntime_UPL_Android.xml"));

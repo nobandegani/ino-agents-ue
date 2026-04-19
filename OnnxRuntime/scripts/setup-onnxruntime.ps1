@@ -118,7 +118,7 @@ $StampFile = Join-Path $ThirdPartyDir ".ort_version"
 
 if ((Test-Path $StampFile) -and `
     (Test-Path (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll")) -and `
-    (Test-Path (Join-Path $Arm64BinStageDir "libonnxruntime.so"))) {
+    (Test-Path (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so"))) {
     $StampVersion = (Get-Content $StampFile -Raw).Trim()
     if ($StampVersion -eq $Version) {
         Write-Host "--- Already up to date ---" -ForegroundColor Green
@@ -241,13 +241,22 @@ New-Item -ItemType Directory -Path $AndroidExtractDir -Force | Out-Null
 Expand-Archive -Path $AarAsZip -DestinationPath $AndroidExtractDir -Force
 
 # The AAR layout puts per-ABI .so files at jni/<abi>/libonnxruntime.so.
+# We RENAME to libInoOnnxRuntime.so when staging — same rationale as the
+# Windows rename (see top-of-file comment). Android link-time symbol
+# versioning via VERS_<ver> means that if a marketplace plugin also
+# ships a libonnxruntime.so at a different version, clang's linker may
+# resolve our OrtGetApiBase reference against THEIR symbol version,
+# and the runtime linker then can't satisfy that version tag from OUR
+# .so. By giving our .so a unique name and using dlopen + dlsym we
+# isolate our ORT fully — libUnreal.so never DT_NEEDEDs libInoOnnxRuntime.so
+# and no versioned-symbol cross-wiring can occur.
 $ArmSoSrc = Join-Path $AndroidExtractDir "jni\arm64-v8a\libonnxruntime.so"
 if (-not (Test-Path $ArmSoSrc)) {
     Write-Error "libonnxruntime.so not found at expected path inside AAR: $ArmSoSrc"
 }
 
-Copy-Item -Path $ArmSoSrc -Destination (Join-Path $Arm64BinStageDir "libonnxruntime.so") -Force
-Write-Host "  [STAGE] libonnxruntime.so -> $Arm64BinStageDir"
+Copy-Item -Path $ArmSoSrc -Destination (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so") -Force
+Write-Host "  [STAGE] jni/arm64-v8a/libonnxruntime.so -> $Arm64BinStageDir\libInoOnnxRuntime.so (renamed for link-time version isolation)"
 
 # The Android AAR also contains the same headers as the Windows zip under
 # headers/. We already copied them from Windows — no need to re-copy. But
