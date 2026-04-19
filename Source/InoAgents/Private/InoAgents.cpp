@@ -17,6 +17,11 @@
 // should stay cheap and side-effect-free.
 #include "litert/lm/engine.h"
 
+// ONNX Runtime startup glue. Matches the LiteRT-LM pattern: load the DLL
+// here, run a trivial smoke test, keep anything heavier (session creation,
+// actual model inference) to the subsystem / worker layer.
+#include "InoOnnxModule.h"
+
 // Single definition for the shared log category declared in InoAgentsLog.h.
 // Everything in this module — including every file under Private/SmokeTests/
 // — logs to LogInoAgents via that header.
@@ -158,10 +163,33 @@ void FInoAgentsModule::StartupModule()
         UE_LOG(LogInoAgents, Log,
                TEXT("InoAgents: smoke test passed — litert_lm_set_min_log_level(0) returned cleanly."));
     }
+
+    // --------------------------------------------------------------
+    // ONNX Runtime startup. Same shape as the LiteRT-LM block above:
+    // Init() handles per-platform DLL/.so loading (Windows needs an
+    // explicit GetDllHandle because InoOnnxRuntime.Build.cs uses
+    // PublicDelayLoadDLLs; Android leaves the .so to the dynamic
+    // linker), and internally runs a trivial smoke test
+    // (OrtApi::GetAvailableProviders) so we see in the log whether
+    // ORT is callable end-to-end.
+    //
+    // Failure here is non-fatal — Init() logs its own error and
+    // returns nullptr. Any future subsystem that actually uses ORT
+    // (e.g. the Chatterbox Turbo TTS worker in a follow-up phase)
+    // should surface a user-visible error via its own OnLoaded /
+    // OnError delegate instead of relying on module-startup state.
+    // --------------------------------------------------------------
+    OnnxRuntimeHandle = InoAgents::Onnx::Init();
 }
 
 void FInoAgentsModule::ShutdownModule()
 {
+    // Shut down ONNX Runtime before LiteRT-LM — independent subsystems,
+    // but keeping teardown in mirror-image of startup is a cheap habit
+    // and leaves the log easier to read if something goes wrong.
+    InoAgents::Onnx::Shutdown(OnnxRuntimeHandle);
+    OnnxRuntimeHandle = nullptr;
+
 #if PLATFORM_WINDOWS
     // Unload in reverse dependency order: GPU DLLs first (they import
     // from libLiteRt), then libLiteRt, then our main DLL, then the

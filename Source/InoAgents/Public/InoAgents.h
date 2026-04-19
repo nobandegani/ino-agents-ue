@@ -58,4 +58,8 @@ private:
     void* LiteRtHandle               = nullptr;
     void* WebGpuAcceleratorHandle    = nullptr;
     void* TopKWebGpuSamplerHandle    = nullptr;
+
+    /** Handle to onnxruntime.dll, returned by InoAgents::Onnx::Init().
+     *  nullptr on Android (the OS linker owns the .so) or if the load failed. */
+    void* OnnxRuntimeHandle          = nullptr;
 };

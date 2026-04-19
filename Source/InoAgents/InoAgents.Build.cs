@@ -31,6 +31,12 @@ public class InoAgents : ModuleRules
 				// and similar private headers without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 
+				// Subdirectory of Private/ that holds the ONNX Runtime
+				// module startup glue + future ORT-consuming code (session
+				// wrapper, TTS workers). Added so InoAgents.cpp can
+				// #include "InoOnnxModule.h" without relative paths.
+				Path.Combine(ModuleDirectory, "Private", "Onnx"),
+
 				// Subdirectory of Private/ that holds the Slate chat-panel
 				// implementation (private widgets, style, bridge .cpp).
 				// Added so sibling .cpps can #include "InoChatStyle.h"
