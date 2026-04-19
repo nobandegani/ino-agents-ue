@@ -4,6 +4,7 @@
 #include "Async/Async.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
 #include "InoAgentsLog.h"
@@ -1571,4 +1572,553 @@ namespace
         TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
         TEXT("NOTE: without voice conditioning the tokens won't be musically sensible."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunARLoopTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.DecodeTest — end-to-end: text -> speech tokens -> PCM WAV
+    // ========================================================================
+    //
+    // Chunk-4 of Phase B3. Chains tokenizer + embed_tokens + language_model
+    // + conditional_decoder and writes the result to disk as a playable
+    // 24 kHz mono int16 WAV. Still no speaker conditioning — we pass
+    // zero-filled speaker_embeddings [1, 192] and zero-length
+    // speaker_features [1, 0, 80]. Without conditioning the audio WILL
+    // NOT sound like speech — probably noise or a degenerate waveform.
+    // The point of this smoke test is:
+    //   - 3-in / 1-out conditional_decoder plumbing works
+    //   - decoder accepts our AR-generated int64 speech tokens
+    //   - waveform output shape is roughly what 24 kHz × (S × ~4 ms/token)
+    //     predicts — tokens carry to samples cleanly
+    //   - a WAV file actually hits disk and isn't NaN-filled
+    //
+    // Proper voice conditioning (speech_encoder on reference WAV →
+    // cond_emb + speaker_embeddings + speaker_features) is chunk 5.
+    //
+    // Reference call (from HF README translated to positional Run):
+    //   wav = conditional_decoder.run({
+    //     "speech_tokens":      int64  [1, N],   # generate_tokens[:, 1:-1]
+    //     "speaker_embeddings": fp32   [1, 192],
+    //     "speaker_features":   fp32   [1, F, 80],
+    //   })[0]   # output: fp32 [1, S_samples] at 24 kHz
+
+    static constexpr int32 kChatterboxSampleRate      = 24000;
+    static constexpr int32 kChatterboxSpeakerEmbDim   = 192;
+    static constexpr int32 kChatterboxSpeakerFeatDim  = 80;
+
+    static const TArray<FString>& ExpectedDecoderInputNames()
+    {
+        static const TArray<FString> Names = {
+            TEXT("speech_tokens"),
+            TEXT("speaker_embeddings"),
+            TEXT("speaker_features"),
+        };
+        return Names;
+    }
+
+    /**
+     * Write a 24 kHz mono PCM-int16 WAV file. Samples are fp32 in
+     * [-1, +1]; anything outside that range is clamped. Returns true
+     * on success. Small + stdlib-free so we can drop it into the smoke
+     * test without dragging a real audio module.
+     */
+    static bool WriteMonoInt16Wav(
+        const FString& Path,
+        TArrayView<const float> Samples,
+        int32 SampleRate)
+    {
+        const int32 N = Samples.Num();
+        if (N <= 0)
+        {
+            return false;
+        }
+
+        TArray<uint8> Buf;
+        Buf.Reserve(44 + N * 2);
+
+        auto AppendU16 = [&Buf](uint16 V) { Buf.Append((const uint8*)&V, 2); };
+        auto AppendU32 = [&Buf](uint32 V) { Buf.Append((const uint8*)&V, 4); };
+        auto AppendTag = [&Buf](const char* Tag) { Buf.Append((const uint8*)Tag, 4); };
+
+        const uint32 DataBytes = (uint32)N * 2;
+        const uint32 RiffSize  = 36 + DataBytes;   // total file size - 8
+
+        AppendTag("RIFF");
+        AppendU32(RiffSize);
+        AppendTag("WAVE");
+
+        AppendTag("fmt ");
+        AppendU32(16);                             // fmt chunk size
+        AppendU16(1);                              // PCM
+        AppendU16(1);                              // mono
+        AppendU32((uint32)SampleRate);
+        AppendU32((uint32)SampleRate * 2);         // byte rate
+        AppendU16(2);                              // block align
+        AppendU16(16);                             // bits per sample
+
+        AppendTag("data");
+        AppendU32(DataBytes);
+
+        const int32 SampleStart = Buf.Num();
+        Buf.SetNumUninitialized(SampleStart + (int32)DataBytes);
+        int16* Out = reinterpret_cast<int16*>(Buf.GetData() + SampleStart);
+        for (int32 i = 0; i < N; ++i)
+        {
+            const float Clamped = FMath::Clamp(Samples[i], -1.0f, 1.0f);
+            Out[i] = (int16)FMath::RoundToInt(Clamped * 32767.0f);
+        }
+
+        return FFileHelper::SaveArrayToFile(Buf, *Path);
+    }
+
+    void RunDecodeTest(const TArray<FString>& Args)
+    {
+        // Same arg parsing shape as ARLoopTest:
+        //   Args[0]        : variant            (default: fp16)
+        //   Args[1] digits : max_new_tokens     (default: 64)
+        //   Args[1..] text : text to synthesize (default: "Hello world")
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+
+        int32 MaxNewTokens = kARLoopDefaultMaxNewTokens;
+        int32 TextStartIdx = 1;
+        if (Args.Num() >= 2 && !Args[1].IsEmpty() && FChar::IsDigit(Args[1][0]))
+        {
+            MaxNewTokens = FMath::Clamp(FCString::Atoi(*Args[1]), 1, 1024);
+            TextStartIdx = 2;
+        }
+
+        FString Text;
+        for (int32 i = TextStartIdx; i < Args.Num(); ++i)
+        {
+            if (!Text.IsEmpty()) { Text += TEXT(" "); }
+            Text += Args[i];
+        }
+        if (Text.IsEmpty()) { Text = TEXT("Hello world"); }
+
+        const FString Dir           = ResolveChatterboxDir(Variant);
+        const FString TokenizerPath = FPaths::Combine(Dir, TEXT("tokenizer.json"));
+        const FString EmbedOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("embed_tokens_%s.onnx"), *Variant));
+        const FString LMOnnxPath    = FPaths::Combine(
+            Dir, FString::Printf(TEXT("language_model_%s.onnx"), *Variant));
+        const FString DecoderOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("conditional_decoder_%s.onnx"), *Variant));
+
+        const FString OutDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Chatterbox"));
+        const FString OutWavPath = FPaths::Combine(OutDir, TEXT("decode_test.wav"));
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.DecodeTest: variant=%s max_new_tokens=%d text=\"%s\""),
+               *Variant, MaxNewTokens, *Text);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.DecodeTest: dispatched (LM + decoder load ~10-15 s)."));
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, Text, MaxNewTokens, TokenizerPath, EmbedOnnxPath,
+               LMOnnxPath, DecoderOnnxPath, OutDir, OutWavPath]()
+        {
+            FString Err;
+            FInoOnnxSessionOptions Opts;
+
+            // ---- Load tokenizer + encode text ----
+            TUniquePtr<FInoChatterboxTokenizer> Tk =
+                FInoChatterboxTokenizer::LoadFromJson(TokenizerPath, &Err);
+            if (!Tk.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED tokenizer load: %s"), *Err);
+                return;
+            }
+            const TArray<int64> TextIds = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
+            if (TextIds.Num() < 2)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED — need >=2 tokens, got %d"),
+                       TextIds.Num());
+                return;
+            }
+
+            // ---- Load all three sessions (we'll need them all) ----
+            const double EmbedLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EmbedSess =
+                FInoOnnxSession::Create(EmbedOnnxPath, Opts, &Err);
+            if (!EmbedSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED embed load: %s"), *Err);
+                return;
+            }
+            const double EmbedLoadMs = (FPlatformTime::Seconds() - EmbedLoadT0) * 1000.0;
+
+            const double LMLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> LMSess =
+                FInoOnnxSession::Create(LMOnnxPath, Opts, &Err);
+            if (!LMSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED LM load: %s"), *Err);
+                return;
+            }
+            const double LMLoadMs = (FPlatformTime::Seconds() - LMLoadT0) * 1000.0;
+
+            const double DecLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> DecoderSess =
+                FInoOnnxSession::Create(DecoderOnnxPath, Opts, &Err);
+            if (!DecoderSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED decoder load: %s"), *Err);
+                return;
+            }
+            const double DecLoadMs = (FPlatformTime::Seconds() - DecLoadT0) * 1000.0;
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: sessions loaded — embed=%.0f ms LM=%.0f ms decoder=%.0f ms"),
+                   EmbedLoadMs, LMLoadMs, DecLoadMs);
+
+            // LM signature check (same as ARStepTest/ARLoopTest).
+            const TArray<FString>& LMExpected = ExpectedLMInputNames();
+            if (LMSess->GetInputCount() != LMExpected.Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: LM signature mismatch"));
+                return;
+            }
+
+            // Decoder signature check.
+            const TArray<FString>& DecExpected = ExpectedDecoderInputNames();
+            if (DecoderSess->GetInputCount() != DecExpected.Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: decoder has %d inputs, expected %d"),
+                       DecoderSess->GetInputCount(), DecExpected.Num());
+                return;
+            }
+            for (int32 i = 0; i < DecExpected.Num(); ++i)
+            {
+                const FString Actual = DecoderSess->GetInputName(i);
+                if (Actual != DecExpected[i])
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.DecodeTest: decoder input[%d] = '%s', expected '%s'"),
+                           i, *Actual, *DecExpected[i]);
+                    return;
+                }
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: decoder signature OK (%d inputs)"),
+                   DecExpected.Num());
+
+            // ================================================================
+            // ---- Phase A: run the AR loop (identical to ARLoopTest) ----
+            // ================================================================
+
+            const int32 ExpectedLMOutputs = 1 + 2 * kChatterboxLMNumLayers;
+            TArray<int64> InputIds = TextIds;
+            const int64 StartSeqLen = TextIds.Num();
+            int64 CurSeqLen = StartSeqLen;
+
+            TArray<FInoOnnxTensor> PastKV;
+            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            {
+                const TArray<int64> ZeroKVShape = {
+                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
+                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+                {
+                    for (int32 KV = 0; KV < 2; ++KV)
+                    {
+                        PastKV.Add(FInoOnnxTensor::Create(
+                            EInoOnnxDtype::Float16, ZeroKVShape));
+                    }
+                }
+            }
+
+            TArray<int64> GeneratedTokens;
+            GeneratedTokens.Reserve(MaxNewTokens + 2);
+            GeneratedTokens.Add(kStartSpeechToken);
+
+            bool  bHitStop     = false;
+            int32 NumItersRun  = 0;
+            const double ARLoopT0 = FPlatformTime::Seconds();
+
+            for (int32 Iter = 0; Iter < MaxNewTokens; ++Iter)
+            {
+                const int64 CurInputLen = InputIds.Num();
+                FInoOnnxTensor EmbedInput = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                    { 1, CurInputLen }, MakeArrayView(InputIds));
+                TArray<FInoOnnxTensor> EmbedInputs;
+                EmbedInputs.Add(MoveTemp(EmbedInput));
+                TArray<FInoOnnxTensor> EmbedOutputs;
+                if (!EmbedSess->Run(EmbedInputs, EmbedOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.DecodeTest iter %d: embed Run: %s"), Iter, *Err);
+                    return;
+                }
+                FInoOnnxTensor InputsEmbeds = MoveTemp(EmbedOutputs[0]);
+
+                FInoOnnxTensor AttnMask = FInoOnnxTensor::Create(
+                    EInoOnnxDtype::Int64, { 1, CurSeqLen });
+                if (int64* D = AttnMask.GetMutableData<int64>())
+                {
+                    for (int64 i = 0; i < CurSeqLen; ++i) { D[i] = 1; }
+                }
+
+                FInoOnnxTensor PosIds;
+                if (Iter == 0)
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, StartSeqLen });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        for (int64 i = 0; i < StartSeqLen; ++i) { D[i] = i; }
+                    }
+                }
+                else
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, 1 });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        D[0] = CurSeqLen - 1;
+                    }
+                }
+
+                TArray<FInoOnnxTensor> LMInputs;
+                LMInputs.Reserve(LMExpected.Num());
+                LMInputs.Add(MoveTemp(InputsEmbeds));
+                LMInputs.Add(MoveTemp(AttnMask));
+                LMInputs.Add(MoveTemp(PosIds));
+                for (int32 i = 0; i < PastKV.Num(); ++i)
+                {
+                    LMInputs.Add(MoveTemp(PastKV[i]));
+                }
+                PastKV.Reset();
+
+                TArray<FInoOnnxTensor> LMOutputs;
+                if (!LMSess->Run(LMInputs, LMOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.DecodeTest iter %d: LM Run: %s"), Iter, *Err);
+                    return;
+                }
+                if (LMOutputs.Num() != ExpectedLMOutputs)
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.DecodeTest iter %d: LM output count mismatch"), Iter);
+                    return;
+                }
+
+                // argmax with repetition penalty on last-position logits
+                const FInoOnnxTensor& Logits = LMOutputs[0];
+                const TArray<int64>& LogitShape = Logits.GetShape();
+                const int64 LogitSeqLen = LogitShape[1];
+                const float* LogitData = Logits.GetData<float>();
+
+                TArray<float> Scores;
+                Scores.SetNumUninitialized(kChatterboxLMSpeechVocabSize);
+                FMemory::Memcpy(
+                    Scores.GetData(),
+                    LogitData + (LogitSeqLen - 1) * kChatterboxLMSpeechVocabSize,
+                    (SIZE_T)kChatterboxLMSpeechVocabSize * sizeof(float));
+                ApplyRepetitionPenalty(
+                    Scores.GetData(), kChatterboxLMSpeechVocabSize,
+                    GeneratedTokens, kRepetitionPenalty);
+
+                int64 NextToken = 0;
+                float BestScore = -FLT_MAX;
+                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
+                {
+                    if (Scores[i] > BestScore) { BestScore = Scores[i]; NextToken = i; }
+                }
+
+                GeneratedTokens.Add(NextToken);
+                NumItersRun = Iter + 1;
+
+                if (NextToken == kStopSpeechToken)
+                {
+                    bHitStop = true;
+                    break;
+                }
+
+                InputIds.Reset(1);
+                InputIds.Add(NextToken);
+                CurSeqLen += 1;
+                for (int32 i = 1; i < LMOutputs.Num(); ++i)
+                {
+                    PastKV.Add(MoveTemp(LMOutputs[i]));
+                }
+            }
+
+            const double ARLoopMs = (FPlatformTime::Seconds() - ARLoopT0) * 1000.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: AR loop produced %d iters (STOP=%s) in %.0f ms"),
+                   NumItersRun, bHitStop ? TEXT("yes") : TEXT("no"), ARLoopMs);
+
+            // ================================================================
+            // ---- Phase B: prepare speech_tokens and call conditional_decoder
+            // ================================================================
+
+            // Python: speech_tokens = generate_tokens[:, 1:-1]
+            // Drop START; drop trailing STOP if present.
+            TArray<int64> SpeechTokens;
+            SpeechTokens.Reserve(GeneratedTokens.Num());
+            const int32 DropTail = (GeneratedTokens.Num() > 0
+                && GeneratedTokens.Last() == kStopSpeechToken) ? 1 : 0;
+            for (int32 i = 1; i < GeneratedTokens.Num() - DropTail; ++i)
+            {
+                SpeechTokens.Add(GeneratedTokens[i]);
+            }
+            if (SpeechTokens.Num() == 0)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED — no speech tokens to decode"));
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: %d speech tokens -> decoder"),
+                   SpeechTokens.Num());
+
+            // Build the three decoder inputs in declared order:
+            //   [0] speech_tokens      int64 [1, N]
+            //   [1] speaker_embeddings fp32  [1, 192]  (zeros for smoke test)
+            //   [2] speaker_features   fp32  [1, 0, 80] (empty for smoke test)
+            //
+            // speaker_features seq-dim is dynamic per metadata. We start
+            // with 0-length (empty prompt features); if the decoder
+            // rejects that we'll have to retry with a non-empty shape.
+            const int64 N = SpeechTokens.Num();
+            FInoOnnxTensor TokensTensor = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                { 1, N }, MakeArrayView(SpeechTokens));
+            if (!TokensTensor.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED to build speech_tokens tensor"));
+                return;
+            }
+
+            FInoOnnxTensor SpeakerEmbs = FInoOnnxTensor::Create(
+                EInoOnnxDtype::Float32, { 1, kChatterboxSpeakerEmbDim });
+            if (!SpeakerEmbs.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED to alloc speaker_embeddings"));
+                return;
+            }
+            // Zero-initialized by Create; leave it.
+
+            FInoOnnxTensor SpeakerFeats = FInoOnnxTensor::Create(
+                EInoOnnxDtype::Float32, { 1, 0, kChatterboxSpeakerFeatDim });
+            if (!SpeakerFeats.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED to alloc speaker_features [1,0,80]"));
+                return;
+            }
+
+            TArray<FInoOnnxTensor> DecInputs;
+            DecInputs.Reserve(3);
+            DecInputs.Add(MoveTemp(TokensTensor));
+            DecInputs.Add(MoveTemp(SpeakerEmbs));
+            DecInputs.Add(MoveTemp(SpeakerFeats));
+
+            TArray<FInoOnnxTensor> DecOutputs;
+            const double DecRunT0 = FPlatformTime::Seconds();
+            const bool bDecOk = DecoderSess->Run(DecInputs, DecOutputs, &Err);
+            const double DecRunMs = (FPlatformTime::Seconds() - DecRunT0) * 1000.0;
+
+            if (!bDecOk)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED decoder Run (%.1f ms): %s"),
+                       DecRunMs, *Err);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: decoder.Run() took %.1f ms"), DecRunMs);
+
+            if (DecOutputs.Num() != 1 || !DecOutputs[0].IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED — decoder output missing"));
+                return;
+            }
+
+            // ---- Waveform validation ----
+            const FInoOnnxTensor& Wav = DecOutputs[0];
+            const TArray<int64>& WavShape = Wav.GetShape();
+            if (WavShape.Num() != 2 || WavShape[0] != 1
+                || Wav.GetDtype() != EInoOnnxDtype::Float32)
+            {
+                FString ShapeStr;
+                for (int32 i = 0; i < WavShape.Num(); ++i)
+                {
+                    ShapeStr += FString::Printf(TEXT("%s%lld"),
+                                                i == 0 ? TEXT("") : TEXT(","), WavShape[i]);
+                }
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: unexpected waveform shape=[%s] dtype=%d (expected [1, S] fp32)"),
+                       *ShapeStr, (int32)Wav.GetDtype());
+                return;
+            }
+            const int64 SampleCount = WavShape[1];
+            const double DurationSec = (double)SampleCount / (double)kChatterboxSampleRate;
+            const double PerTokenMs  = N > 0 ? (DurationSec * 1000.0) / (double)N : 0.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: waveform fp32 [1, %lld] = %.3f s @ %d Hz (%.2f ms per speech token)"),
+                   SampleCount, DurationSec, kChatterboxSampleRate, PerTokenMs);
+
+            // Scan waveform for NaN/Inf + dynamic range.
+            const float* WavData = Wav.GetData<float>();
+            if (WavData == nullptr)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: waveform GetData<float> null"));
+                return;
+            }
+            int64 NanCount = 0, InfCount = 0;
+            float MinV =  FLT_MAX, MaxV = -FLT_MAX;
+            double SumAbs = 0.0;
+            for (int64 i = 0; i < SampleCount; ++i)
+            {
+                const float v = WavData[i];
+                if (FMath::IsNaN(v))     { ++NanCount; continue; }
+                if (!FMath::IsFinite(v)) { ++InfCount; continue; }
+                if (v < MinV) MinV = v;
+                if (v > MaxV) MaxV = v;
+                SumAbs += FMath::Abs(v);
+            }
+            const double MeanAbs = SampleCount > 0 ? SumAbs / (double)SampleCount : 0.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: waveform stats — min=%.4f max=%.4f mean|x|=%.4f nan=%lld inf=%lld"),
+                   MinV, MaxV, MeanAbs, NanCount, InfCount);
+
+            if (NanCount > 0 || InfCount > 0)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Ino.Chatterbox.DecodeTest: WARN — non-finite samples present"));
+            }
+
+            // ---- Write WAV to disk ----
+            IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
+            TArrayView<const float> SampleView(WavData, (int32)SampleCount);
+            if (!WriteMonoInt16Wav(OutWavPath, SampleView, kChatterboxSampleRate))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED to write WAV to %s"), *OutWavPath);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: wrote WAV -> %s"), *OutWavPath);
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.DecodeTest: PASS (variant=%s, %d speech tokens, %.3f s @ 24 kHz)"),
+                   *Variant, (int32)N, DurationSec);
+        });
+    }
+
+    FAutoConsoleCommand GDecodeTestCmd(
+        TEXT("Ino.Chatterbox.DecodeTest"),
+        TEXT("End-to-end text -> speech tokens -> PCM WAV. Runs tokenizer + embed + ")
+        TEXT("AR loop + conditional_decoder with zero-filled speaker conditioning. ")
+        TEXT("Writes <Project>/Saved/Chatterbox/decode_test.wav (24 kHz mono int16). ")
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
+        TEXT("NOTE: audio will NOT sound like speech — no voice conditioning yet (chunk 5)."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunDecodeTest));
 }
