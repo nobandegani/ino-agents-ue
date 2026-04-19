@@ -244,99 +244,103 @@ namespace
         return Out;
     }
 
-    /** Read input (true) or output (false) metadata at Index from the
-     *  session and append an FIOMeta entry to OutArr. Returns false on
-     *  ORT API error (which shouldn't happen on a valid session, but be
-     *  defensive). */
-    bool ReadIOMeta(
-        const OrtApi* Api,
-        OrtSession* Session,
-        bool bInput,
-        size_t Index,
-        TArray<FInoOnnxSession::FIOMeta>& OutArr)
+    // ReadIOMeta was here but needed access to the private
+    // FInoOnnxSession::FIOMeta nested type — anonymous-namespace free
+    // functions can't touch class privates. It's now a private static
+    // member function on FInoOnnxSession, defined further down this file.
+}
+
+bool FInoOnnxSession::ReadIOMeta(
+    const OrtApi* Api,
+    OrtSession* Session,
+    bool bInput,
+    size_t Index,
+    TArray<FInoOnnxSession::FIOMeta>& OutArr)
+{
+    using namespace InoAgents::Onnx::Internal;
+
+    // Allocator for name strings.
+    OrtAllocator* Allocator = nullptr;
+    if (!CheckOrtStatus(
+            Api->GetAllocatorWithDefaultOptions(&Allocator),
+            TEXT("GetAllocatorWithDefaultOptions"), nullptr))
     {
-        // Allocator for name strings.
-        OrtAllocator* Allocator = nullptr;
-        if (!CheckStatus(
-                Api->GetAllocatorWithDefaultOptions(&Allocator),
-                TEXT("GetAllocatorWithDefaultOptions")))
-        {
-            return false;
-        }
+        return false;
+    }
 
-        // --- Name ---
-        char* NamePtr = nullptr;
-        OrtStatus* NameStatus = bInput
-            ? Api->SessionGetInputName(Session, Index, Allocator, &NamePtr)
-            : Api->SessionGetOutputName(Session, Index, Allocator, &NamePtr);
-        if (!CheckStatus(NameStatus,
-                         bInput ? TEXT("SessionGetInputName") : TEXT("SessionGetOutputName")))
-        {
-            return false;
-        }
-        FString Name = FString(UTF8_TO_TCHAR(NamePtr));
-        Api->AllocatorFree(Allocator, NamePtr);  // free ORT-allocated string
+    // --- Name ---
+    char* NamePtr = nullptr;
+    OrtStatus* NameStatus = bInput
+        ? Api->SessionGetInputName(Session, Index, Allocator, &NamePtr)
+        : Api->SessionGetOutputName(Session, Index, Allocator, &NamePtr);
+    if (!CheckOrtStatus(NameStatus,
+                        bInput ? TEXT("SessionGetInputName") : TEXT("SessionGetOutputName"), nullptr))
+    {
+        return false;
+    }
+    FString Name = FString(UTF8_TO_TCHAR(NamePtr));
+    Api->AllocatorFree(Allocator, NamePtr);  // free ORT-allocated string
 
-        // --- Type info ---
-        OrtTypeInfo* TypeInfo = nullptr;
-        OrtStatus* TypeStatus = bInput
-            ? Api->SessionGetInputTypeInfo(Session, Index, &TypeInfo)
-            : Api->SessionGetOutputTypeInfo(Session, Index, &TypeInfo);
-        if (!CheckStatus(TypeStatus,
-                         bInput ? TEXT("SessionGetInputTypeInfo") : TEXT("SessionGetOutputTypeInfo")))
-        {
-            return false;
-        }
+    // --- Type info ---
+    OrtTypeInfo* TypeInfo = nullptr;
+    OrtStatus* TypeStatus = bInput
+        ? Api->SessionGetInputTypeInfo(Session, Index, &TypeInfo)
+        : Api->SessionGetOutputTypeInfo(Session, Index, &TypeInfo);
+    if (!CheckOrtStatus(TypeStatus,
+                        bInput ? TEXT("SessionGetInputTypeInfo") : TEXT("SessionGetOutputTypeInfo"),
+                        nullptr))
+    {
+        return false;
+    }
 
-        const OrtTensorTypeAndShapeInfo* TensorInfo = nullptr;
-        if (!CheckStatus(
-                Api->CastTypeInfoToTensorInfo(TypeInfo, &TensorInfo),
-                TEXT("CastTypeInfoToTensorInfo")))
-        {
-            Api->ReleaseTypeInfo(TypeInfo);
-            return false;
-        }
-
-        // CastTypeInfoToTensorInfo can set *TensorInfo to null for non-
-        // tensor model I/O (maps, sequences). We don't support those yet —
-        // log and skip.
-        if (TensorInfo == nullptr)
-        {
-            UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoOnnx: model %s[%zu] (%s) is not a tensor type; skipping metadata."),
-                   bInput ? TEXT("input") : TEXT("output"), Index, *Name);
-            Api->ReleaseTypeInfo(TypeInfo);
-            FInoOnnxSession::FIOMeta Stub;
-            Stub.Name = Name;
-            OutArr.Add(MoveTemp(Stub));
-            return true;
-        }
-
-        // Dtype.
-        ONNXTensorElementDataType OrtDtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-        CheckStatus(Api->GetTensorElementType(TensorInfo, &OrtDtype),
-                    TEXT("GetTensorElementType"));
-
-        // Shape.
-        size_t DimCount = 0;
-        TArray<int64> Shape;
-        if (CheckStatus(Api->GetDimensionsCount(TensorInfo, &DimCount),
-                        TEXT("GetDimensionsCount")) && DimCount > 0)
-        {
-            Shape.SetNumUninitialized((int32)DimCount);
-            CheckStatus(Api->GetDimensions(TensorInfo, Shape.GetData(), DimCount),
-                        TEXT("GetDimensions"));
-        }
-
+    const OrtTensorTypeAndShapeInfo* TensorInfo = nullptr;
+    if (!CheckOrtStatus(
+            Api->CastTypeInfoToTensorInfo(TypeInfo, &TensorInfo),
+            TEXT("CastTypeInfoToTensorInfo"), nullptr))
+    {
         Api->ReleaseTypeInfo(TypeInfo);
+        return false;
+    }
 
-        FInoOnnxSession::FIOMeta Entry;
-        Entry.Name  = MoveTemp(Name);
-        Entry.Shape = MoveTemp(Shape);
-        Entry.Dtype = OrtToDtype(OrtDtype);
-        OutArr.Add(MoveTemp(Entry));
+    // CastTypeInfoToTensorInfo can set *TensorInfo to null for non-
+    // tensor model I/O (maps, sequences). We don't support those yet —
+    // log and skip.
+    if (TensorInfo == nullptr)
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("InoOnnx: model %s[%zu] (%s) is not a tensor type; skipping metadata."),
+               bInput ? TEXT("input") : TEXT("output"), Index, *Name);
+        Api->ReleaseTypeInfo(TypeInfo);
+        FInoOnnxSession::FIOMeta Stub;
+        Stub.Name = Name;
+        OutArr.Add(MoveTemp(Stub));
         return true;
     }
+
+    // Dtype.
+    ONNXTensorElementDataType OrtDtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    CheckOrtStatus(Api->GetTensorElementType(TensorInfo, &OrtDtype),
+                   TEXT("GetTensorElementType"), nullptr);
+
+    // Shape.
+    size_t DimCount = 0;
+    TArray<int64> Shape;
+    if (CheckOrtStatus(Api->GetDimensionsCount(TensorInfo, &DimCount),
+                       TEXT("GetDimensionsCount"), nullptr) && DimCount > 0)
+    {
+        Shape.SetNumUninitialized((int32)DimCount);
+        CheckOrtStatus(Api->GetDimensions(TensorInfo, Shape.GetData(), DimCount),
+                       TEXT("GetDimensions"), nullptr);
+    }
+
+    Api->ReleaseTypeInfo(TypeInfo);
+
+    FInoOnnxSession::FIOMeta Entry;
+    Entry.Name  = MoveTemp(Name);
+    Entry.Shape = MoveTemp(Shape);
+    Entry.Dtype = OrtToDtype(OrtDtype);
+    OutArr.Add(MoveTemp(Entry));
+    return true;
 }
 
 // ============================================================================

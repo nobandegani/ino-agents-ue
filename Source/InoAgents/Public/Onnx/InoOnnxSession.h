@@ -191,7 +191,8 @@ public:
 private:
     FInoOnnxSession() = default;
 
-    /** Per-I/O cached metadata. Populated once in Create; immutable. */
+    /** Per-I/O cached metadata. Populated once in Create; immutable.
+     *  Nested-private so callers can't see ORT-flavored internals. */
     struct FIOMeta
     {
         FString       Name;
@@ -216,4 +217,20 @@ private:
         const FInoOnnxSessionOptions& Options,
         TArray<EInoOnnxProvider> RegisteredProviders,
         FString* OutError);
+
+    /**
+     * Populate a single FIOMeta entry at Index from the session's
+     * declared inputs (bInput=true) or outputs (bInput=false). Static
+     * because it operates only on the raw OrtSession + OrtApi; doesn't
+     * need class state. Declared as a private member instead of a free
+     * function so it can construct/access the private FIOMeta nested
+     * type. Returns false on ORT API error (logs + optionally sets
+     * *OutError is handled by CheckOrtStatus inside).
+     */
+    static bool ReadIOMeta(
+        const struct OrtApi* Api,
+        OrtSession* Session,
+        bool bInput,
+        size_t Index,
+        TArray<FIOMeta>& OutArr);
 };
