@@ -2151,4 +2151,358 @@ namespace
         TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
         TEXT("NOTE: audio will NOT sound like speech — no voice conditioning yet (chunk 5)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunDecodeTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.EncoderTest — probe the speech_encoder's I/O
+    // ========================================================================
+    //
+    // Chunk-5a of Phase B3. Dev-time diagnostic: load a reference WAV,
+    // run speech_encoder on it, log each of the 4 output tensors'
+    // (name, shape, dtype) + a short data preview. Does NOT feed
+    // anything into the AR loop or decoder — that's chunk 5b.
+    //
+    // The speech_encoder is AUTHORING-ONLY per the plugin's
+    // CLAUDE.md: it never ships with the game. In production we run
+    // it once per voice asset at dev time, save the four outputs as a
+    // .bin, and ship that. This test lets us verify the encoder runs
+    // + gives us ground truth on each output's exact shape and dtype
+    // before we wire them into the AR + decoder pipeline.
+    //
+    // Reference call (from HF Python):
+    //   audio_values = librosa.load(target_voice_path, sr=24000)[0]
+    //   audio_values = audio_values[None, :].astype(np.float32)  # [1, N]
+    //   cond_emb, prompt_token, speaker_embeddings, speaker_features =
+    //       speech_encoder_session.run(None, {"audio_values": audio_values})
+
+    /**
+     * Parse a 16-bit PCM mono WAV file into fp32 samples in [-1, +1].
+     *
+     * Only handles the common PCM mono 16-bit format; anything else
+     * (stereo, float32 PCM, IEEE floats, compressed) returns false
+     * with a diagnostic in *OutError. Chatterbox's default_voice.wav
+     * is 24 kHz mono int16 which matches.
+     *
+     * OutSampleRate is filled with the file's declared sample rate —
+     * caller is responsible for checking it matches 24 kHz if it
+     * cares. Resampling isn't done here; Chatterbox expects 24 kHz
+     * input and we fail the smoke test rather than silently accept
+     * a wrong rate.
+     */
+    static bool ReadMonoInt16WavAsFloat32(
+        const FString& Path,
+        TArray<float>& OutSamples,
+        int32& OutSampleRate,
+        FString* OutError)
+    {
+        OutSamples.Reset();
+        OutSampleRate = 0;
+
+        auto Fail = [&](const FString& Msg) -> bool
+        {
+            if (OutError) { *OutError = Msg; }
+            return false;
+        };
+
+        TArray<uint8> Buf;
+        if (!FFileHelper::LoadFileToArray(Buf, *Path))
+        {
+            return Fail(FString::Printf(TEXT("cannot read %s"), *Path));
+        }
+        if (Buf.Num() < 44)
+        {
+            return Fail(TEXT("file too small to be a WAV"));
+        }
+
+        const uint8* D = Buf.GetData();
+        if (FMemory::Memcmp(D + 0, "RIFF", 4) != 0)
+        {
+            return Fail(TEXT("missing 'RIFF' tag"));
+        }
+        if (FMemory::Memcmp(D + 8, "WAVE", 4) != 0)
+        {
+            return Fail(TEXT("missing 'WAVE' tag"));
+        }
+        if (FMemory::Memcmp(D + 12, "fmt ", 4) != 0)
+        {
+            return Fail(TEXT("missing 'fmt ' chunk at expected offset"));
+        }
+
+        // fmt chunk (canonical PCM layout)
+        const uint32 FmtSize       = *reinterpret_cast<const uint32*>(D + 16);
+        const uint16 AudioFormat   = *reinterpret_cast<const uint16*>(D + 20);
+        const uint16 NumChannels   = *reinterpret_cast<const uint16*>(D + 22);
+        const uint32 SampleRate    = *reinterpret_cast<const uint32*>(D + 24);
+        const uint16 BitsPerSample = *reinterpret_cast<const uint16*>(D + 34);
+
+        if (AudioFormat != 1)
+        {
+            return Fail(FString::Printf(
+                TEXT("AudioFormat=%u (need PCM=1; refuse to guess at decompression)"),
+                (uint32)AudioFormat));
+        }
+        if (NumChannels != 1)
+        {
+            return Fail(FString::Printf(
+                TEXT("NumChannels=%u (need mono=1)"), (uint32)NumChannels));
+        }
+        if (BitsPerSample != 16)
+        {
+            return Fail(FString::Printf(
+                TEXT("BitsPerSample=%u (need 16)"), (uint32)BitsPerSample));
+        }
+
+        // Locate the 'data' chunk. Some encoders insert 'LIST' / 'JUNK'
+        // chunks between 'fmt ' and 'data', so scan past fmt's end
+        // rather than assuming offset 36.
+        int64 ScanOffset = 12 + 8 + (int64)FmtSize;
+        int64 DataStart  = -1;
+        int64 DataBytes  = 0;
+        while (ScanOffset + 8 <= Buf.Num())
+        {
+            if (FMemory::Memcmp(D + ScanOffset, "data", 4) == 0)
+            {
+                DataBytes = (int64)(*reinterpret_cast<const uint32*>(D + ScanOffset + 4));
+                DataStart = ScanOffset + 8;
+                break;
+            }
+            const uint32 ChunkSize = *reinterpret_cast<const uint32*>(D + ScanOffset + 4);
+            ScanOffset += 8 + (int64)ChunkSize;
+        }
+        if (DataStart < 0)
+        {
+            return Fail(TEXT("no 'data' chunk found"));
+        }
+        if (DataStart + DataBytes > (int64)Buf.Num())
+        {
+            return Fail(TEXT("'data' chunk extends past end of file"));
+        }
+
+        const int64 NumSamples = DataBytes / 2;
+        OutSamples.SetNumUninitialized((int32)NumSamples);
+        const int16* Src = reinterpret_cast<const int16*>(D + DataStart);
+        for (int64 i = 0; i < NumSamples; ++i)
+        {
+            OutSamples[(int32)i] = (float)Src[i] * (1.0f / 32768.0f);
+        }
+        OutSampleRate = (int32)SampleRate;
+        return true;
+    }
+
+    void RunEncoderTest(const TArray<FString>& Args)
+    {
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString WavFileName = Args.Num() > 1 ? Args[1] : FString(TEXT("default_voice.wav"));
+
+        const FString Dir = ResolveChatterboxDir(Variant);
+        const FString EncoderOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("speech_encoder_%s.onnx"), *Variant));
+        const FString WavPath = FPaths::Combine(Dir, WavFileName);
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.EncoderTest: variant=%s wav=%s"), *Variant, *WavPath);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.EncoderTest: dispatched (encoder load ~5-10 s)."));
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, EncoderOnnxPath, WavPath]()
+        {
+            FString Err;
+
+            // ---- 1) Load WAV ----
+            TArray<float> Samples;
+            int32 SampleRate = 0;
+            if (!ReadMonoInt16WavAsFloat32(WavPath, Samples, SampleRate, &Err))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EncoderTest: FAILED wav read: %s"), *Err);
+                return;
+            }
+
+            const double DurationSec = (double)Samples.Num() / (double)FMath::Max(SampleRate, 1);
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EncoderTest: loaded %d samples @ %d Hz (%.3f s)"),
+                   Samples.Num(), SampleRate, DurationSec);
+
+            if (SampleRate != kChatterboxSampleRate)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Ino.Chatterbox.EncoderTest: WARN — expected %d Hz, got %d Hz. ")
+                       TEXT("Chatterbox was trained on 24 kHz; other rates will produce garbage."),
+                       kChatterboxSampleRate, SampleRate);
+            }
+
+            // ---- 2) Load speech_encoder + log its full metadata ----
+            FInoOnnxSessionOptions Opts;
+            const double LoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EncSess =
+                FInoOnnxSession::Create(EncoderOnnxPath, Opts, &Err);
+            const double LoadMs = (FPlatformTime::Seconds() - LoadT0) * 1000.0;
+            if (!EncSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EncoderTest: FAILED encoder load (%.0f ms): %s"),
+                       LoadMs, *Err);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EncoderTest: speech_encoder loaded in %.0f ms"), LoadMs);
+
+            // Full metadata dump so we see every input/output name and
+            // shape — this tells us whether our assumptions for chunk 5b
+            // (cond_emb, prompt_token, speaker_embeddings, speaker_features
+            // are the 4 outputs in that order, with specific shapes) match
+            // what the graph actually declares.
+            EncSess->LogMetadata();
+
+            // ---- 3) Build audio_values input: fp32 [1, N_samples] ----
+            // Per the Python reference, the input name is "audio_values"
+            // and shape is [batch, samples] with the raw waveform in
+            // [-1, +1]. We pass the entire WAV in one shot.
+            if (EncSess->GetInputCount() != 1)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Ino.Chatterbox.EncoderTest: encoder has %d inputs (expected 1); ")
+                       TEXT("proceeding with input[0] anyway"),
+                       EncSess->GetInputCount());
+            }
+            const FString InputName = EncSess->GetInputName(0);
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EncoderTest: feeding input[0] '%s' with fp32 [1, %d]"),
+                   *InputName, Samples.Num());
+
+            FInoOnnxTensor AudioInput = FInoOnnxTensor::CreateFromBufferCopy<float>(
+                { 1, (int64)Samples.Num() }, MakeArrayView(Samples));
+            if (!AudioInput.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EncoderTest: FAILED to build audio_values tensor"));
+                return;
+            }
+
+            TArray<FInoOnnxTensor> Inputs;
+            Inputs.Add(MoveTemp(AudioInput));
+
+            // ---- 4) Run ----
+            TArray<FInoOnnxTensor> Outputs;
+            const double RunT0 = FPlatformTime::Seconds();
+            if (!EncSess->Run(Inputs, Outputs, &Err))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.EncoderTest: FAILED encoder Run: %s"), *Err);
+                return;
+            }
+            const double RunMs = (FPlatformTime::Seconds() - RunT0) * 1000.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EncoderTest: encoder.Run() took %.1f ms, got %d outputs"),
+                   RunMs, Outputs.Num());
+
+            // ---- 5) Per-output report: shape, dtype, preview, finite check ----
+            for (int32 i = 0; i < Outputs.Num(); ++i)
+            {
+                const FInoOnnxTensor& T = Outputs[i];
+                const FString Name  = EncSess->GetOutputName(i);
+                const TArray<int64>& Shape = T.GetShape();
+                const EInoOnnxDtype Dtype  = T.GetDtype();
+
+                FString ShapeStr;
+                for (int32 j = 0; j < Shape.Num(); ++j)
+                {
+                    ShapeStr += FString::Printf(TEXT("%s%lld"),
+                                                j == 0 ? TEXT("") : TEXT(","), Shape[j]);
+                }
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("  [%d] '%s' shape=[%s] dtype=%d elements=%lld"),
+                       i, *Name, *ShapeStr, (int32)Dtype, T.GetElementCount());
+
+                // Dtype-specific preview + sanity scan.
+                if (Dtype == EInoOnnxDtype::Float32)
+                {
+                    const float* Data = T.GetData<float>();
+                    if (Data == nullptr) { continue; }
+                    const int64 N = T.GetElementCount();
+
+                    int64 NanCount = 0, InfCount = 0;
+                    float MinV =  FLT_MAX, MaxV = -FLT_MAX;
+                    double SumAbs = 0.0;
+                    int64  FiniteCount = 0;
+                    for (int64 k = 0; k < N; ++k)
+                    {
+                        const float v = Data[k];
+                        if (FMath::IsNaN(v))     { ++NanCount; continue; }
+                        if (!FMath::IsFinite(v)) { ++InfCount; continue; }
+                        if (v < MinV) MinV = v;
+                        if (v > MaxV) MaxV = v;
+                        SumAbs += FMath::Abs(v);
+                        ++FiniteCount;
+                    }
+                    const double MeanAbs = FiniteCount > 0 ? SumAbs / (double)FiniteCount : 0.0;
+                    if (FiniteCount == N)
+                    {
+                        UE_LOG(LogInoAgents, Log,
+                               TEXT("      stats min=%.4f max=%.4f mean|x|=%.4f (all %lld finite)"),
+                               MinV, MaxV, MeanAbs, N);
+                    }
+                    else
+                    {
+                        UE_LOG(LogInoAgents, Warning,
+                               TEXT("      stats nan=%lld inf=%lld finite=%lld/%lld"),
+                               NanCount, InfCount, FiniteCount, N);
+                    }
+
+                    FString Preview;
+                    const int64 PvN = FMath::Min((int64)6, N);
+                    for (int64 k = 0; k < PvN; ++k)
+                    {
+                        Preview += FString::Printf(TEXT("%s%+.4f"),
+                                                   k == 0 ? TEXT("") : TEXT(", "), Data[k]);
+                    }
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("      first %lld: [%s]"), PvN, *Preview);
+                }
+                else if (Dtype == EInoOnnxDtype::Int64)
+                {
+                    const int64* Data = T.GetData<int64>();
+                    if (Data == nullptr) { continue; }
+                    const int64 N = T.GetElementCount();
+
+                    int64 MinV = TNumericLimits<int64>::Max();
+                    int64 MaxV = TNumericLimits<int64>::Min();
+                    for (int64 k = 0; k < N; ++k)
+                    {
+                        if (Data[k] < MinV) MinV = Data[k];
+                        if (Data[k] > MaxV) MaxV = Data[k];
+                    }
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("      range [%lld .. %lld]"), MinV, MaxV);
+
+                    FString Preview;
+                    const int64 PvN = FMath::Min((int64)10, N);
+                    for (int64 k = 0; k < PvN; ++k)
+                    {
+                        Preview += FString::Printf(TEXT("%s%lld"),
+                                                   k == 0 ? TEXT("") : TEXT(", "), Data[k]);
+                    }
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("      first %lld: [%s]%s"),
+                           PvN, *Preview, N > PvN ? TEXT(" ...") : TEXT(""));
+                }
+                else
+                {
+                    UE_LOG(LogInoAgents, Log, TEXT("      (unknown dtype %d; no preview)"),
+                           (int32)Dtype);
+                }
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.EncoderTest: PASS (variant=%s)"), *Variant);
+        });
+    }
+
+    FAutoConsoleCommand GEncoderTestCmd(
+        TEXT("Ino.Chatterbox.EncoderTest"),
+        TEXT("Chunk-5a diagnostic: load default_voice.wav and run speech_encoder. ")
+        TEXT("Dumps each of the 4 outputs' name/shape/dtype + preview. ")
+        TEXT("Args: [variant] [wav_filename]. Defaults: fp16, default_voice.wav ")
+        TEXT("(resolved inside the staged variant dir)."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunEncoderTest));
 }
