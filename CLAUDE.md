@@ -67,10 +67,14 @@ The C API already covers what we need:
 
 Only the two "E" (edge / on-device) Gemma 4 variants are in scope for this plugin:
 
-| Variant | Effective params | Context | Modalities | Memory (Q4_0) |
+| Variant | Effective params | Context | Modalities | File size |
 |---|---|---|---|---|
-| **E2B** | ~2B | 128K | Text + Image | ~3.2 GB |
-| **E4B** | ~4B | 128K | Text + Image + **Audio** | ~5 GB |
+| **E2B** | ~2B | 128K | Text + Image + Audio | ~2.6 GB |
+| **E4B** | ~4B | 128K | Text + Image + Audio | ~3.7 GB |
+
+**Both variants are fully multimodal** — verified by inspecting the `.litertlm` containers directly. Both files carry `tf_lite_vision_encoder` + `vision_adapter_280` and `tf_lite_audio_encoder_hw` + `audio_adapter_features/mask` sections, plus `<|image|>` and `<|audio|>` special tokens and template branches for both modalities. E4B differs from E2B only in LLM backbone size (4B vs 2B effective params); the vision and audio encoders are identical. Earlier versions of this file claimed E2B was text+image-only — that was wrong.
+
+Note: **our UE-side wrapper currently passes `nullptr` for `vision_backend_str` and `audio_backend_str`** in `InoLiteRtLmSubsystem.cpp`'s `litert_lm_engine_settings_create` call, so even though the models support images/audio, the plugin's current code path only consumes text. Enabling multimodal input is tracked as future work — requires wiring image/audio payloads into our `UInoLiteRtLmConversation` Blueprint API and building `InputData` arrays for the C API.
 
 Gemma 4's **31B dense** and **26B A4B MoE** server-class variants are **intentionally out of scope** — they are not realistic to run inside a consumer UE game process alongside a renderer (17+ GB VRAM just for weights), and LiteRT-LM is an edge runtime, not a server runtime.
 
@@ -447,8 +451,8 @@ Auto-download to `PersistentDownloadDir` is **implemented** and works for both d
 ### Model sources
 
 Hugging Face, Apache 2.0, public (no gating, no auth):
-- `litert-community/gemma-4-E2B-it-litert-lm` — 2.58 GB, Text + Image
-- `litert-community/gemma-4-E4B-it-litert-lm` — ~5 GB, Text + Image + Audio
+- `litert-community/gemma-4-E2B-it-litert-lm` — 2.58 GB, Text + Image + Audio
+- `litert-community/gemma-4-E4B-it-litert-lm` — 3.65 GB, Text + Image + Audio
 
 ## How to update LiteRT-LM
 
