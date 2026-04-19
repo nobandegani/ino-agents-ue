@@ -2001,7 +2001,24 @@ namespace
                        TEXT("Ino.Chatterbox.DecodeTest: FAILED to alloc speaker_embeddings"));
                 return;
             }
-            // Zero-initialized by Create; leave it.
+            // First attempt (zeros) produced all-NaN waveforms — most likely
+            // the decoder L2-normalizes the embedding (divides by
+            // sqrt(sum(x^2))), so a zero vector gives 0/0 -> NaN that
+            // propagates through every downstream sample. Replace with a
+            // small unit vector: 1/sqrt(192) in every slot, so sum(x^2)=1
+            // and the normalization produces a valid (if semantically
+            // meaningless) direction. This is NOT a real speaker embedding
+            // — chunk 5 will replace it with speech_encoder output from a
+            // reference WAV. For chunk 4 it just proves the decoder
+            // produces finite samples when conditioning is in-distribution.
+            if (float* EmbData = SpeakerEmbs.GetMutableData<float>())
+            {
+                const float Val = 1.0f / FMath::Sqrt((float)kChatterboxSpeakerEmbDim);
+                for (int32 i = 0; i < kChatterboxSpeakerEmbDim; ++i)
+                {
+                    EmbData[i] = Val;
+                }
+            }
 
             FInoOnnxTensor SpeakerFeats = FInoOnnxTensor::Create(
                 EInoOnnxDtype::Float32, { 1, 0, kChatterboxSpeakerFeatDim });
@@ -2072,7 +2089,7 @@ namespace
                        TEXT("Ino.Chatterbox.DecodeTest: waveform GetData<float> null"));
                 return;
             }
-            int64 NanCount = 0, InfCount = 0;
+            int64 NanCount = 0, InfCount = 0, FiniteCount = 0;
             float MinV =  FLT_MAX, MaxV = -FLT_MAX;
             double SumAbs = 0.0;
             for (int64 i = 0; i < SampleCount; ++i)
@@ -2083,11 +2100,24 @@ namespace
                 if (v < MinV) MinV = v;
                 if (v > MaxV) MaxV = v;
                 SumAbs += FMath::Abs(v);
+                ++FiniteCount;
             }
-            const double MeanAbs = SampleCount > 0 ? SumAbs / (double)SampleCount : 0.0;
-            UE_LOG(LogInoAgents, Log,
-                   TEXT("Ino.Chatterbox.DecodeTest: waveform stats — min=%.4f max=%.4f mean|x|=%.4f nan=%lld inf=%lld"),
-                   MinV, MaxV, MeanAbs, NanCount, InfCount);
+            // Avoid printing the FLT_MAX / -FLT_MAX sentinels when every
+            // sample was non-finite (which is meaningless garbage and
+            // threw off the first chunk-4 bring-up log).
+            if (FiniteCount == 0)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Ino.Chatterbox.DecodeTest: waveform is entirely non-finite — nan=%lld inf=%lld of %lld"),
+                       NanCount, InfCount, SampleCount);
+            }
+            else
+            {
+                const double MeanAbs = SumAbs / (double)FiniteCount;
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("Ino.Chatterbox.DecodeTest: waveform stats (over %lld finite of %lld) — min=%.4f max=%.4f mean|x|=%.4f nan=%lld inf=%lld"),
+                       FiniteCount, SampleCount, MinV, MaxV, MeanAbs, NanCount, InfCount);
+            }
 
             if (NanCount > 0 || InfCount > 0)
             {
