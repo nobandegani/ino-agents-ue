@@ -77,4 +77,13 @@ public:
 
     /** Look up a model entry by filename. Returns nullptr if not found. */
     const FInoLiteRtLmModelEntry* FindModelByFileName(const FString& FileName) const;
+
+    /** Look up a model entry by either its DisplayName ("Gemma 4 E2B") or its
+     *  ModelFileName ("gemma-4-E2B-it.litertlm"). Case-insensitive. Returns
+     *  nullptr if no entry matches either field. This is the forgiving
+     *  lookup used by UInoLiteRtLmSubsystem::LoadModelAsync so Blueprint
+     *  users don't have to memorize the exact on-disk filename — they can
+     *  use the friendlier display name and the subsystem canonicalizes
+     *  transparently. */
+    const FInoLiteRtLmModelEntry* FindModel(const FString& NameOrFileName) const;
 };
