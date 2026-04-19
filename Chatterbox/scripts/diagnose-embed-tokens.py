@@ -34,8 +34,10 @@ import sys
 import traceback
 
 # Resolve model directory relative to this script — works from any CWD.
+# Script path: <PROJECT_ROOT>/Plugins/InoAgents/Chatterbox/scripts/diagnose-embed-tokens.py
+# so PROJECT_ROOT is exactly 4 levels up from SCRIPT_DIR.
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".."))
 MODEL_DIR    = os.path.join(
     PROJECT_ROOT, "Saved", "PersistentDownloadDir", "InoAgents",
     "Models", "Chatterbox", "fp16"
