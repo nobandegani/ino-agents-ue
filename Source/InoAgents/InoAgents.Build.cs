@@ -62,6 +62,9 @@ public class InoAgents : ModuleRules
 				"Engine",            // UDataAsset, UGameInstanceSubsystem, GEngine, FWorldContext —
 				                     // used in ULiteRtLmModelConfig and UInoLiteRtLmSubsystem.
 				"InoAgentsLibrary",  // LiteRT-LM C API via the staged header.
+				"InoOnnxRuntime",    // ONNX Runtime (Ort::Session / Env / Value) for generic
+				                     // ONNX inference. First consumer: Chatterbox Turbo TTS.
+				                     // Set up by Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				                     // and building ElevenLabs request bodies.
 				"JsonUtilities",     // FJsonObjectWrapper — Blueprint-friendly JSON struct used by
