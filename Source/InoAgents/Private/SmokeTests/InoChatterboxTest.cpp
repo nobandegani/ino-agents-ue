@@ -675,4 +675,453 @@ namespace
         TEXT("Diagnostic: feed raw integer IDs to embed_tokens to probe which ID ")
         TEXT("ranges the graph accepts. Args: <variant> <id1> [id2] [id3] ..."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunEmbedRawTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.ARStepTest — one forward pass through language_model
+    // ========================================================================
+    //
+    // Chunk-2 of Phase B3. Builds the full language_model input bundle
+    // for step 0 of an AR generation — text embeddings from chunk 1,
+    // plus empty KV cache, attention_mask, and position_ids — and runs
+    // one forward pass. Does NOT loop, does NOT sample repeatedly, does
+    // NOT apply speaker conditioning (those are chunks 4–6).
+    //
+    // Proves:
+    //   - fp16 tensor construction via Create(Float16, shape) (zero-init
+    //     is what we need for empty past_key_values at step 0)
+    //   - positional Run() plumbing scales to 51-input / 49-output
+    //   - language_model.onnx actually executes end-to-end on fp16 KV
+    //   - output logits and fp16 present-KV tensors come back with the
+    //     expected shapes, dtypes, no NaN/Inf
+    //
+    // Does NOT prove:
+    //   - output is musically meaningful — we skip the speech_encoder
+    //     cond_emb prepend that real inference needs. The argmax logged
+    //     here is only for sanity ("did we get finite logits out"); it's
+    //     not expected to be a valid speech token until chunk 5 adds
+    //     voice conditioning.
+    //
+    // Reference call pattern (verbatim from the HF Python reference,
+    // translated to our positional Run API):
+    //
+    //   inputs_embeds = embed_tokens.run({input_ids})[0]          # [1,S,1024] fp32
+    //   batch_size, seq_len, _ = inputs_embeds.shape
+    //   past_kv = { f"past_key_values.{l}.{kv}":
+    //                 zeros([batch_size, 16, 0, 64], dtype=fp16)
+    //               for l in range(24) for kv in ("key", "value") }
+    //   attention_mask = ones([batch_size, seq_len], int64)
+    //   position_ids   = arange(seq_len, int64).reshape(1, -1)
+    //   logits, *present_kv = language_model.run(dict(
+    //       inputs_embeds=inputs_embeds,
+    //       attention_mask=attention_mask,
+    //       position_ids=position_ids,
+    //       **past_kv))
+
+    // These are Chatterbox Turbo's fp16 variant. Verified against the
+    // LoadModelsTest output (51 inputs, 49 outputs).
+    static constexpr int32 kChatterboxLMNumLayers       = 24;
+    static constexpr int32 kChatterboxLMNumKVHeads      = 16;
+    static constexpr int32 kChatterboxLMHeadDim         = 64;
+    static constexpr int32 kChatterboxLMHiddenDim       = 1024;
+    static constexpr int32 kChatterboxLMSpeechVocabSize = 6563;
+
+    // Expected input-order. We validate against the live model's
+    // declared names after load; a mismatch means upstream re-ordered
+    // the graph and this code needs updating.
+    static const TArray<FString>& ExpectedLMInputNames()
+    {
+        static const TArray<FString> Names = []()
+        {
+            TArray<FString> N;
+            N.Reserve(3 + 2 * kChatterboxLMNumLayers);
+            N.Add(TEXT("inputs_embeds"));
+            N.Add(TEXT("attention_mask"));
+            N.Add(TEXT("position_ids"));
+            for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+            {
+                N.Add(FString::Printf(TEXT("past_key_values.%d.key"), L));
+                N.Add(FString::Printf(TEXT("past_key_values.%d.value"), L));
+            }
+            return N;
+        }();
+        return Names;
+    }
+
+    void RunARStepTest(const TArray<FString>& Args)
+    {
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+
+        FString Text;
+        if (Args.Num() > 1)
+        {
+            for (int32 i = 1; i < Args.Num(); ++i)
+            {
+                if (!Text.IsEmpty()) { Text += TEXT(" "); }
+                Text += Args[i];
+            }
+        }
+        else
+        {
+            Text = TEXT("Hello world");
+        }
+
+        const FString Dir           = ResolveChatterboxDir(Variant);
+        const FString TokenizerPath = FPaths::Combine(Dir, TEXT("tokenizer.json"));
+        const FString EmbedOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("embed_tokens_%s.onnx"), *Variant));
+        const FString LMOnnxPath    = FPaths::Combine(
+            Dir, FString::Printf(TEXT("language_model_%s.onnx"), *Variant));
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.ARStepTest: variant=%s text=\"%s\""), *Variant, *Text);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.ARStepTest: dispatched (check log in ~5-10 s; LM is 635 MB)."));
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, Text, TokenizerPath, EmbedOnnxPath, LMOnnxPath]()
+        {
+            // ---- 1) Tokenize (with post-processor EOT trailers) ----
+            FString TkErr;
+            TUniquePtr<FInoChatterboxTokenizer> Tk =
+                FInoChatterboxTokenizer::LoadFromJson(TokenizerPath, &TkErr);
+            if (!Tk.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED tokenizer load: %s"), *TkErr);
+                return;
+            }
+            const TArray<int64> Ids = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
+            if (Ids.Num() < 2)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — need >=2 tokens, got %d"),
+                       Ids.Num());
+                return;
+            }
+            const int64 SeqLen = (int64)Ids.Num();
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: tokenized to %lld IDs"), SeqLen);
+
+            // ---- 2) embed_tokens → inputs_embeds fp32 [1, S, 1024] ----
+            FInoOnnxSessionOptions Opts;  // defaults
+            FString EmbedErr;
+            const double EmbedLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EmbedSess =
+                FInoOnnxSession::Create(EmbedOnnxPath, Opts, &EmbedErr);
+            const double EmbedLoadMs = (FPlatformTime::Seconds() - EmbedLoadT0) * 1000.0;
+            if (!EmbedSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED embed_tokens load (%.1f ms): %s"),
+                       EmbedLoadMs, *EmbedErr);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: embed_tokens loaded in %.1f ms"), EmbedLoadMs);
+
+            FInoOnnxTensor EmbedInput = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                { 1, SeqLen }, MakeArrayView(Ids));
+            if (!EmbedInput.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED to build embed input"));
+                return;
+            }
+
+            TArray<FInoOnnxTensor> EmbedInputs;
+            EmbedInputs.Add(MoveTemp(EmbedInput));
+            TArray<FInoOnnxTensor> EmbedOutputs;
+            FString EmbedRunErr;
+            if (!EmbedSess->Run(EmbedInputs, EmbedOutputs, &EmbedRunErr))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED embed_tokens Run: %s"),
+                       *EmbedRunErr);
+                return;
+            }
+            if (EmbedOutputs.Num() != 1 || !EmbedOutputs[0].IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — embed_tokens output missing"));
+                return;
+            }
+
+            FInoOnnxTensor InputsEmbeds = MoveTemp(EmbedOutputs[0]);
+            const TArray<int64>& EmbedShape = InputsEmbeds.GetShape();
+            if (EmbedShape.Num() != 3 || EmbedShape[0] != 1 || EmbedShape[1] != SeqLen
+                || EmbedShape[2] != kChatterboxLMHiddenDim
+                || InputsEmbeds.GetDtype() != EInoOnnxDtype::Float32)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — embed output wrong shape/dtype"));
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: inputs_embeds fp32 [1, %lld, %d] ready"),
+                   SeqLen, kChatterboxLMHiddenDim);
+
+            // ---- 3) Load language_model and verify input signature ----
+            const double LMLoadT0 = FPlatformTime::Seconds();
+            FString LMErr;
+            TUniquePtr<FInoOnnxSession> LMSess =
+                FInoOnnxSession::Create(LMOnnxPath, Opts, &LMErr);
+            const double LMLoadMs = (FPlatformTime::Seconds() - LMLoadT0) * 1000.0;
+            if (!LMSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED language_model load (%.1f ms): %s"),
+                       LMLoadMs, *LMErr);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: language_model loaded in %.1f ms"), LMLoadMs);
+
+            const TArray<FString>& Expected = ExpectedLMInputNames();
+            if (LMSess->GetInputCount() != Expected.Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — LM has %d inputs, expected %d"),
+                       LMSess->GetInputCount(), Expected.Num());
+                return;
+            }
+            for (int32 i = 0; i < Expected.Num(); ++i)
+            {
+                const FString Actual = LMSess->GetInputName(i);
+                if (Actual != Expected[i])
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARStepTest: FAILED — LM input[%d] = '%s', expected '%s'"),
+                           i, *Actual, *Expected[i]);
+                    return;
+                }
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: LM input signature matches (%d inputs)"),
+                   Expected.Num());
+
+            // ---- 4) Build the 51-input bundle ----
+            TArray<FInoOnnxTensor> LMInputs;
+            LMInputs.Reserve(Expected.Num());
+
+            // [0] inputs_embeds — already have it
+            LMInputs.Add(MoveTemp(InputsEmbeds));
+
+            // [1] attention_mask — int64 [1, S] filled with 1
+            FInoOnnxTensor AttnMask = FInoOnnxTensor::Create(
+                EInoOnnxDtype::Int64, { 1, SeqLen });
+            if (!AttnMask.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED to alloc attention_mask"));
+                return;
+            }
+            if (int64* MaskData = AttnMask.GetMutableData<int64>())
+            {
+                for (int64 i = 0; i < SeqLen; ++i) { MaskData[i] = 1; }
+            }
+            LMInputs.Add(MoveTemp(AttnMask));
+
+            // [2] position_ids — int64 [1, S] = [0, 1, ..., S-1]
+            FInoOnnxTensor PosIds = FInoOnnxTensor::Create(
+                EInoOnnxDtype::Int64, { 1, SeqLen });
+            if (!PosIds.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED to alloc position_ids"));
+                return;
+            }
+            if (int64* PosData = PosIds.GetMutableData<int64>())
+            {
+                for (int64 i = 0; i < SeqLen; ++i) { PosData[i] = i; }
+            }
+            LMInputs.Add(MoveTemp(PosIds));
+
+            // [3..50] past_key_values.L.key / .L.value — fp16 [1, 16, 0, 64]
+            //
+            // Zero-sized past-sequence dim means "no cache yet" at step 0.
+            // Create() zero-initializes, matching Python's np.zeros(...,
+            // dtype=fp16). 24 layers × 2 (key, value) = 48 tensors, so
+            // total LM input count is 3 + 48 = 51.
+            const TArray<int64> KVShape = { 1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
+            for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+            {
+                for (int32 KV = 0; KV < 2; ++KV)
+                {
+                    FInoOnnxTensor T = FInoOnnxTensor::Create(EInoOnnxDtype::Float16, KVShape);
+                    if (!T.IsValid())
+                    {
+                        UE_LOG(LogInoAgents, Error,
+                               TEXT("Ino.Chatterbox.ARStepTest: FAILED to alloc past_key_values.%d.%s"),
+                               L, KV == 0 ? TEXT("key") : TEXT("value"));
+                        return;
+                    }
+                    LMInputs.Add(MoveTemp(T));
+                }
+            }
+
+            check(LMInputs.Num() == Expected.Num());
+
+            // ---- 5) Run language_model ----
+            const double LMRunT0 = FPlatformTime::Seconds();
+            TArray<FInoOnnxTensor> LMOutputs;
+            FString LMRunErr;
+            const bool bLMOk = LMSess->Run(LMInputs, LMOutputs, &LMRunErr);
+            const double LMRunMs = (FPlatformTime::Seconds() - LMRunT0) * 1000.0;
+            if (!bLMOk)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED LM Run (%.1f ms): %s"),
+                       LMRunMs, *LMRunErr);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: language_model.Run() took %.1f ms"), LMRunMs);
+
+            const int32 ExpectedOutputs = 1 + 2 * kChatterboxLMNumLayers;  // logits + 48 present
+            if (LMOutputs.Num() != ExpectedOutputs)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — LM returned %d outputs, expected %d"),
+                       LMOutputs.Num(), ExpectedOutputs);
+                return;
+            }
+
+            // ---- 6) Validate logits shape + dtype ----
+            const FInoOnnxTensor& Logits = LMOutputs[0];
+            const TArray<int64>& LogitShape = Logits.GetShape();
+            if (LogitShape.Num() != 3 || LogitShape[0] != 1 || LogitShape[1] != SeqLen
+                || LogitShape[2] != kChatterboxLMSpeechVocabSize
+                || Logits.GetDtype() != EInoOnnxDtype::Float32)
+            {
+                FString ShapeStr;
+                for (int32 i = 0; i < LogitShape.Num(); ++i)
+                {
+                    ShapeStr += FString::Printf(TEXT("%s%lld"),
+                                                i == 0 ? TEXT("") : TEXT(","), LogitShape[i]);
+                }
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — logits shape=[%s] dtype=%d (expected [1,%lld,%d] fp32)"),
+                       *ShapeStr, (int32)Logits.GetDtype(), SeqLen, kChatterboxLMSpeechVocabSize);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: logits shape [1, %lld, %d] fp32 ✓"),
+                   SeqLen, kChatterboxLMSpeechVocabSize);
+
+            // ---- 7) Validate first present KV tensor shape + dtype ----
+            {
+                const FInoOnnxTensor& Present0Key = LMOutputs[1];
+                const TArray<int64>& PShape = Present0Key.GetShape();
+                if (PShape.Num() != 4 || PShape[0] != 1
+                    || PShape[1] != kChatterboxLMNumKVHeads
+                    || PShape[2] != SeqLen
+                    || PShape[3] != kChatterboxLMHeadDim
+                    || Present0Key.GetDtype() != EInoOnnxDtype::Float16)
+                {
+                    FString ShapeStr;
+                    for (int32 i = 0; i < PShape.Num(); ++i)
+                    {
+                        ShapeStr += FString::Printf(TEXT("%s%lld"),
+                                                    i == 0 ? TEXT("") : TEXT(","), PShape[i]);
+                    }
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARStepTest: FAILED — present.0.key shape=[%s] dtype=%d"),
+                           *ShapeStr, (int32)Present0Key.GetDtype());
+                    return;
+                }
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("Ino.Chatterbox.ARStepTest: present.0.key shape [1,%d,%lld,%d] fp16 ✓"),
+                       kChatterboxLMNumKVHeads, SeqLen, kChatterboxLMHeadDim);
+            }
+
+            // ---- 8) Scan logits for NaN/Inf + argmax of last-position logits ----
+            const float* LogitData = Logits.GetData<float>();
+            if (LogitData == nullptr)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — Logits.GetData<float>() returned null"));
+                return;
+            }
+
+            const int64 Total = Logits.GetElementCount();
+            int64 NanCount = 0, InfCount = 0;
+            float MinV =  FLT_MAX, MaxV = -FLT_MAX;
+            double Sum = 0.0;
+            for (int64 i = 0; i < Total; ++i)
+            {
+                const float v = LogitData[i];
+                if (FMath::IsNaN(v))      { ++NanCount; continue; }
+                if (!FMath::IsFinite(v))  { ++InfCount; continue; }
+                if (v < MinV) MinV = v;
+                if (v > MaxV) MaxV = v;
+                Sum += v;
+            }
+            const double Mean = (Total > 0) ? Sum / (double)Total : 0.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: logits stats — count=%lld min=%.3f max=%.3f mean=%.3f nan=%lld inf=%lld"),
+                   Total, MinV, MaxV, Mean, NanCount, InfCount);
+
+            if (NanCount > 0 || InfCount > 0)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — non-finite values in logits"));
+                return;
+            }
+
+            // Last-position logits: logits[0, S-1, :] — this is the slice
+            // an AR sampler would use to pick the next speech token.
+            const int64 LastTokenOffset = (SeqLen - 1) * kChatterboxLMSpeechVocabSize;
+            const float* LastLogits = LogitData + LastTokenOffset;
+
+            // Top-5 via partial selection.
+            constexpr int32 TopK = 5;
+            TArray<int32> TopIdx;
+            TopIdx.Reserve(TopK);
+            TArray<float> TopVal;
+            TopVal.Reserve(TopK);
+            for (int32 k = 0; k < TopK; ++k)
+            {
+                float Best = -FLT_MAX;
+                int32 BestIdx = -1;
+                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
+                {
+                    if (TopIdx.Contains(i)) continue;
+                    if (LastLogits[i] > Best)
+                    {
+                        Best = LastLogits[i];
+                        BestIdx = i;
+                    }
+                }
+                if (BestIdx < 0) break;
+                TopIdx.Add(BestIdx);
+                TopVal.Add(Best);
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: last-token top-%d (no voice conditioning, so probably not a sensible token):"),
+                   TopK);
+            for (int32 k = 0; k < TopIdx.Num(); ++k)
+            {
+                FString Tag;
+                if (TopIdx[k] == 6561) Tag = TEXT(" <-- START_SPEECH_TOKEN");
+                else if (TopIdx[k] == 6562) Tag = TEXT(" <-- STOP_SPEECH_TOKEN");
+                else if (TopIdx[k] == 4299) Tag = TEXT(" <-- SILENCE_TOKEN");
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("   [%d] id=%5d  logit=%+.4f%s"),
+                       k, TopIdx[k], TopVal[k], *Tag);
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARStepTest: PASS (variant=%s, %lld IDs, embed=%.1f ms, LM-load=%.1f ms, LM-run=%.1f ms)"),
+                   *Variant, SeqLen, EmbedLoadMs, LMLoadMs, LMRunMs);
+        });
+    }
+
+    FAutoConsoleCommand GARStepTestCmd(
+        TEXT("Ino.Chatterbox.ARStepTest"),
+        TEXT("Run one forward pass through Chatterbox's language_model. ")
+        TEXT("Tokenizes text, embeds via embed_tokens, builds empty KV cache + ")
+        TEXT("attention_mask + position_ids, runs language_model once, logs the ")
+        TEXT("logits shape + top-5 last-token prediction. Args: [variant] [text...]"),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunARStepTest));
 }
