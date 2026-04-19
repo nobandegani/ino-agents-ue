@@ -106,32 +106,49 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
         return;
     }
 
+    // Resolve settings entry first. FindModel is permissive — it matches
+    // by either ModelFileName ("gemma-4-E2B-it.litertlm") OR DisplayName
+    // ("Gemma 4 E2B"). If the caller passed a display name, we transparently
+    // canonicalize the file name in a local config copy so the rest of
+    // this function (disk check, download target path, download callback's
+    // rename step, smoke-test paths) all use one consistent on-disk name.
+    const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get();
+    const FInoLiteRtLmModelEntry* Entry = AgentSettings
+        ? AgentSettings->FindModel(Config.ModelFileName)
+        : nullptr;
+
+    FInoLiteRtLmModelConfig ResolvedConfig = Config;
+    if (Entry != nullptr &&
+        !ResolvedConfig.ModelFileName.Equals(Entry->ModelFileName, ESearchCase::IgnoreCase))
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LoadModelAsync: resolved '%s' via display-name match → file name '%s'"),
+               *ResolvedConfig.ModelFileName, *Entry->ModelFileName);
+        ResolvedConfig.ModelFileName = Entry->ModelFileName;
+    }
+
     // Resolve the model file path. Checks PersistentDownloadDir first
     // (downloaded/cached), then the plugin's Models/ dir (legacy dev).
-    const FString ModelPath = LiteRtLmResolveModelPath(Config.ModelFileName);
+    const FString ModelPath = LiteRtLmResolveModelPath(ResolvedConfig.ModelFileName);
 
     if (!ModelPath.IsEmpty())
     {
         // Found on disk — proceed to load.
         bLoadInFlight = true;
-        LoadedConfig  = Config;
+        LoadedConfig  = ResolvedConfig;
         ProceedWithLoad(ModelPath, OnLoaded);
         return;
     }
 
-    // Not on disk — look up the download URL in settings.
-    const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get();
-    const FInoLiteRtLmModelEntry* Entry = AgentSettings
-        ? AgentSettings->FindModelByFileName(Config.ModelFileName)
-        : nullptr;
-
+    // Not on disk — we need the settings entry's download URL.
     if (Entry == nullptr || Entry->DownloadUrl.IsEmpty())
     {
         const FString Err = FString::Printf(
             TEXT("Model '%s' not found on disk and no download URL configured. "
                  "Add an entry in Project Settings → Plugins → InoAgents → "
-                 "LiteRT-LM → Models."),
-            *Config.ModelFileName);
+                 "LiteRT-LM → Models (match either the Display Name or the "
+                 "Model File Name)."),
+            *ResolvedConfig.ModelFileName);
         UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;
@@ -139,14 +156,14 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
 
     // Download, then load.
     bLoadInFlight = true;
-    LoadedConfig  = Config;
+    LoadedConfig  = ResolvedConfig;
 
     const FString TargetDir = FPaths::Combine(
         FPaths::ProjectPersistentDownloadDir(),
         TEXT("InoAgents"), TEXT("Models"));
     IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/true);
 
-    const FString TargetPath = FPaths::Combine(TargetDir, Config.ModelFileName);
+    const FString TargetPath = FPaths::Combine(TargetDir, ResolvedConfig.ModelFileName);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("LoadModelAsync: model not found locally, downloading from %s"),

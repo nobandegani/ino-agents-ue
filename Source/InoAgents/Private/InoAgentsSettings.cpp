@@ -42,3 +42,31 @@ const FInoLiteRtLmModelEntry* UInoAgentsSettings::FindModelByFileName(
     }
     return nullptr;
 }
+
+const FInoLiteRtLmModelEntry* UInoAgentsSettings::FindModel(
+    const FString& NameOrFileName) const
+{
+    if (NameOrFileName.IsEmpty())
+    {
+        return nullptr;
+    }
+
+    // Prefer exact file-name match — if someone has a model named
+    // "Gemma 4 E2B" as a display name but ALSO a different entry with
+    // that literal file name, the file-name path should win (it's more
+    // specific / authoritative).
+    if (const FInoLiteRtLmModelEntry* Entry = FindModelByFileName(NameOrFileName))
+    {
+        return Entry;
+    }
+
+    // Fall back to display-name match.
+    for (const FInoLiteRtLmModelEntry& Entry : Models)
+    {
+        if (Entry.DisplayName.Equals(NameOrFileName, ESearchCase::IgnoreCase))
+        {
+            return &Entry;
+        }
+    }
+    return nullptr;
+}
