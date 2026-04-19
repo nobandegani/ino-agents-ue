@@ -89,7 +89,19 @@ namespace
                TEXT("InoAgents: ONNX Runtime available providers: %s"),
                Joined.IsEmpty() ? TEXT("(none)") : *Joined);
 
-        Api->ReleaseAvailableProviders(ProvidersPtr, NumProviders);
+        // ReleaseAvailableProviders is declared with warn_unused_result
+        // (Android clang enforces this; MSVC is more forgiving). Capture
+        // and release any returned OrtStatus. In practice this "free the
+        // strings we just returned to you" call should never fail — but
+        // ignoring a nodiscard return is a build-break on Android so we
+        // handle it explicitly.
+        if (OrtStatus* ReleaseStatus = Api->ReleaseAvailableProviders(ProvidersPtr, NumProviders))
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("InoAgents: OrtApi::ReleaseAvailableProviders returned an error (ignored): %s"),
+                   UTF8_TO_TCHAR(Api->GetErrorMessage(ReleaseStatus)));
+            Api->ReleaseStatus(ReleaseStatus);
+        }
     }
 
     /**
