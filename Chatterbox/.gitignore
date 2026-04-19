@@ -1,0 +1,5 @@
+# Models are downloaded at runtime into PersistentDownloadDir, not into
+# the plugin tree. This file exists only so the Chatterbox/ directory
+# itself is trackable while any accidental staging under it is ignored.
+.cache/
+Models/

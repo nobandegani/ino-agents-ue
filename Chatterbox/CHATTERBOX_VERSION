@@ -1,0 +1,22 @@
+# Chatterbox model version pin.
+#
+# Format: <variant>@<revision>
+#   variant  : ONNX quantization variant  (fp32 | fp16 | q4 | q4f16 | quantized)
+#   revision : Hugging Face repo revision (a commit hash, tag, or "main")
+#
+# Variants (per component — language_model / embed_tokens / conditional_decoder):
+#   fp32       default, largest  (~2.3 GB total)   highest quality
+#   fp16       half precision    (~1.1 GB total)   default: desktop-friendly
+#   q4         int4 weights, fp32 activations  (~470 MB)
+#   q4f16      int4 weights, fp16 activations  (~380 MB)   mobile-targeted
+#   quantized  int8 all          (~760 MB)
+#
+# The setup script accepts a -Variant command-line arg that overrides the
+# variant here (useful for pulling both fp16 for desktop tests and q4f16
+# for mobile validation without bumping the pinned default).
+#
+# Revision: leave as "main" for development; pin to a specific commit
+# hash for reproducible builds. Bump whenever upstream publishes a
+# quality / compatibility change and we've validated it.
+
+fp16@main
