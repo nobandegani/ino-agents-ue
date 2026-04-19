@@ -1124,4 +1124,451 @@ namespace
         TEXT("attention_mask + position_ids, runs language_model once, logs the ")
         TEXT("logits shape + top-5 last-token prediction. Args: [variant] [text...]"),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunARStepTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.ARLoopTest — the full autoregressive generation loop
+    // ========================================================================
+    //
+    // Chunk-3 of Phase B3. Runs the iterative speech-token generator:
+    // embed → LM → argmax → embed → LM → ... until STOP_SPEECH_TOKEN or a
+    // max_new_tokens cap. No speaker conditioning (that's chunk 5). Still
+    // writes only a stream of speech token IDs; the tokens won't decode
+    // to meaningful audio until we wire up the decoder + cond_emb, but
+    // the important structural properties are checkable here:
+    //
+    //   - KV cache rolls forward correctly (present_kv becomes past_kv)
+    //   - position_ids advances (scalar [1,1] at i>=1, arange at i==0)
+    //   - attention_mask grows by 1 each step
+    //   - repetition penalty prevents the model from getting stuck
+    //   - per-iter latency is flat (if it balloons, cache mismanagement)
+    //
+    // Reference (translated from the HF Python readme for the turbo
+    // variant — num_hidden_layers=24, vocab=6563):
+    //
+    //   generate_tokens = [[START_SPEECH_TOKEN]]
+    //   input_ids = tokenizer(text).input_ids   # [1, text_len] with 2 EOT trailers
+    //
+    //   for i in range(max_new_tokens):
+    //       inputs_embeds = embed_tokens(input_ids)
+    //       if i == 0:
+    //           past_kv = zeros([1,16,0,64], fp16) x 48
+    //           attention_mask = ones([1, input_ids.len])
+    //           position_ids = arange(input_ids.len)
+    //       logits, *present_kv = language_model(inputs_embeds, attn_mask,
+    //                                            position_ids, **past_kv)
+    //       logits = logits[:, -1, :]
+    //       logits = repetition_penalty(generate_tokens, logits, 1.2)
+    //       next_token = argmax(logits)
+    //       generate_tokens = concat(generate_tokens, next_token)
+    //       if next_token == STOP_SPEECH_TOKEN: break
+    //       # roll state forward for iter i+1:
+    //       input_ids = next_token
+    //       attention_mask = concat(attention_mask, [[1]])
+    //       position_ids   = [[position_ids[-1] + 1]]
+    //       past_kv        = present_kv
+
+    static constexpr int64 kStartSpeechToken          = 6561;
+    static constexpr int64 kStopSpeechToken           = 6562;
+    static constexpr int64 kSilenceSpeechToken        = 4299;
+    static constexpr float kRepetitionPenalty         = 1.2f;
+    static constexpr int32 kARLoopDefaultMaxNewTokens = 64;
+
+    /**
+     * Apply HF-reference repetition penalty in place on a last-token
+     * logit slice. For every unique token id the model has generated so
+     * far, dampen its logit:
+     *   positive logits -> divide by penalty (less attractive)
+     *   negative logits -> multiply by penalty (more repelled)
+     * Duplicates in GeneratedTokens apply at most once (matches
+     * numpy's put_along_axis semantics of overwriting the same slot).
+     */
+    static void ApplyRepetitionPenalty(
+        float* Scores,
+        int32 VocabSize,
+        const TArray<int64>& GeneratedTokens,
+        float Penalty)
+    {
+        TSet<int64> Applied;
+        Applied.Reserve(GeneratedTokens.Num());
+        for (const int64 Id : GeneratedTokens)
+        {
+            if (Id < 0 || Id >= (int64)VocabSize) continue;
+            bool bAlreadyIn = false;
+            Applied.Add(Id, &bAlreadyIn);
+            if (bAlreadyIn) continue;
+            float& v = Scores[(int32)Id];
+            v = (v < 0.0f) ? (v * Penalty) : (v / Penalty);
+        }
+    }
+
+    void RunARLoopTest(const TArray<FString>& Args)
+    {
+        // --- Parse args ---
+        //   Args[0]        : variant            (default: fp16)
+        //   Args[1] digits : max_new_tokens     (default: 64)
+        //   Args[1..] text : text to synthesize (default: "Hello world")
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+
+        int32 MaxNewTokens = kARLoopDefaultMaxNewTokens;
+        int32 TextStartIdx = 1;
+        if (Args.Num() >= 2 && !Args[1].IsEmpty() && FChar::IsDigit(Args[1][0]))
+        {
+            MaxNewTokens = FMath::Clamp(FCString::Atoi(*Args[1]), 1, 1024);
+            TextStartIdx = 2;
+        }
+
+        FString Text;
+        for (int32 i = TextStartIdx; i < Args.Num(); ++i)
+        {
+            if (!Text.IsEmpty()) { Text += TEXT(" "); }
+            Text += Args[i];
+        }
+        if (Text.IsEmpty()) { Text = TEXT("Hello world"); }
+
+        const FString Dir           = ResolveChatterboxDir(Variant);
+        const FString TokenizerPath = FPaths::Combine(Dir, TEXT("tokenizer.json"));
+        const FString EmbedOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("embed_tokens_%s.onnx"), *Variant));
+        const FString LMOnnxPath    = FPaths::Combine(
+            Dir, FString::Printf(TEXT("language_model_%s.onnx"), *Variant));
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.ARLoopTest: variant=%s max_new_tokens=%d text=\"%s\""),
+               *Variant, MaxNewTokens, *Text);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.ARLoopTest: dispatched (LM load ~3-5 s, loop ~%d ms/iter)."),
+               30);
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, Text, MaxNewTokens, TokenizerPath, EmbedOnnxPath, LMOnnxPath]()
+        {
+            FString Err;
+
+            // ---- Load tokenizer + encode text ----
+            TUniquePtr<FInoChatterboxTokenizer> Tk =
+                FInoChatterboxTokenizer::LoadFromJson(TokenizerPath, &Err);
+            if (!Tk.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: FAILED tokenizer load: %s"), *Err);
+                return;
+            }
+            const TArray<int64> TextIds = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
+            if (TextIds.Num() < 2)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: FAILED — need >=2 tokens, got %d"),
+                       TextIds.Num());
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: tokenized to %d text IDs"), TextIds.Num());
+
+            // ---- Load sessions ----
+            FInoOnnxSessionOptions Opts;
+
+            const double EmbedLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EmbedSess =
+                FInoOnnxSession::Create(EmbedOnnxPath, Opts, &Err);
+            if (!EmbedSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: FAILED embed_tokens load: %s"), *Err);
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: embed_tokens loaded in %.1f ms"),
+                   (FPlatformTime::Seconds() - EmbedLoadT0) * 1000.0);
+
+            const double LMLoadT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> LMSess =
+                FInoOnnxSession::Create(LMOnnxPath, Opts, &Err);
+            if (!LMSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: FAILED language_model load: %s"), *Err);
+                return;
+            }
+            const double LMLoadMs = (FPlatformTime::Seconds() - LMLoadT0) * 1000.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: language_model loaded in %.1f ms"), LMLoadMs);
+
+            const TArray<FString>& Expected = ExpectedLMInputNames();
+            if (LMSess->GetInputCount() != Expected.Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: LM signature mismatch (%d vs %d)"),
+                       LMSess->GetInputCount(), Expected.Num());
+                return;
+            }
+
+            const int32 ExpectedLMOutputs = 1 + 2 * kChatterboxLMNumLayers;
+
+            // ---- Initialize state for iter 0 ----
+            // InputIds at iter 0 is the full text sequence (int64). After
+            // iter 0 it becomes a single predicted speech token [1, 1].
+            TArray<int64> InputIds = TextIds;
+
+            const int64 StartSeqLen = TextIds.Num();
+            // CurSeqLen tracks the total number of positions the model has
+            // seen (past + current). At iter 0 before running, this is the
+            // text length (no past yet). After iter N completes, it grows
+            // by 1 to account for the newly-appended position in present_kv.
+            int64 CurSeqLen = StartSeqLen;
+
+            // past_kv: 48 fp16 tensors [1, 16, 0, 64] at iter 0 (empty).
+            // Each iter N>=1, we move from present_kv outputs into here.
+            TArray<FInoOnnxTensor> PastKV;
+            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            {
+                const TArray<int64> ZeroKVShape = {
+                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
+                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+                {
+                    for (int32 KV = 0; KV < 2; ++KV)
+                    {
+                        PastKV.Add(FInoOnnxTensor::Create(
+                            EInoOnnxDtype::Float16, ZeroKVShape));
+                    }
+                }
+            }
+
+            // Generated token stream. Always starts with START_SPEECH_TOKEN
+            // per the Python reference. Predicted tokens append here.
+            TArray<int64> GeneratedTokens;
+            GeneratedTokens.Reserve(MaxNewTokens + 2);
+            GeneratedTokens.Add(kStartSpeechToken);
+
+            // Timing counters
+            double EmbedTotalMs = 0.0;
+            double LMTotalMs    = 0.0;
+            int64  FinalToken   = -1;
+            bool   bHitStop     = false;
+            int32  NumItersRun  = 0;
+            float  LastLogitValue = 0.0f;
+
+            const double LoopT0 = FPlatformTime::Seconds();
+
+            for (int32 Iter = 0; Iter < MaxNewTokens; ++Iter)
+            {
+                // ---- 1) Embed input_ids via embed_tokens ----
+                const int64 CurInputLen = InputIds.Num();
+                FInoOnnxTensor EmbedInput = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                    { 1, CurInputLen }, MakeArrayView(InputIds));
+                if (!EmbedInput.IsValid())
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: embed input alloc failed"), Iter);
+                    return;
+                }
+                TArray<FInoOnnxTensor> EmbedInputs;
+                EmbedInputs.Add(MoveTemp(EmbedInput));
+
+                TArray<FInoOnnxTensor> EmbedOutputs;
+                const double EmbedT0 = FPlatformTime::Seconds();
+                if (!EmbedSess->Run(EmbedInputs, EmbedOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: embed Run: %s"), Iter, *Err);
+                    return;
+                }
+                EmbedTotalMs += (FPlatformTime::Seconds() - EmbedT0) * 1000.0;
+
+                FInoOnnxTensor InputsEmbeds = MoveTemp(EmbedOutputs[0]);
+
+                // ---- 2) attention_mask [1, CurSeqLen] all ones ----
+                FInoOnnxTensor AttnMask = FInoOnnxTensor::Create(
+                    EInoOnnxDtype::Int64, { 1, CurSeqLen });
+                if (int64* D = AttnMask.GetMutableData<int64>())
+                {
+                    for (int64 i = 0; i < CurSeqLen; ++i) { D[i] = 1; }
+                }
+
+                // ---- 3) position_ids ----
+                //   iter 0:  [0, 1, ..., StartSeqLen-1]  (arange, shape [1, StartSeqLen])
+                //   iter >0: [[CurSeqLen - 1]]           (scalar,  shape [1, 1])
+                // matches Python's `position_ids[:, -1:] + 1` pattern.
+                FInoOnnxTensor PosIds;
+                if (Iter == 0)
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, StartSeqLen });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        for (int64 i = 0; i < StartSeqLen; ++i) { D[i] = i; }
+                    }
+                }
+                else
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, 1 });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        D[0] = CurSeqLen - 1;
+                    }
+                }
+
+                // ---- 4) Build LM input bundle ----
+                TArray<FInoOnnxTensor> LMInputs;
+                LMInputs.Reserve(Expected.Num());
+                LMInputs.Add(MoveTemp(InputsEmbeds));
+                LMInputs.Add(MoveTemp(AttnMask));
+                LMInputs.Add(MoveTemp(PosIds));
+                for (int32 i = 0; i < PastKV.Num(); ++i)
+                {
+                    LMInputs.Add(MoveTemp(PastKV[i]));
+                }
+                PastKV.Reset();  // entries are all moved-from now
+
+                // ---- 5) Run language_model ----
+                TArray<FInoOnnxTensor> LMOutputs;
+                const double LMT0 = FPlatformTime::Seconds();
+                if (!LMSess->Run(LMInputs, LMOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: LM Run: %s"), Iter, *Err);
+                    return;
+                }
+                LMTotalMs += (FPlatformTime::Seconds() - LMT0) * 1000.0;
+
+                if (LMOutputs.Num() != ExpectedLMOutputs)
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: LM returned %d outputs, expected %d"),
+                           Iter, LMOutputs.Num(), ExpectedLMOutputs);
+                    return;
+                }
+
+                // ---- 6) Extract last-position logits, apply rep penalty, argmax ----
+                const FInoOnnxTensor& Logits = LMOutputs[0];
+                const TArray<int64>& LogitShape = Logits.GetShape();
+                if (LogitShape.Num() != 3
+                    || LogitShape[2] != kChatterboxLMSpeechVocabSize
+                    || Logits.GetDtype() != EInoOnnxDtype::Float32)
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: unexpected logits shape/dtype"), Iter);
+                    return;
+                }
+                const int64 LogitSeqLen = LogitShape[1];
+                const float* LogitData = Logits.GetData<float>();
+                if (LogitData == nullptr)
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARLoopTest iter %d: Logits.GetData<float> null"), Iter);
+                    return;
+                }
+
+                // Copy last-position slice so we can mutate it in place for rep-penalty.
+                TArray<float> Scores;
+                Scores.SetNumUninitialized(kChatterboxLMSpeechVocabSize);
+                FMemory::Memcpy(
+                    Scores.GetData(),
+                    LogitData + (LogitSeqLen - 1) * kChatterboxLMSpeechVocabSize,
+                    (SIZE_T)kChatterboxLMSpeechVocabSize * sizeof(float));
+
+                ApplyRepetitionPenalty(
+                    Scores.GetData(), kChatterboxLMSpeechVocabSize,
+                    GeneratedTokens, kRepetitionPenalty);
+
+                int64 NextToken  = 0;
+                float BestScore  = -FLT_MAX;
+                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
+                {
+                    if (Scores[i] > BestScore) { BestScore = Scores[i]; NextToken = i; }
+                }
+                LastLogitValue = BestScore;
+
+                GeneratedTokens.Add(NextToken);
+                FinalToken  = NextToken;
+                NumItersRun = Iter + 1;
+
+                if (NextToken == kStopSpeechToken)
+                {
+                    bHitStop = true;
+                    break;
+                }
+
+                // ---- 7) Roll state forward for iter N+1 ----
+                InputIds.Reset(1);
+                InputIds.Add(NextToken);
+
+                CurSeqLen += 1;  // present_kv grew by 1 position
+
+                // Move present_kv outputs into PastKV for next iter.
+                // LMOutputs[0] = logits (we're done with it); [1..48] = present.
+                for (int32 i = 1; i < LMOutputs.Num(); ++i)
+                {
+                    PastKV.Add(MoveTemp(LMOutputs[i]));
+                }
+
+                // Periodic progress log (every 10 iters) so long runs show
+                // a heartbeat instead of 40 seconds of silence.
+                if (((Iter + 1) % 10) == 0)
+                {
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("Ino.Chatterbox.ARLoopTest: iter %d token=%lld score=%+.3f (cumSeq=%lld)"),
+                           Iter + 1, NextToken, BestScore, CurSeqLen);
+                }
+            }
+
+            const double TotalLoopMs = (FPlatformTime::Seconds() - LoopT0) * 1000.0;
+            const double AvgIterMs   = NumItersRun > 0 ? TotalLoopMs / NumItersRun : 0.0;
+
+            // ---- Report ----
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: %d iters in %.1f ms (avg %.1f ms/iter). ")
+                   TEXT("embed=%.1f ms, LM=%.1f ms (%.1f%% of loop)."),
+                   NumItersRun, TotalLoopMs, AvgIterMs,
+                   EmbedTotalMs, LMTotalMs,
+                   TotalLoopMs > 0 ? (100.0 * LMTotalMs / TotalLoopMs) : 0.0);
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: hit STOP: %s. Final token=%lld (last score=%+.3f)."),
+                   bHitStop ? TEXT("yes") : TEXT("no (max_new_tokens reached)"),
+                   FinalToken, LastLogitValue);
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: generate_tokens length=%d (includes leading START=%lld%s)"),
+                   GeneratedTokens.Num(), kStartSpeechToken,
+                   bHitStop ? TEXT(" and trailing STOP") : TEXT(""));
+
+            // Print first 20 + last 4 tokens so we can eyeball repeats / collapses.
+            {
+                const int32 N = GeneratedTokens.Num();
+                FString Head;
+                const int32 HeadN = FMath::Min(N, 20);
+                for (int32 i = 0; i < HeadN; ++i)
+                {
+                    Head += FString::Printf(TEXT("%s%lld"),
+                                            i == 0 ? TEXT("") : TEXT(", "),
+                                            GeneratedTokens[i]);
+                }
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("  first %d: [%s]%s"),
+                       HeadN, *Head, N > HeadN ? TEXT(" ...") : TEXT(""));
+
+                if (N > HeadN + 4)
+                {
+                    FString Tail;
+                    for (int32 i = N - 4; i < N; ++i)
+                    {
+                        Tail += FString::Printf(TEXT("%s%lld"),
+                                                i == N - 4 ? TEXT("") : TEXT(", "),
+                                                GeneratedTokens[i]);
+                    }
+                    UE_LOG(LogInoAgents, Log, TEXT("  last 4: [..., %s]"), *Tail);
+                }
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.ARLoopTest: PASS (variant=%s)"), *Variant);
+        });
+    }
+
+    FAutoConsoleCommand GARLoopTestCmd(
+        TEXT("Ino.Chatterbox.ARLoopTest"),
+        TEXT("Run the full Chatterbox AR generation loop. Produces a stream of ")
+        TEXT("speech token IDs until STOP_SPEECH_TOKEN or max_new_tokens reached. ")
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
+        TEXT("NOTE: without voice conditioning the tokens won't be musically sensible."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunARLoopTest));
 }
