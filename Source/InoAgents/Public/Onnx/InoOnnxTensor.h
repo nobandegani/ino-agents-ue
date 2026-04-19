@@ -288,7 +288,13 @@ inline const T* FInoOnnxTensor::GetData() const
     using namespace InoAgents::Onnx::Detail;
     static_assert(TDtypeOf<T>::Value != EInoOnnxDtype::Undefined,
                   "FInoOnnxTensor::GetData<T>: unsupported T.");
-    return static_cast<const T*>(GetDataPtrRaw(sizeof(T), TEXT(__FUNCTION__)));
+    // Hardcoded log name instead of TEXT(__FUNCTION__): on clang the TEXT
+    // macro expands to a token-paste (u ## __FUNCTION__) that fails to
+    // resolve because __FUNCTION__ is not a string literal at preprocess
+    // time. MSVC is more forgiving. Using a literal avoids the whole
+    // preprocessor mess — we lose the per-T<> name suffix in log output
+    // but that was only a diagnostic convenience.
+    return static_cast<const T*>(GetDataPtrRaw(sizeof(T), TEXT("FInoOnnxTensor::GetData")));
 }
 
 template<typename T>
@@ -297,7 +303,7 @@ inline T* FInoOnnxTensor::GetMutableData()
     using namespace InoAgents::Onnx::Detail;
     static_assert(TDtypeOf<T>::Value != EInoOnnxDtype::Undefined,
                   "FInoOnnxTensor::GetMutableData<T>: unsupported T.");
-    return static_cast<T*>(const_cast<void*>(GetDataPtrRaw(sizeof(T), TEXT(__FUNCTION__))));
+    return static_cast<T*>(const_cast<void*>(GetDataPtrRaw(sizeof(T), TEXT("FInoOnnxTensor::GetMutableData"))));
 }
 
 template<typename T>

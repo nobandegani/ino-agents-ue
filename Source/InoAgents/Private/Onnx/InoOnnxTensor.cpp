@@ -147,7 +147,11 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
     }
 
     OrtValue* Native = nullptr;
-    const int64* ShapeData = Shape.GetData();
+    // UE's int64 is always `long long`; Android's int64_t is `long`. Same
+    // bit-width, different types, so direct pointer passing fails on clang.
+    // reinterpret_cast is safe — both are 64-bit signed integers with the
+    // same representation per the LP64/LLP64 ABIs we target.
+    const int64_t* ShapeData = reinterpret_cast<const int64_t*>(Shape.GetData());
     const size_t ShapeCount = (size_t)Shape.Num();
 
     OrtStatus* Status = Api->CreateTensorAsOrtValue(
@@ -232,8 +236,10 @@ bool FInoOnnxTensor::RefreshShapeAndDtype()
     if (bOk && DimCount > 0)
     {
         Shape.SetNumUninitialized((int32)DimCount);
+        // reinterpret_cast: UE's int64 (long long) vs ORT's int64_t (long
+        // on Android). Same representation, different C++ types.
         bOk = CheckStatus(
-            Api->GetDimensions(TypeInfo, Shape.GetData(), DimCount),
+            Api->GetDimensions(TypeInfo, reinterpret_cast<int64_t*>(Shape.GetData()), DimCount),
             TEXT("GetDimensions"));
     }
     else

@@ -279,7 +279,17 @@ bool FInoOnnxSession::ReadIOMeta(
         return false;
     }
     FString Name = FString(UTF8_TO_TCHAR(NamePtr));
-    Api->AllocatorFree(Allocator, NamePtr);  // free ORT-allocated string
+    // Free the ORT-allocated name string. AllocatorFree returns OrtStatus*
+    // and is tagged [[nodiscard]] on clang (Android); MSVC is lenient.
+    // In practice this free can't meaningfully fail, but we have to handle
+    // the return to keep -Werror happy.
+    if (OrtStatus* FreeStatus = Api->AllocatorFree(Allocator, NamePtr))
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("InoOnnx: OrtApi::AllocatorFree returned an error (ignored): %s"),
+               UTF8_TO_TCHAR(Api->GetErrorMessage(FreeStatus)));
+        Api->ReleaseStatus(FreeStatus);
+    }
 
     // --- Type info ---
     OrtTypeInfo* TypeInfo = nullptr;
@@ -329,7 +339,11 @@ bool FInoOnnxSession::ReadIOMeta(
                        TEXT("GetDimensionsCount"), nullptr) && DimCount > 0)
     {
         Shape.SetNumUninitialized((int32)DimCount);
-        CheckOrtStatus(Api->GetDimensions(TensorInfo, Shape.GetData(), DimCount),
+        // reinterpret_cast: UE int64 (long long) vs ORT int64_t (long on
+        // Android). Same representation, different type names.
+        CheckOrtStatus(Api->GetDimensions(TensorInfo,
+                                          reinterpret_cast<int64_t*>(Shape.GetData()),
+                                          DimCount),
                        TEXT("GetDimensions"), nullptr);
     }
 
