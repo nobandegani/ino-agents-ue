@@ -341,7 +341,27 @@ namespace
             }
 
             // 2) Load the embed_tokens session only.
-            FInoOnnxSessionOptions Opts;  // default = CPU provider, default graph opt
+            //
+            // Graph optimization DISABLED. The embed_tokens.onnx graph
+            // contains a dual-Gather pattern (one table for text IDs in
+            // [0, 50275], one for speech IDs in [0, 6562]) with protective
+            // Where/Clip masking so text IDs that would be out-of-range
+            // for the speech table get folded to safe indices before the
+            // speech Gather runs. With ORT's default "All" optimizations,
+            // the optimizer appears to fold away the masking (it can't
+            // prove the input range statically, so constant folding is
+            // conservative on the mask path but not on the raw Gather),
+            // exposing the unchecked Gather to real text IDs and tripping
+            // a bounds error (seen during Phase B3 chunk 1 bring-up:
+            // "idx=15496 must be within the inclusive range [-6563,6562]"
+            // against the /speech_emb/Gather node). DDATT's working C++
+            // port also uses ORT_DISABLE_ALL for the same session, which
+            // corroborates the diagnosis. The per-inference cost of
+            // disabling optimization here is expected to be small because
+            // embed_tokens is just two Gather + a Where + a matmul/norm
+            // tail — very little optimizer headroom.
+            FInoOnnxSessionOptions Opts;  // default = CPU provider
+            Opts.GraphOptimization = EInoOnnxGraphOptimizationLevel::Disabled;
             const double LoadT0 = FPlatformTime::Seconds();
             FString SessErr;
             TUniquePtr<FInoOnnxSession> Sess =
