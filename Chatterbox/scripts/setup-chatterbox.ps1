@@ -46,6 +46,8 @@
 #               generation_config.json
 #               speech_encoder_<variant>.onnx        (only if -IncludeAuthoring)
 #               speech_encoder_<variant>.onnx_data   (only if -IncludeAuthoring)
+#               default_voice.wav                    (only if -IncludeAuthoring; cross-borrowed from
+#                                                     onnx-community/chatterbox-ONNX; 24 kHz mono)
 #
 # UInoChatterboxSubsystem uses FPaths::ProjectPersistentDownloadDir() +
 # "InoAgents/Models/Chatterbox/<variant>/" to resolve this path at runtime,
@@ -188,6 +190,28 @@ if ($IncludeAuthoring) {
             Required  = $false
         })
     }
+
+    # Reference audio for authoring/smoke-testing. ResembleAI's turbo
+    # repo does NOT ship a default voice file (checked the tree manually
+    # in April 2026 — only README/configs/tokenizer and the onnx/
+    # directory, no .wav assets). The sibling non-turbo export
+    # (onnx-community/chatterbox-ONNX) ships default_voice.wav (714 KB,
+    # 24 kHz mono) under MIT, and the speaker-embedding interface is
+    # architecturally identical between regular and turbo (same x-vector
+    # 192-dim conditioning), so the same reference clip works for
+    # priming either encoder. Cross-borrow it here so SynthTest has
+    # something to run against without asking every developer to supply
+    # their own reference clip.
+    #
+    # At shipping time this file is NOT used — voice assets get baked
+    # at dev time via the authoring pipeline into a small .bin shipped
+    # per-voice. This download only covers dev-time smoke-testing of
+    # the end-to-end pipeline.
+    $Downloads.Add([pscustomobject]@{
+        SourceUrl = "https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/main/default_voice.wav"
+        DestPath  = Join-Path $TargetDir "default_voice.wav"
+        Required  = $true
+    })
 }
 
 foreach ($cfg in $ConfigFiles) {
