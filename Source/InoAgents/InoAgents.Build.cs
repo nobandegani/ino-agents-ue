@@ -37,6 +37,13 @@ public class InoAgents : ModuleRules
 				// #include "InoOnnxModule.h" without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "Onnx"),
 
+				// Subdirectory of Private/ that holds the Chatterbox Turbo
+				// TTS pipeline (model bundle, tokenizer, runners, worker).
+				// Added so sibling .cpp files under Private/ (smoke tests,
+				// future subsystem impl) can #include "InoChatterboxModels.h"
+				// and similar without relative paths.
+				Path.Combine(ModuleDirectory, "Private", "Chatterbox"),
+
 				// Subdirectory of Private/ that holds the Slate chat-panel
 				// implementation (private widgets, style, bridge .cpp).
 				// Added so sibling .cpps can #include "InoChatStyle.h"
