@@ -8,15 +8,17 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
-// ONNX Runtime C API. We deliberately use the C API (not onnxruntime_cxx_api.h)
-// for module-startup code so we can stay exception-free — UE modules default
-// to exceptions-off, and the C++ wrapper's Ort::GetAvailableProviders()
-// throws Ort::Exception on failure. The C API returns OrtStatus* error
-// handles instead, which integrate cleanly with our UE_LOG flow.
+// ONNX Runtime C API. Included for the struct / function-type definitions
+// (OrtApi, OrtApiBase, OrtStatus, OrtGetApiBase signature, etc.). We do
+// NOT link against the ORT import library:
+//   Windows: we GetProcAddress "OrtGetApiBase" on the renamed
+//            InoOnnxRuntime.dll at runtime.
+//   Android: libUnreal.so's DT_NEEDED on libonnxruntime.so causes the
+//            dynamic linker to resolve OrtGetApiBase for us at load
+//            time, so a direct call from this TU is fine.
 //
-// Later phases (FInoOnnxSession and model-specific consumers) can revisit
-// whether to flip bEnableExceptions=true for this module and switch to the
-// C++ API; that's a scope-independent decision.
+// We deliberately stay on the C API (not onnxruntime_cxx_api.h) so we
+// remain exception-free (UE modules default bEnableExceptions=false).
 #include "onnxruntime_c_api.h"
 
 namespace InoAgents::Onnx
@@ -24,11 +26,12 @@ namespace InoAgents::Onnx
 
 namespace
 {
-    /**
-     * Compute the absolute path to the staged onnxruntime.dll on Windows.
-     * Returns empty on non-Windows platforms — callers are expected to
-     * short-circuit on that.
-     */
+    /** Cached OrtApi vtable. Populated by Init(), cleared by Shutdown().
+     *  Accessed via GetApi() from all ORT-consuming .cpps in the plugin. */
+    const OrtApi* GOrtApi = nullptr;
+
+#if PLATFORM_WINDOWS
+    /** Compute the absolute path to our renamed ORT runtime DLL. */
     FString ResolveOnnxDllPath()
     {
         const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
@@ -37,46 +40,22 @@ namespace
             return FString();
         }
 
-        const FString BaseDir = Plugin->GetBaseDir();
-
-#if PLATFORM_WINDOWS
         return FPaths::Combine(
-            BaseDir,
+            Plugin->GetBaseDir(),
             TEXT("Binaries/ThirdParty/InoOnnxRuntime/Win64"),
-            TEXT("onnxruntime.dll"));
-#else
-        return FString();
-#endif
+            TEXT("InoOnnxRuntime.dll"));
     }
+#endif
 
     /**
-     * Call OrtApi::GetAvailableProviders via the C API, log the returned
-     * provider names to LogInoAgents at Log level, and release the
-     * allocation. Exception-free. Returns true on success, false on error
-     * (error is already logged).
-     *
-     * This is the equivalent of the litert_lm_set_min_log_level(0) smoke
-     * test we do for LiteRT-LM at startup — a cheap, safe call that proves
-     * the runtime is loaded and its symbols are callable.
+     * Call OrtApi::GetAvailableProviders and log the returned provider
+     * list. Runs once at Init() as proof the vtable is callable.
      */
-    bool RunProviderSmokeTest()
+    void LogAvailableProviders(const OrtApi* Api)
     {
-        const OrtApiBase* ApiBase = OrtGetApiBase();
-        if (ApiBase == nullptr)
-        {
-            UE_LOG(LogInoAgents, Error,
-                   TEXT("InoAgents: OrtGetApiBase() returned nullptr — ONNX Runtime is not functioning."));
-            return false;
-        }
-
-        const OrtApi* Api = ApiBase->GetApi(ORT_API_VERSION);
         if (Api == nullptr)
         {
-            UE_LOG(LogInoAgents, Error,
-                   TEXT("InoAgents: OrtApiBase::GetApi(ORT_API_VERSION=%u) returned nullptr — ")
-                   TEXT("the linked onnxruntime.dll does not implement this API version."),
-                   (uint32)ORT_API_VERSION);
-            return false;
+            return;
         }
 
         char** ProvidersPtr = nullptr;
@@ -90,10 +69,9 @@ namespace
                    TEXT("InoAgents: OrtApi::GetAvailableProviders failed: %s"),
                    UTF8_TO_TCHAR(ErrMsg));
             Api->ReleaseStatus(Status);
-            return false;
+            return;
         }
 
-        // Join the provider names into a single string for readability.
         FString Joined;
         for (int i = 0; i < NumProviders; ++i)
         {
@@ -111,11 +89,41 @@ namespace
                TEXT("InoAgents: ONNX Runtime available providers: %s"),
                Joined.IsEmpty() ? TEXT("(none)") : *Joined);
 
-        // ReleaseAvailableProviders is the dedicated deallocator — do NOT
-        // call free/delete on ProvidersPtr directly.
         Api->ReleaseAvailableProviders(ProvidersPtr, NumProviders);
+    }
 
-        return true;
+    /**
+     * Resolve OrtGetApiBase -> OrtApi* via the given API-base pointer.
+     * Logs + returns nullptr on version mismatch.
+     */
+    const OrtApi* SelectOrtApi(const OrtApiBase* ApiBase)
+    {
+        if (ApiBase == nullptr)
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("InoAgents: OrtGetApiBase returned nullptr. The loaded ONNX Runtime is broken."));
+            return nullptr;
+        }
+
+        const OrtApi* Api = ApiBase->GetApi(ORT_API_VERSION);
+        if (Api == nullptr)
+        {
+            // This is what bit us on the original implicit-link attempt:
+            // Windows was returning a handle to UE's bundled (older) ORT
+            // because of LoadLibrary base-name caching, and that DLL did
+            // not implement ORT_API_VERSION=24. With the InoOnnxRuntime.dll
+            // rename we should never see this error — if it fires,
+            // something is wrong with the staged binary or a stale copy
+            // is lingering.
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("InoAgents: OrtApiBase::GetApi(ORT_API_VERSION=%u) returned nullptr — ")
+                   TEXT("the loaded ONNX Runtime does not implement this API version. ")
+                   TEXT("Expected our pinned build (see Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION)."),
+                   (uint32)ORT_API_VERSION);
+            return nullptr;
+        }
+
+        return Api;
     }
 }
 
@@ -126,7 +134,7 @@ void* Init()
     if (Path.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("InoAgents: could not resolve onnxruntime.dll path (plugin not found via IPluginManager?)."));
+               TEXT("InoAgents: could not resolve InoOnnxRuntime.dll path (plugin not found via IPluginManager?)."));
         return nullptr;
     }
 
@@ -134,39 +142,64 @@ void* Init()
     if (Handle == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: failed to load onnxruntime.dll from %s. ")
+               TEXT("InoAgents: failed to load InoOnnxRuntime.dll from %s. ")
                TEXT("Did you run Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1?"),
                *Path);
         return nullptr;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("InoAgents: loaded onnxruntime.dll from %s"),
+           TEXT("InoAgents: loaded InoOnnxRuntime.dll from %s"),
            *Path);
 
-    RunProviderSmokeTest();
+    // Resolve the single entry-point symbol we need from our isolated
+    // DLL. GetDllExport is UE's cross-platform wrapper over
+    // GetProcAddress / dlsym; on Windows it's GetProcAddress here.
+    using OrtGetApiBaseFn = const OrtApiBase* (*)();
+    void* EntryPoint = FPlatformProcess::GetDllExport(Handle, TEXT("OrtGetApiBase"));
+    if (EntryPoint == nullptr)
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("InoAgents: InoOnnxRuntime.dll does not export OrtGetApiBase. ")
+               TEXT("The DLL is malformed or the rename step in setup-onnxruntime.ps1 picked up the wrong file."));
+        FPlatformProcess::FreeDllHandle(Handle);
+        return nullptr;
+    }
+
+    const OrtApiBase* ApiBase = reinterpret_cast<OrtGetApiBaseFn>(EntryPoint)();
+    GOrtApi = SelectOrtApi(ApiBase);
+    if (GOrtApi == nullptr)
+    {
+        FPlatformProcess::FreeDllHandle(Handle);
+        return nullptr;
+    }
+
+    LogAvailableProviders(GOrtApi);
     return Handle;
 
 #elif PLATFORM_ANDROID
-    // On Android, libonnxruntime.so is resident before StartupModule runs:
+    // On Android, libonnxruntime.so is resident by the time we get here:
     //   (a) It is DT_NEEDED by libUnreal.so (our Build.cs adds
-    //       libonnxruntime.so via PublicAdditionalLibraries). Android's
-    //       dynamic linker maps it recursively when libUnreal.so is
-    //       loaded via System.loadLibrary("Unreal").
+    //       libonnxruntime.so via PublicAdditionalLibraries on the
+    //       Android branch). Android's dynamic linker maps it
+    //       recursively when libUnreal.so is loaded via
+    //       System.loadLibrary("Unreal").
     //   (b) Our UPL XML additionally emits System.loadLibrary("onnxruntime")
     //       before that, as belt-and-suspenders.
-    // Either way, by the time StartupModule runs we can call into the C
-    // API directly. No FPlatformProcess::GetDllHandle needed.
-    RunProviderSmokeTest();
+    //
+    // So OrtGetApiBase is a regular linker-resolved call from our TU —
+    // no GetProcAddress/dlsym dance needed.
+    const OrtApiBase* ApiBase = OrtGetApiBase();
+    GOrtApi = SelectOrtApi(ApiBase);
+    if (GOrtApi != nullptr)
+    {
+        LogAvailableProviders(GOrtApi);
+    }
     return nullptr;
 
 #else
     // iOS / Linux / macOS: InoOnnxRuntime.Build.cs has no platform branch
     // yet, so any Ort* call will fail to link before we even get here.
-    // If you're reading this because you're porting to a new platform,
-    // extend InoOnnxRuntime.Build.cs first (and update
-    // OnnxRuntime/scripts/setup-onnxruntime.ps1 to download the matching
-    // prebuilt).
     UE_LOG(LogInoAgents, Warning,
            TEXT("InoAgents: ONNX Runtime is not yet available on this platform."));
     return nullptr;
@@ -175,6 +208,11 @@ void* Init()
 
 void Shutdown(void* Handle)
 {
+    // Clear the cached OrtApi pointer first so any late callers of
+    // GetApi() see nullptr rather than a vtable belonging to a DLL
+    // we are about to unload. Happens-before ordering matters here.
+    GOrtApi = nullptr;
+
 #if PLATFORM_WINDOWS
     if (Handle != nullptr)
     {
@@ -186,6 +224,11 @@ void Shutdown(void* Handle)
     // with the rest of the game process.
     (void)Handle;
 #endif
+}
+
+const OrtApi* GetApi()
+{
+    return GOrtApi;
 }
 
 } // namespace InoAgents::Onnx

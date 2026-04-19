@@ -14,23 +14,36 @@
 # Artifacts on disk after this runs (assuming version 1.24.3):
 #
 #   Source/ThirdParty/InoOnnxRuntime/
-#     Public/
-#       onnxruntime_c_api.h
-#       onnxruntime_cxx_api.h
-#       onnxruntime_cxx_inline.h
-#       onnxruntime_float16.h
-#       onnxruntime_run_options_config_keys.h
-#       onnxruntime_session_options_config_keys.h
-#       cpu_provider_factory.h
-#       (... and a few others ORT ships)
-#     Win64/
-#       onnxruntime.lib              (~4 MB, import library)
+#     Public/                        (C / C++ API headers — used at compile time)
 #
 #   Binaries/ThirdParty/InoOnnxRuntime/
 #     Win64/
-#       onnxruntime.dll              (~13 MB, CPU provider only for now)
+#       InoOnnxRuntime.dll           (~13 MB — RENAMED from onnxruntime.dll)
 #     Android/arm64-v8a/
-#       libonnxruntime.so            (~15 MB, CPU + XNNPACK)
+#       libonnxruntime.so            (~25 MB, CPU + XNNPACK)
+#
+# Windows rename rationale:
+#   UE 5.7 ships multiple conflicting copies of "onnxruntime.dll" through
+#   plugins like NNE (NNERuntimeORT) and some Marketplace runtime plugins.
+#   Windows' LoadLibrary uses BASE-NAME caching — if any of those copies
+#   gets loaded into the process before ours, our FPlatformProcess::GetDllHandle
+#   call with our FULL path silently returns the already-loaded handle
+#   (UE's older ORT, likely 1.19.x), and our OrtApi::GetApi(ORT_API_VERSION=24)
+#   call returns nullptr because that older DLL doesn't implement API 24.
+#
+#   We dodge the cache entirely by renaming our DLL to a name no other
+#   library uses. The InoOnnxModule startup code then uses GetProcAddress
+#   on "OrtGetApiBase" to fish out the one entry point we need, and all
+#   subsequent ORT calls go through the returned OrtApi vtable — no
+#   implicit link against an import library at all. Clean.
+#
+# Android does NOT need the rename: only one libonnxruntime.so lands in
+# the APK's lib/arm64-v8a/ (verified empirically), the linker loads our
+# version via libUnreal.so's DT_NEEDED chain, and no cache conflict is
+# possible inside an APK with a single copy.
+#
+# We do NOT stage onnxruntime.lib anywhere — dynamic loading means we
+# never link against it, so keeping it would just be dead weight.
 #
 # This script explicitly takes the CPU-only Windows build (not the GPU /
 # CUDA / TensorRT mega-bundle). Reasons:
@@ -56,10 +69,11 @@ $PluginDir    = (Resolve-Path (Join-Path $OnnxRtDir "..")).Path
 $VersionFile  = Join-Path $OnnxRtDir "ONNXRUNTIME_VERSION"
 $CacheDir     = Join-Path $OnnxRtDir ".cache"
 
-# Staging destinations (mirror the LiteRtLm pattern).
+# Staging destinations. Note there is no Win64 "lib" directory anymore —
+# dynamic loading (GetProcAddress on the renamed DLL) means we never link
+# against the ORT import library at UE build time.
 $ThirdPartyDir    = Join-Path $PluginDir "Source\ThirdParty\InoOnnxRuntime"
 $PublicIncDir     = Join-Path $ThirdPartyDir "Public"
-$Win64LibStageDir = Join-Path $ThirdPartyDir "Win64"
 $Win64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Win64"
 $Arm64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Android\arm64-v8a"
 
@@ -103,8 +117,7 @@ $AndroidAarPath = Join-Path $CacheDir $AndroidAarName
 $StampFile = Join-Path $ThirdPartyDir ".ort_version"
 
 if ((Test-Path $StampFile) -and `
-    (Test-Path (Join-Path $Win64LibStageDir "onnxruntime.lib")) -and `
-    (Test-Path (Join-Path $Win64BinStageDir "onnxruntime.dll")) -and `
+    (Test-Path (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll")) -and `
     (Test-Path (Join-Path $Arm64BinStageDir "libonnxruntime.so"))) {
     $StampVersion = (Get-Content $StampFile -Raw).Trim()
     if ($StampVersion -eq $Version) {
@@ -124,7 +137,7 @@ if ((Test-Path $StampFile) -and `
 # external dependencies required for the Windows zip. The Android AAR is
 # a zip in disguise; Expand-Archive handles it after we rename to .zip.
 
-foreach ($d in @($CacheDir, $PublicIncDir, $Win64LibStageDir, $Win64BinStageDir, $Arm64BinStageDir)) {
+foreach ($d in @($CacheDir, $PublicIncDir, $Win64BinStageDir, $Arm64BinStageDir)) {
     if (-not (Test-Path $d)) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
     }
@@ -187,25 +200,25 @@ Get-ChildItem -Path $WinInclude -File | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination (Join-Path $PublicIncDir $_.Name) -Force
 }
 
-# Stage import library (MSVC link time) and runtime DLL (load time).
-$WinLibFile = Join-Path $WinLib "onnxruntime.lib"
+# Stage runtime DLL — RENAMED from onnxruntime.dll to InoOnnxRuntime.dll to
+# avoid Windows LoadLibrary base-name caching colliding with UE's NNE and
+# other plugins that ship their own onnxruntime.dll. See the header comment
+# at the top of this file for the full rationale.
+#
+# We deliberately do NOT stage the import library (.lib) — the runtime
+# consumer code uses GetProcAddress to resolve "OrtGetApiBase" from the
+# renamed DLL and accesses everything else through the OrtApi vtable
+# that returns. No static linking against the library is involved.
 $WinDllFile = Join-Path $WinLib "onnxruntime.dll"
-if (-not (Test-Path $WinLibFile)) { Write-Error "onnxruntime.lib not found under $WinLib" }
 if (-not (Test-Path $WinDllFile)) { Write-Error "onnxruntime.dll not found under $WinLib" }
 
-Copy-Item -Path $WinLibFile -Destination (Join-Path $Win64LibStageDir "onnxruntime.lib") -Force
-Copy-Item -Path $WinDllFile -Destination (Join-Path $Win64BinStageDir "onnxruntime.dll") -Force
-Write-Host "  [STAGE] onnxruntime.lib -> $Win64LibStageDir"
-Write-Host "  [STAGE] onnxruntime.dll -> $Win64BinStageDir"
+Copy-Item -Path $WinDllFile -Destination (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll") -Force
+Write-Host "  [STAGE] onnxruntime.dll -> $Win64BinStageDir\InoOnnxRuntime.dll (renamed for base-name isolation)"
 
-# ORT sometimes ships onnxruntime_providers_shared.dll even in CPU-only
-# builds (used by the shared-EP plumbing). Stage it if present; harmless
-# if absent.
-$WinSharedDll = Join-Path $WinLib "onnxruntime_providers_shared.dll"
-if (Test-Path $WinSharedDll) {
-    Copy-Item -Path $WinSharedDll -Destination (Join-Path $Win64BinStageDir "onnxruntime_providers_shared.dll") -Force
-    Write-Host "  [STAGE] onnxruntime_providers_shared.dll -> $Win64BinStageDir"
-}
+# onnxruntime_providers_shared.dll is not staged in CPU-only mode. When a
+# future phase adds DirectML or another shared-EP provider, we'll stage it
+# under a unique name too (e.g. InoOnnxRuntime_providers_shared.dll) and
+# update InoOnnxModule.cpp to load it alongside the core DLL.
 
 Write-Host ""
 

@@ -13,17 +13,37 @@ using UnrealBuildTool;
 /// pinned in OnnxRuntime/ONNXRUNTIME_VERSION, and writes:
 ///
 ///   Source/ThirdParty/InoOnnxRuntime/
-///     Public/                          C / C++ API headers
-///     Win64/onnxruntime.lib            import library for MSVC link
+///     Public/                          C / C++ API headers (compile-time only)
 ///
 ///   Binaries/ThirdParty/InoOnnxRuntime/
-///     Win64/onnxruntime.dll            main runtime (~13 MB)
-///     Win64/onnxruntime_providers_shared.dll  shared provider interface (~20 KB)
-///     Android/arm64-v8a/libonnxruntime.so     main runtime + XNNPACK (~25 MB)
+///     Win64/InoOnnxRuntime.dll         main runtime, RENAMED from onnxruntime.dll (~13 MB)
+///     Android/arm64-v8a/libonnxruntime.so   main runtime + XNNPACK (~25 MB)
 ///
-/// Consumers do
-///     #include "onnxruntime_cxx_api.h"
-/// and link against Ort::Session, Ort::Env, Ort::Value, etc.
+/// Consumers #include "onnxruntime_c_api.h" for the type definitions
+/// (OrtApi, OrtSession, OrtStatus, etc.) but do NOT call the exported
+/// functions directly — all ORT calls go through the OrtApi vtable
+/// returned by InoAgents::Onnx::GetApi(). See Source/InoAgents/Private/Onnx/
+/// InoOnnxModule.{h,cpp} for the accessor.
+///
+/// Why no import library on Windows:
+///   UE 5.7 ships multiple conflicting copies of "onnxruntime.dll"
+///   (NNERuntimeORT plugin, RuntimeMetaHumanLipSync plugin, etc.).
+///   Windows LoadLibrary caches DLLs by BASE NAME — whichever
+///   onnxruntime.dll gets loaded into the process first wins, and
+///   subsequent GetDllHandle calls with a different full path still
+///   return the cached older-version handle. Our OrtApi::GetApi(24)
+///   then returns nullptr because UE's bundled ORT is 1.19.x.
+///
+///   Fix: we rename our DLL to "InoOnnxRuntime.dll" (no other code
+///   knows that name) and load it via GetProcAddress on the single
+///   exported entry point "OrtGetApiBase". The returned OrtApi
+///   vtable drives everything else — no static linker dependency on
+///   the ORT export table at all, and no cache collision possible.
+///
+///   Android does not need the rename — only one libonnxruntime.so
+///   lands in the APK and libUnreal.so's DT_NEEDED chain loads it
+///   cleanly. We keep the implicit link via PublicAdditionalLibraries
+///   there.
 ///
 /// This module does NOT ship the GPU execution providers (CUDA /
 /// TensorRT / DirectML). Reasons are documented in
@@ -38,37 +58,23 @@ public class InoOnnxRuntime : ModuleRules
 		Type = ModuleType.External;
 
 		// Public headers for ORT. Consumers use them as
-		//     #include "onnxruntime_cxx_api.h"
+		//     #include "onnxruntime_c_api.h"
 		// rather than relative paths, so expose as a system include.
 		PublicSystemIncludePaths.Add(Path.Combine(ModuleDirectory, "Public"));
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			// --- Import library (link time) ---
-			PublicAdditionalLibraries.Add(Path.Combine(ModuleDirectory, "Win64", "onnxruntime.lib"));
-
-			// --- Runtime DLL (delay-loaded at first use) ---
+			// Windows: no implicit linking. No PublicAdditionalLibraries,
+			// no PublicDelayLoadDLLs. The runtime consumer resolves
+			// OrtGetApiBase via GetProcAddress on the renamed
+			// "InoOnnxRuntime.dll" — see InoOnnxModule.cpp.
 			//
-			// onnxruntime.dll                       — ORT core runtime.
-			//                                         Contains the CPU execution
-			//                                         provider + Ort::Session / Env /
-			//                                         Value machinery.
-			// onnxruntime_providers_shared.dll      — shared-provider plumbing used
-			//                                         by out-of-process execution
-			//                                         providers (DirectML, CUDA,
-			//                                         TensorRT). Ships with ORT even
-			//                                         in CPU-only builds. We don't
-			//                                         call into it directly for CPU
-			//                                         workloads, so we do NOT delay-load
-			//                                         it — only stage it alongside
-			//                                         onnxruntime.dll so it is present
-			//                                         if a future GPU-provider phase
-			//                                         needs it.
-			PublicDelayLoadDLLs.Add("onnxruntime.dll");
-
-			// --- Runtime staging (copied next to the executable at cook/package time) ---
-			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoOnnxRuntime/Win64/onnxruntime.dll");
-			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoOnnxRuntime/Win64/onnxruntime_providers_shared.dll");
+			// We still need RuntimeDependencies so UE's packaging step
+			// copies the DLL to the staged output alongside the game
+			// executable. Without it, the shipped build would ship
+			// without the ORT runtime and every session-creation call
+			// would fail.
+			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll");
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{
