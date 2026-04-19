@@ -2541,4 +2541,642 @@ namespace
         TEXT("Args: [variant] [wav_filename]. Defaults: fp16, default_voice.wav ")
         TEXT("(resolved inside the staged variant dir)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunEncoderTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.SynthTest — full pipeline with real voice conditioning
+    // ========================================================================
+    //
+    // Chunk-5b of Phase B3. THE end-to-end test: text + reference WAV ->
+    // PCM WAV that should sound like the reference voice speaking the
+    // text. Wires together everything chunks 1-4 built, plus the
+    // speech_encoder conditioning path that 5a proved works.
+    //
+    // Pipeline:
+    //
+    //   1. encoder(default_voice.wav)                                     -> 4 tensors:
+    //        audio_features       fp32 [1, C, 1024]  <- prepend to LM input at iter 0
+    //        audio_tokens         i64  [1, P]         <- prepend to decoder speech_tokens
+    //        speaker_embeddings   fp32 [1, 192]       -> decoder
+    //        speaker_features     fp32 [1, F, 80]     -> decoder
+    //
+    //   2. tokenizer(text)                                                -> int64 [1, T]
+    //
+    //   3. AR loop:
+    //        iter 0:
+    //          text_embeds = embed_tokens(text_ids)                       -> fp32 [1, T, 1024]
+    //          inputs_embeds = concat(audio_features, text_embeds)        -> fp32 [1, C+T, 1024]
+    //          seq_len = C+T
+    //          attn_mask = ones [1, seq_len]
+    //          pos_ids   = arange(seq_len)
+    //          past_kv   = zeros fp16 [1, 16, 0, 64] x 48
+    //          -> LM -> logits [1, seq_len, 6563], present_kv
+    //          sample argmax(last logits) w/ rep penalty -> next_token
+    //        iter N>=1:
+    //          embed_tokens(next_token) -> text_embeds fp32 [1, 1, 1024]
+    //          inputs_embeds = text_embeds  (NO concat — cond is in KV already)
+    //          attn_mask = ones [1, C+T+N]   (grows by 1)
+    //          pos_ids   = [[C+T+N-1]]
+    //          past_kv   = present_kv from prev iter
+    //          -> LM -> logits [1, 1, 6563], present_kv
+    //          sample, check STOP, loop
+    //
+    //   4. speech_tokens_for_decoder = concat(audio_tokens,
+    //                                         generate_tokens[1:-1])      -> int64 [1, P+G]
+    //
+    //   5. decoder(speech_tokens, speaker_embeddings, speaker_features)   -> fp32 [1, S]
+    //
+    //   6. write <Project>/Saved/Chatterbox/synth_test.wav (24 kHz mono PCM16)
+
+    /**
+     * Concatenate two fp32 [1, S, D] tensors along axis 1. Both tensors
+     * must have identical batch and D dimensions; result is
+     * [1, SA + SB, D]. Batch=1 assumption is baked in — the Chatterbox
+     * pipeline doesn't batch and the math stays simple.
+     */
+    static FInoOnnxTensor ConcatFloat32Axis1_B1(
+        const FInoOnnxTensor& A,
+        const FInoOnnxTensor& B,
+        FString* OutError)
+    {
+        auto Fail = [&](const FString& Msg) -> FInoOnnxTensor
+        {
+            if (OutError) { *OutError = Msg; }
+            return FInoOnnxTensor{};
+        };
+
+        const TArray<int64>& SA = A.GetShape();
+        const TArray<int64>& SB = B.GetShape();
+        if (SA.Num() != 3 || SB.Num() != 3)
+        {
+            return Fail(TEXT("ConcatFloat32Axis1_B1: both tensors must be 3D"));
+        }
+        if (SA[0] != 1 || SB[0] != 1)
+        {
+            return Fail(TEXT("ConcatFloat32Axis1_B1: batch must be 1"));
+        }
+        if (SA[2] != SB[2])
+        {
+            return Fail(TEXT("ConcatFloat32Axis1_B1: last-axis dims differ"));
+        }
+        if (A.GetDtype() != EInoOnnxDtype::Float32 || B.GetDtype() != EInoOnnxDtype::Float32)
+        {
+            return Fail(TEXT("ConcatFloat32Axis1_B1: inputs must be fp32"));
+        }
+
+        const int64 SumS = SA[1] + SB[1];
+        const int64 D    = SA[2];
+
+        FInoOnnxTensor Out = FInoOnnxTensor::Create(EInoOnnxDtype::Float32, { 1, SumS, D });
+        if (!Out.IsValid()) { return Fail(TEXT("ConcatFloat32Axis1_B1: alloc failed")); }
+
+        float* O = Out.GetMutableData<float>();
+        const float* APtr = A.GetData<float>();
+        const float* BPtr = B.GetData<float>();
+        if (!O || !APtr || !BPtr)
+        {
+            return Fail(TEXT("ConcatFloat32Axis1_B1: data ptr failure"));
+        }
+        FMemory::Memcpy(O,               APtr, (SIZE_T)(SA[1] * D) * sizeof(float));
+        FMemory::Memcpy(O + SA[1] * D,   BPtr, (SIZE_T)(SB[1] * D) * sizeof(float));
+        return Out;
+    }
+
+    void RunSynthTest(const TArray<FString>& Args)
+    {
+        // Same arg parsing as ARLoopTest / DecodeTest.
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+
+        int32 MaxNewTokens = 256;   // bigger default than ARLoopTest: real utterances need >64
+        int32 TextStartIdx = 1;
+        if (Args.Num() >= 2 && !Args[1].IsEmpty() && FChar::IsDigit(Args[1][0]))
+        {
+            MaxNewTokens = FMath::Clamp(FCString::Atoi(*Args[1]), 1, 1024);
+            TextStartIdx = 2;
+        }
+
+        FString Text;
+        for (int32 i = TextStartIdx; i < Args.Num(); ++i)
+        {
+            if (!Text.IsEmpty()) { Text += TEXT(" "); }
+            Text += Args[i];
+        }
+        if (Text.IsEmpty()) { Text = TEXT("Hello world"); }
+
+        const FString Dir           = ResolveChatterboxDir(Variant);
+        const FString TokenizerPath = FPaths::Combine(Dir, TEXT("tokenizer.json"));
+        const FString EmbedOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("embed_tokens_%s.onnx"), *Variant));
+        const FString LMOnnxPath    = FPaths::Combine(
+            Dir, FString::Printf(TEXT("language_model_%s.onnx"), *Variant));
+        const FString EncoderOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("speech_encoder_%s.onnx"), *Variant));
+        const FString DecoderOnnxPath = FPaths::Combine(
+            Dir, FString::Printf(TEXT("conditional_decoder_%s.onnx"), *Variant));
+        const FString WavInPath = FPaths::Combine(Dir, TEXT("default_voice.wav"));
+
+        const FString OutDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Chatterbox"));
+        const FString OutWavPath = FPaths::Combine(OutDir, TEXT("synth_test.wav"));
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.SynthTest: variant=%s max_new_tokens=%d text=\"%s\""),
+               *Variant, MaxNewTokens, *Text);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.SynthTest: dispatched (4 sessions + encoder run + %d AR iters, ~30-60 s on CPU)."),
+               MaxNewTokens);
+
+        Async(EAsyncExecution::ThreadPool,
+              [Variant, Text, MaxNewTokens, TokenizerPath, EmbedOnnxPath,
+               LMOnnxPath, EncoderOnnxPath, DecoderOnnxPath, WavInPath,
+               OutDir, OutWavPath]()
+        {
+            FString Err;
+            FInoOnnxSessionOptions Opts;
+
+            // ---- A) Load tokenizer + encode text ----
+            TUniquePtr<FInoChatterboxTokenizer> Tk =
+                FInoChatterboxTokenizer::LoadFromJson(TokenizerPath, &Err);
+            if (!Tk.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED tokenizer load: %s"), *Err);
+                return;
+            }
+            const TArray<int64> TextIds = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
+            if (TextIds.Num() < 2)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED — tokenized to %d tokens"),
+                       TextIds.Num());
+                return;
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: text tokenized to %d IDs"), TextIds.Num());
+
+            // ---- B) Load reference WAV ----
+            TArray<float> RefSamples;
+            int32 RefSampleRate = 0;
+            if (!ReadMonoWavAsFloat32(WavInPath, RefSamples, RefSampleRate, &Err))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED wav read: %s"), *Err);
+                return;
+            }
+            if (RefSampleRate != kChatterboxSampleRate)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Ino.Chatterbox.SynthTest: WARN — reference WAV is %d Hz, Chatterbox expects %d Hz"),
+                       RefSampleRate, kChatterboxSampleRate);
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: reference WAV %d samples @ %d Hz (%.3f s)"),
+                   RefSamples.Num(), RefSampleRate,
+                   (double)RefSamples.Num() / (double)FMath::Max(RefSampleRate, 1));
+
+            // ---- C) Load all four ONNX sessions ----
+            const double EmbedT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EmbedSess =
+                FInoOnnxSession::Create(EmbedOnnxPath, Opts, &Err);
+            if (!EmbedSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED embed load: %s"), *Err);
+                return;
+            }
+            const double EmbedLoadMs = (FPlatformTime::Seconds() - EmbedT0) * 1000.0;
+
+            const double EncT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> EncoderSess =
+                FInoOnnxSession::Create(EncoderOnnxPath, Opts, &Err);
+            if (!EncoderSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED encoder load: %s"), *Err);
+                return;
+            }
+            const double EncLoadMs = (FPlatformTime::Seconds() - EncT0) * 1000.0;
+
+            const double LMT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> LMSess =
+                FInoOnnxSession::Create(LMOnnxPath, Opts, &Err);
+            if (!LMSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED LM load: %s"), *Err);
+                return;
+            }
+            const double LMLoadMs = (FPlatformTime::Seconds() - LMT0) * 1000.0;
+
+            const double DecT0 = FPlatformTime::Seconds();
+            TUniquePtr<FInoOnnxSession> DecoderSess =
+                FInoOnnxSession::Create(DecoderOnnxPath, Opts, &Err);
+            if (!DecoderSess.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED decoder load: %s"), *Err);
+                return;
+            }
+            const double DecLoadMs = (FPlatformTime::Seconds() - DecT0) * 1000.0;
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: sessions loaded — embed=%.0f encoder=%.0f LM=%.0f decoder=%.0f ms"),
+                   EmbedLoadMs, EncLoadMs, LMLoadMs, DecLoadMs);
+
+            // ---- D) Signature checks ----
+            if (LMSess->GetInputCount() != ExpectedLMInputNames().Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: LM signature mismatch"));
+                return;
+            }
+            if (DecoderSess->GetInputCount() != ExpectedDecoderInputNames().Num())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: decoder signature mismatch"));
+                return;
+            }
+            // Encoder declares 1 input ("audio_values") and 4 outputs
+            // (audio_features, audio_tokens, speaker_embeddings,
+            // speaker_features) — verified by EncoderTest. We don't
+            // re-check names here; Run would fail loudly if anything
+            // changed upstream.
+
+            // ---- E) Run speech_encoder on the reference WAV ----
+            FInoOnnxTensor AudioInput = FInoOnnxTensor::CreateFromBufferCopy<float>(
+                { 1, (int64)RefSamples.Num() }, MakeArrayView(RefSamples));
+            if (!AudioInput.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED to build audio_values tensor"));
+                return;
+            }
+            TArray<FInoOnnxTensor> EncInputs;
+            EncInputs.Add(MoveTemp(AudioInput));
+            TArray<FInoOnnxTensor> EncOutputs;
+            const double EncRunT0 = FPlatformTime::Seconds();
+            if (!EncoderSess->Run(EncInputs, EncOutputs, &Err))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED encoder Run: %s"), *Err);
+                return;
+            }
+            const double EncRunMs = (FPlatformTime::Seconds() - EncRunT0) * 1000.0;
+            if (EncOutputs.Num() != 4)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: encoder returned %d outputs, expected 4"),
+                       EncOutputs.Num());
+                return;
+            }
+
+            // Take ownership of the 4 encoder outputs by move.
+            FInoOnnxTensor AudioFeatures     = MoveTemp(EncOutputs[0]);  // fp32 [1, C, 1024]
+            FInoOnnxTensor AudioTokensT      = MoveTemp(EncOutputs[1]);  // i64  [1, P]
+            FInoOnnxTensor SpeakerEmbeddings = MoveTemp(EncOutputs[2]);  // fp32 [1, 192]
+            FInoOnnxTensor SpeakerFeatures   = MoveTemp(EncOutputs[3]);  // fp32 [1, F, 80]
+
+            const int64 CondLen   = AudioFeatures.GetShape()[1];
+            const int64 PromptLen = AudioTokensT.GetShape()[1];
+            const int64 FeatLen   = SpeakerFeatures.GetShape()[1];
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: encoder.Run() %.0f ms. cond=%lld prompt_tokens=%lld feat_frames=%lld"),
+                   EncRunMs, CondLen, PromptLen, FeatLen);
+
+            // ---- F) AR loop with cond_emb prepend at iter 0 ----
+            const int32 ExpectedLMOutputs = 1 + 2 * kChatterboxLMNumLayers;
+            const TArray<FString>& LMExpected = ExpectedLMInputNames();
+
+            TArray<int64> InputIds = TextIds;
+            const int64 TextLen   = (int64)TextIds.Num();
+            // CurSeqLen = cumulative position count seen by the LM. At
+            // iter 0 the LM processes (cond + text) = CondLen + TextLen
+            // positions; after each iter we add 1 for the newly-emitted
+            // speech token.
+            int64 CurSeqLen = CondLen + TextLen;
+
+            TArray<FInoOnnxTensor> PastKV;
+            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            {
+                const TArray<int64> ZeroKVShape = {
+                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
+                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+                {
+                    for (int32 KV = 0; KV < 2; ++KV)
+                    {
+                        PastKV.Add(FInoOnnxTensor::Create(
+                            EInoOnnxDtype::Float16, ZeroKVShape));
+                    }
+                }
+            }
+
+            TArray<int64> GeneratedTokens;
+            GeneratedTokens.Reserve(MaxNewTokens + 2);
+            GeneratedTokens.Add(kStartSpeechToken);
+
+            bool  bHitStop    = false;
+            int32 NumItersRun = 0;
+            double EmbedTotalMs = 0.0;
+            double LMTotalMs    = 0.0;
+            const double ARLoopT0 = FPlatformTime::Seconds();
+
+            for (int32 Iter = 0; Iter < MaxNewTokens; ++Iter)
+            {
+                // Embed input_ids
+                const int64 CurInputLen = InputIds.Num();
+                FInoOnnxTensor EmbedInput = FInoOnnxTensor::CreateFromBufferCopy<int64>(
+                    { 1, CurInputLen }, MakeArrayView(InputIds));
+                TArray<FInoOnnxTensor> EmbedInputs;
+                EmbedInputs.Add(MoveTemp(EmbedInput));
+                TArray<FInoOnnxTensor> EmbedOutputs;
+                const double EmbedT1 = FPlatformTime::Seconds();
+                if (!EmbedSess->Run(EmbedInputs, EmbedOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.SynthTest iter %d: embed Run: %s"), Iter, *Err);
+                    return;
+                }
+                EmbedTotalMs += (FPlatformTime::Seconds() - EmbedT1) * 1000.0;
+                FInoOnnxTensor TextEmbeds = MoveTemp(EmbedOutputs[0]);  // fp32 [1, CurInputLen, 1024]
+
+                // At iter 0 only: prepend audio_features to text embeds.
+                // After iter 0, inputs_embeds is just the 1-token embed
+                // of the most recent sampled speech token — no concat,
+                // the LM's KV cache already holds the cond+text context.
+                FInoOnnxTensor InputsEmbeds;
+                if (Iter == 0)
+                {
+                    InputsEmbeds = ConcatFloat32Axis1_B1(AudioFeatures, TextEmbeds, &Err);
+                    if (!InputsEmbeds.IsValid())
+                    {
+                        UE_LOG(LogInoAgents, Error,
+                               TEXT("Ino.Chatterbox.SynthTest: FAILED cond+text concat: %s"), *Err);
+                        return;
+                    }
+                    // AudioFeatures has been consumed by the copy — drop it
+                    // to free the ~150 KB chunk.
+                    AudioFeatures = FInoOnnxTensor{};
+                }
+                else
+                {
+                    InputsEmbeds = MoveTemp(TextEmbeds);
+                }
+
+                // attention_mask — ones, length = full cumulative seq
+                FInoOnnxTensor AttnMask = FInoOnnxTensor::Create(
+                    EInoOnnxDtype::Int64, { 1, CurSeqLen });
+                if (int64* D = AttnMask.GetMutableData<int64>())
+                {
+                    for (int64 i = 0; i < CurSeqLen; ++i) { D[i] = 1; }
+                }
+
+                // position_ids
+                FInoOnnxTensor PosIds;
+                if (Iter == 0)
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, CurSeqLen });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        for (int64 i = 0; i < CurSeqLen; ++i) { D[i] = i; }
+                    }
+                }
+                else
+                {
+                    PosIds = FInoOnnxTensor::Create(EInoOnnxDtype::Int64, { 1, 1 });
+                    if (int64* D = PosIds.GetMutableData<int64>())
+                    {
+                        D[0] = CurSeqLen - 1;
+                    }
+                }
+
+                // Assemble 51-input LM bundle
+                TArray<FInoOnnxTensor> LMInputs;
+                LMInputs.Reserve(LMExpected.Num());
+                LMInputs.Add(MoveTemp(InputsEmbeds));
+                LMInputs.Add(MoveTemp(AttnMask));
+                LMInputs.Add(MoveTemp(PosIds));
+                for (int32 i = 0; i < PastKV.Num(); ++i)
+                {
+                    LMInputs.Add(MoveTemp(PastKV[i]));
+                }
+                PastKV.Reset();
+
+                TArray<FInoOnnxTensor> LMOutputs;
+                const double LMT1 = FPlatformTime::Seconds();
+                if (!LMSess->Run(LMInputs, LMOutputs, &Err))
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.SynthTest iter %d: LM Run: %s"), Iter, *Err);
+                    return;
+                }
+                LMTotalMs += (FPlatformTime::Seconds() - LMT1) * 1000.0;
+                if (LMOutputs.Num() != ExpectedLMOutputs)
+                {
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.SynthTest iter %d: LM output count mismatch"), Iter);
+                    return;
+                }
+
+                // Argmax with repetition penalty on last-position logits
+                const FInoOnnxTensor& Logits = LMOutputs[0];
+                const TArray<int64>& LogitShape = Logits.GetShape();
+                const int64 LogitSeqLen = LogitShape[1];
+                const float* LogitData = Logits.GetData<float>();
+
+                TArray<float> Scores;
+                Scores.SetNumUninitialized(kChatterboxLMSpeechVocabSize);
+                FMemory::Memcpy(
+                    Scores.GetData(),
+                    LogitData + (LogitSeqLen - 1) * kChatterboxLMSpeechVocabSize,
+                    (SIZE_T)kChatterboxLMSpeechVocabSize * sizeof(float));
+                ApplyRepetitionPenalty(
+                    Scores.GetData(), kChatterboxLMSpeechVocabSize,
+                    GeneratedTokens, kRepetitionPenalty);
+
+                int64 NextToken = 0;
+                float BestScore = -FLT_MAX;
+                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
+                {
+                    if (Scores[i] > BestScore) { BestScore = Scores[i]; NextToken = i; }
+                }
+
+                GeneratedTokens.Add(NextToken);
+                NumItersRun = Iter + 1;
+
+                if (((Iter + 1) % 25) == 0)
+                {
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("Ino.Chatterbox.SynthTest: iter %d token=%lld (cumSeq=%lld)"),
+                           Iter + 1, NextToken, CurSeqLen);
+                }
+
+                if (NextToken == kStopSpeechToken)
+                {
+                    bHitStop = true;
+                    break;
+                }
+
+                // Roll state forward
+                InputIds.Reset(1);
+                InputIds.Add(NextToken);
+                CurSeqLen += 1;
+                for (int32 i = 1; i < LMOutputs.Num(); ++i)
+                {
+                    PastKV.Add(MoveTemp(LMOutputs[i]));
+                }
+            }
+
+            const double ARLoopMs = (FPlatformTime::Seconds() - ARLoopT0) * 1000.0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: AR loop %d iters in %.0f ms (avg %.1f ms/iter) STOP=%s"),
+                   NumItersRun, ARLoopMs,
+                   NumItersRun > 0 ? ARLoopMs / NumItersRun : 0.0,
+                   bHitStop ? TEXT("yes") : TEXT("no"));
+
+            // ---- G) Build decoder inputs ----
+            // Python: speech_tokens = np.concatenate([prompt_token,
+            //                                        generate_tokens[:, 1:-1]])
+            // i.e. drop START (and the trailing element regardless of whether
+            // it was STOP or the last-sampled token on max-tokens exit),
+            // then prepend the encoder's audio_tokens.
+            const int32 NumGen = GeneratedTokens.Num();
+            if (NumGen < 2)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED — too few generated tokens"));
+                return;
+            }
+
+            // Slice generated[1:-1]
+            TArray<int64> GenSlice;
+            if (NumGen >= 3)
+            {
+                GenSlice.Reserve(NumGen - 2);
+                for (int32 i = 1; i < NumGen - 1; ++i)
+                {
+                    GenSlice.Add(GeneratedTokens[i]);
+                }
+            }
+            // else: nothing to decode beyond the prompt; odd but let it ride
+
+            // Prepend audio_tokens (int64 [1, P]) to GenSlice.
+            // Final speech_tokens shape: [1, P + GenSlice.Num()]
+            const int64* AudioTokData = AudioTokensT.GetData<int64>();
+            if (AudioTokData == nullptr)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED — audio_tokens GetData<int64> null"));
+                return;
+            }
+
+            const int64 TotalSpeechLen = PromptLen + (int64)GenSlice.Num();
+            FInoOnnxTensor SpeechTokens = FInoOnnxTensor::Create(
+                EInoOnnxDtype::Int64, { 1, TotalSpeechLen });
+            if (!SpeechTokens.IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED to alloc speech_tokens [%lld]"),
+                       TotalSpeechLen);
+                return;
+            }
+            if (int64* ST = SpeechTokens.GetMutableData<int64>())
+            {
+                FMemory::Memcpy(ST, AudioTokData, (SIZE_T)PromptLen * sizeof(int64));
+                if (GenSlice.Num() > 0)
+                {
+                    FMemory::Memcpy(ST + PromptLen, GenSlice.GetData(),
+                                    (SIZE_T)GenSlice.Num() * sizeof(int64));
+                }
+            }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: decoder speech_tokens = [%lld prompt + %d generated = %lld]"),
+                   PromptLen, GenSlice.Num(), TotalSpeechLen);
+
+            TArray<FInoOnnxTensor> DecInputs;
+            DecInputs.Reserve(3);
+            DecInputs.Add(MoveTemp(SpeechTokens));
+            DecInputs.Add(MoveTemp(SpeakerEmbeddings));
+            DecInputs.Add(MoveTemp(SpeakerFeatures));
+
+            TArray<FInoOnnxTensor> DecOutputs;
+            const double DecRunT0 = FPlatformTime::Seconds();
+            if (!DecoderSess->Run(DecInputs, DecOutputs, &Err))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED decoder Run: %s"), *Err);
+                return;
+            }
+            const double DecRunMs = (FPlatformTime::Seconds() - DecRunT0) * 1000.0;
+            if (DecOutputs.Num() != 1 || !DecOutputs[0].IsValid())
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED — decoder missing output"));
+                return;
+            }
+            const FInoOnnxTensor& Wav = DecOutputs[0];
+            const TArray<int64>& WavShape = Wav.GetShape();
+            if (WavShape.Num() != 2 || WavShape[0] != 1
+                || Wav.GetDtype() != EInoOnnxDtype::Float32)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: unexpected decoder output shape/dtype"));
+                return;
+            }
+            const int64 SampleCount = WavShape[1];
+            const double DurationSec = (double)SampleCount / (double)kChatterboxSampleRate;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: decoder.Run() %.0f ms — waveform [1, %lld] = %.3f s"),
+                   DecRunMs, SampleCount, DurationSec);
+
+            // ---- H) Scan waveform, write WAV ----
+            const float* WavData = Wav.GetData<float>();
+            int64 NanCount = 0, InfCount = 0, FiniteCount = 0;
+            float MinV =  FLT_MAX, MaxV = -FLT_MAX;
+            double SumAbs = 0.0;
+            for (int64 i = 0; i < SampleCount; ++i)
+            {
+                const float v = WavData[i];
+                if (FMath::IsNaN(v))     { ++NanCount; continue; }
+                if (!FMath::IsFinite(v)) { ++InfCount; continue; }
+                if (v < MinV) MinV = v;
+                if (v > MaxV) MaxV = v;
+                SumAbs += FMath::Abs(v);
+                ++FiniteCount;
+            }
+            if (FiniteCount == 0)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: waveform entirely non-finite — nan=%lld inf=%lld"),
+                       NanCount, InfCount);
+                return;
+            }
+            const double MeanAbs = SumAbs / (double)FiniteCount;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: waveform stats (over %lld finite of %lld) — min=%.4f max=%.4f mean|x|=%.4f nan=%lld inf=%lld"),
+                   FiniteCount, SampleCount, MinV, MaxV, MeanAbs, NanCount, InfCount);
+
+            IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
+            TArrayView<const float> SampleView(WavData, (int32)SampleCount);
+            if (!WriteMonoInt16Wav(OutWavPath, SampleView, kChatterboxSampleRate))
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED to write WAV to %s"), *OutWavPath);
+                return;
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: wrote WAV -> %s (%.3f s)"),
+                   *OutWavPath, DurationSec);
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.SynthTest: PASS (variant=%s, %d AR iters, %.3f s audio)"),
+                   *Variant, NumItersRun, DurationSec);
+        });
+    }
+
+    FAutoConsoleCommand GSynthTestCmd(
+        TEXT("Ino.Chatterbox.SynthTest"),
+        TEXT("END-TO-END: reference WAV + text -> speech WAV. Uses default_voice.wav ")
+        TEXT("staged in the variant dir, tokenizes text, runs the full encoder + AR + ")
+        TEXT("decoder pipeline with real voice conditioning, writes ")
+        TEXT("<Project>/Saved/Chatterbox/synth_test.wav. ")
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 256, \"Hello world\"."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunSynthTest));
 }
