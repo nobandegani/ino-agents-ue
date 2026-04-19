@@ -2175,20 +2175,23 @@ namespace
     //       speech_encoder_session.run(None, {"audio_values": audio_values})
 
     /**
-     * Parse a 16-bit PCM mono WAV file into fp32 samples in [-1, +1].
+     * Parse a mono WAV file into fp32 samples in [-1, +1]. Handles:
+     *   - AudioFormat=1  (PCM)   BitsPerSample=16  -> int16 / 32768
+     *   - AudioFormat=3  (IEEE)  BitsPerSample=32  -> direct copy
      *
-     * Only handles the common PCM mono 16-bit format; anything else
-     * (stereo, float32 PCM, IEEE floats, compressed) returns false
-     * with a diagnostic in *OutError. Chatterbox's default_voice.wav
-     * is 24 kHz mono int16 which matches.
+     * Anything else (stereo, 24/32-bit PCM, compressed, ADPCM, etc.)
+     * returns false with a diagnostic in *OutError — we refuse to
+     * guess rather than silently degrade. Chatterbox's bundled
+     * default_voice.wav ships as 24 kHz mono IEEE float32 (AudioFormat
+     * 3, which is what librosa + soundfile tend to emit without a
+     * dither pass); our own generated DecodeTest output uses PCM int16.
+     * This reader accepts both so the same smoke-test code path works
+     * regardless of the source.
      *
-     * OutSampleRate is filled with the file's declared sample rate —
-     * caller is responsible for checking it matches 24 kHz if it
-     * cares. Resampling isn't done here; Chatterbox expects 24 kHz
-     * input and we fail the smoke test rather than silently accept
-     * a wrong rate.
+     * OutSampleRate reports the declared rate; the caller decides
+     * whether a mismatch vs 24 kHz is a warning or a hard error.
      */
-    static bool ReadMonoInt16WavAsFloat32(
+    static bool ReadMonoWavAsFloat32(
         const FString& Path,
         TArray<float>& OutSamples,
         int32& OutSampleRate,
@@ -2227,33 +2230,49 @@ namespace
             return Fail(TEXT("missing 'fmt ' chunk at expected offset"));
         }
 
-        // fmt chunk (canonical PCM layout)
+        // fmt chunk (canonical layout — may have a longer tail for
+        // AudioFormat != 1, but we only read the first 16 bytes'
+        // worth of header fields which are the same across variants).
         const uint32 FmtSize       = *reinterpret_cast<const uint32*>(D + 16);
         const uint16 AudioFormat   = *reinterpret_cast<const uint16*>(D + 20);
         const uint16 NumChannels   = *reinterpret_cast<const uint16*>(D + 22);
         const uint32 SampleRate    = *reinterpret_cast<const uint32*>(D + 24);
         const uint16 BitsPerSample = *reinterpret_cast<const uint16*>(D + 34);
 
-        if (AudioFormat != 1)
-        {
-            return Fail(FString::Printf(
-                TEXT("AudioFormat=%u (need PCM=1; refuse to guess at decompression)"),
-                (uint32)AudioFormat));
-        }
         if (NumChannels != 1)
         {
             return Fail(FString::Printf(
                 TEXT("NumChannels=%u (need mono=1)"), (uint32)NumChannels));
         }
-        if (BitsPerSample != 16)
+
+        // Decide on the per-sample decode path based on (AudioFormat,
+        // BitsPerSample). We bail on anything else explicitly rather
+        // than trying to guess.
+        enum class EDecode { Int16PCM, Float32IEEE };
+        EDecode Decode;
+        int32 BytesPerSample;
+        if (AudioFormat == 1 && BitsPerSample == 16)
+        {
+            Decode = EDecode::Int16PCM;
+            BytesPerSample = 2;
+        }
+        else if (AudioFormat == 3 && BitsPerSample == 32)
+        {
+            Decode = EDecode::Float32IEEE;
+            BytesPerSample = 4;
+        }
+        else
         {
             return Fail(FString::Printf(
-                TEXT("BitsPerSample=%u (need 16)"), (uint32)BitsPerSample));
+                TEXT("unsupported format AudioFormat=%u BitsPerSample=%u ")
+                TEXT("(handled: PCM 16-bit and IEEE float 32-bit only)"),
+                (uint32)AudioFormat, (uint32)BitsPerSample));
         }
 
         // Locate the 'data' chunk. Some encoders insert 'LIST' / 'JUNK'
-        // chunks between 'fmt ' and 'data', so scan past fmt's end
-        // rather than assuming offset 36.
+        // / 'fact' chunks between 'fmt ' and 'data', so scan past fmt's
+        // end rather than assuming offset 36. AudioFormat=3 specifically
+        // tends to come with a 'fact' chunk.
         int64 ScanOffset = 12 + 8 + (int64)FmtSize;
         int64 DataStart  = -1;
         int64 DataBytes  = 0;
@@ -2266,7 +2285,11 @@ namespace
                 break;
             }
             const uint32 ChunkSize = *reinterpret_cast<const uint32*>(D + ScanOffset + 4);
-            ScanOffset += 8 + (int64)ChunkSize;
+            // Chunk sizes are word-aligned (add pad byte if odd). See the
+            // WAVE spec — chunk bodies that are odd length are followed by
+            // one padding byte to keep the next header 16-bit aligned.
+            const int64 Padded = (int64)ChunkSize + (ChunkSize & 1);
+            ScanOffset += 8 + Padded;
         }
         if (DataStart < 0)
         {
@@ -2277,13 +2300,26 @@ namespace
             return Fail(TEXT("'data' chunk extends past end of file"));
         }
 
-        const int64 NumSamples = DataBytes / 2;
+        const int64 NumSamples = DataBytes / (int64)BytesPerSample;
         OutSamples.SetNumUninitialized((int32)NumSamples);
-        const int16* Src = reinterpret_cast<const int16*>(D + DataStart);
-        for (int64 i = 0; i < NumSamples; ++i)
+
+        if (Decode == EDecode::Int16PCM)
         {
-            OutSamples[(int32)i] = (float)Src[i] * (1.0f / 32768.0f);
+            const int16* Src = reinterpret_cast<const int16*>(D + DataStart);
+            for (int64 i = 0; i < NumSamples; ++i)
+            {
+                OutSamples[(int32)i] = (float)Src[i] * (1.0f / 32768.0f);
+            }
         }
+        else  // Float32IEEE
+        {
+            // The WAV data is already fp32 in [-1, +1]; a flat memcpy
+            // is the right move (byte layout is little-endian on both
+            // x86 and ARM64 UE targets).
+            const float* Src = reinterpret_cast<const float*>(D + DataStart);
+            FMemory::Memcpy(OutSamples.GetData(), Src, (SIZE_T)NumSamples * sizeof(float));
+        }
+
         OutSampleRate = (int32)SampleRate;
         return true;
     }
@@ -2311,7 +2347,7 @@ namespace
             // ---- 1) Load WAV ----
             TArray<float> Samples;
             int32 SampleRate = 0;
-            if (!ReadMonoInt16WavAsFloat32(WavPath, Samples, SampleRate, &Err))
+            if (!ReadMonoWavAsFloat32(WavPath, Samples, SampleRate, &Err))
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("Ino.Chatterbox.EncoderTest: FAILED wav read: %s"), *Err);
