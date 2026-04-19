@@ -1202,6 +1202,120 @@ namespace
         }
     }
 
+    /**
+     * Temperature + top-p (nucleus) sampling on a last-token logit slice.
+     *
+     * Greedy argmax — which our ARLoopTest/DecodeTest use — picks the
+     * single highest-logit token every step. That's correct but produces
+     * flat, robotic-sounding prosody because it throws away every other
+     * plausible continuation. Upstream Chatterbox PyTorch uses
+     * temperature=0.8 + top_p=0.9; onnx-community's Python README omits
+     * this for simplicity, but without it the output sounds "not
+     * natural" even when the tokens are bit-exact correct.
+     *
+     * Pipeline (logits -> sampled token):
+     *   1. Scale logits by 1/T (T=0.8 sharpens, T>1 flattens). T=1 is a
+     *      no-op; T<=0 degenerates to argmax (greedy).
+     *   2. Softmax with the standard max-subtract trick for stability.
+     *   3. Sort tokens by prob descending, take the smallest prefix
+     *      whose cumulative prob >= TopP. Everything outside this
+     *      "nucleus" is zeroed.
+     *   4. Renormalize the nucleus and draw a uniform sample.
+     *
+     * Scores is modified in place (the returned value is the sampled
+     * token id). Sort is O(V log V) over V=6563 — about 50-100 us per
+     * step, negligible next to the LM call.
+     */
+    static int64 SampleTemperatureTopP(
+        float* Scores,
+        int32 VocabSize,
+        float Temperature,
+        float TopP,
+        FRandomStream& Rng)
+    {
+        // T<=0 or numerically weird: fall back to greedy argmax.
+        if (!(Temperature > 0.0f) || !FMath::IsFinite(Temperature))
+        {
+            int32 Best = 0;
+            float BestV = Scores[0];
+            for (int32 i = 1; i < VocabSize; ++i)
+            {
+                if (Scores[i] > BestV) { BestV = Scores[i]; Best = i; }
+            }
+            return (int64)Best;
+        }
+
+        // 1) Temperature. Multiply-by-inverse avoids per-element divide.
+        if (Temperature != 1.0f)
+        {
+            const float InvT = 1.0f / Temperature;
+            for (int32 i = 0; i < VocabSize; ++i) { Scores[i] *= InvT; }
+        }
+
+        // 2) Softmax (stable).
+        float MaxL = Scores[0];
+        for (int32 i = 1; i < VocabSize; ++i)
+        {
+            if (Scores[i] > MaxL) { MaxL = Scores[i]; }
+        }
+        double SumExp = 0.0;
+        for (int32 i = 0; i < VocabSize; ++i)
+        {
+            Scores[i] = FMath::Exp(Scores[i] - MaxL);
+            SumExp += Scores[i];
+        }
+        if (!(SumExp > 0.0))
+        {
+            // Every logit was -inf somehow — fall back to uniform over
+            // a single token (position 0) rather than NaN-crash.
+            return 0;
+        }
+        const float InvSum = (float)(1.0 / SumExp);
+        for (int32 i = 0; i < VocabSize; ++i) { Scores[i] *= InvSum; }
+
+        // 3) Top-p. Sort an index array so we can keep Scores addressable
+        //    by original id while we walk the nucleus in prob-desc order.
+        TArray<int32> Idx;
+        Idx.SetNumUninitialized(VocabSize);
+        for (int32 i = 0; i < VocabSize; ++i) { Idx[i] = i; }
+        Idx.Sort([Scores](int32 A, int32 B)
+        {
+            return Scores[A] > Scores[B];
+        });
+
+        float CumSum  = 0.0f;
+        int32 NumKeep = 0;
+        const float TopPClamped = FMath::Clamp(TopP, 0.0f, 1.0f);
+        for (int32 i = 0; i < VocabSize; ++i)
+        {
+            CumSum += Scores[Idx[i]];
+            ++NumKeep;
+            if (CumSum >= TopPClamped) { break; }
+        }
+        if (NumKeep <= 0) { NumKeep = 1; }
+
+        // 4) Renormalize kept prefix and sample.
+        float KeptSum = 0.0f;
+        for (int32 i = 0; i < NumKeep; ++i) { KeptSum += Scores[Idx[i]]; }
+        if (!(KeptSum > 0.0f))
+        {
+            // All-zero kept slice — shouldn't happen after softmax, but
+            // guard anyway. Take the top-1.
+            return (int64)Idx[0];
+        }
+
+        const float R = Rng.FRand() * KeptSum;   // uniform in [0, KeptSum)
+        float C = 0.0f;
+        for (int32 i = 0; i < NumKeep; ++i)
+        {
+            C += Scores[Idx[i]];
+            if (R <= C) { return (int64)Idx[i]; }
+        }
+        // Floating-point edge case (R == KeptSum exactly) — fall through
+        // to the last kept token.
+        return (int64)Idx[NumKeep - 1];
+    }
+
     void RunARLoopTest(const TArray<FString>& Args)
     {
         // --- Parse args ---
@@ -2872,6 +2986,17 @@ namespace
             GeneratedTokens.Reserve(MaxNewTokens + 2);
             GeneratedTokens.Add(kStartSpeechToken);
 
+            // Sampling parameters — empirically chosen to match upstream
+            // PyTorch Chatterbox defaults. Greedy argmax (what
+            // ARLoopTest/DecodeTest use) produces robotic-sounding flat
+            // prosody; temp=0.8 + top-p=0.9 gives natural cadence while
+            // staying semantically coherent. RNG is seeded from the
+            // current tick so each run varies slightly (like real
+            // speech) rather than reproducing bit-identical output.
+            const float kSampleTemperature = 0.8f;
+            const float kSampleTopP        = 0.9f;
+            FRandomStream Rng((uint32)FDateTime::Now().GetTicks());
+
             bool  bHitStop    = false;
             int32 NumItersRun = 0;
             double EmbedTotalMs = 0.0;
@@ -2991,12 +3116,15 @@ namespace
                     Scores.GetData(), kChatterboxLMSpeechVocabSize,
                     GeneratedTokens, kRepetitionPenalty);
 
-                int64 NextToken = 0;
-                float BestScore = -FLT_MAX;
-                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
-                {
-                    if (Scores[i] > BestScore) { BestScore = Scores[i]; NextToken = i; }
-                }
+                // Temperature + top-p sampling on the penalized logits.
+                // This is the key departure from ARLoopTest/DecodeTest,
+                // which use pure greedy argmax — greedy produces robotic
+                // cadence because it always picks the single highest-
+                // probability continuation. Chatterbox PyTorch's
+                // defaults (T=0.8, top-p=0.9) yield natural prosody.
+                const int64 NextToken = SampleTemperatureTopP(
+                    Scores.GetData(), kChatterboxLMSpeechVocabSize,
+                    kSampleTemperature, kSampleTopP, Rng);
 
                 GeneratedTokens.Add(NextToken);
                 NumItersRun = Iter + 1;
