@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/Crc.h"   // FCrc::StrCrc32 for TCaseSensitiveStringKeyFuncs below
 
 /**
  * FInoChatterboxTokenizer — GPT-2 byte-level BPE tokenizer for Chatterbox
@@ -176,18 +177,58 @@ private:
     TArray<FString> BpeEncode(const FString& PreToken) const;
     TArray<int64>   EncodeNonSpecialSegment(const FString& Segment) const;
 
+    // -------------------------------------------------------------------
+    // Case-sensitive FString key-funcs for TMap / TSet.
+    //
+    // UE's FString is case-INSENSITIVE in TMap by default: both
+    // FString::operator== and GetTypeHash(FString) fold case (to stay
+    // consistent with FName / SearchCase::IgnoreCase defaults). GPT-2
+    // vocab has thousands of cased pairs like {"Hello":15496,
+    // "hello":31373} / {" world":995, " WORLD":29564}; with the default
+    // key-funcs these collide and the second insert silently overwrites
+    // the first, corrupting the vocab lookup table. Same problem hits
+    // the BPE merge table (e.g. "H ello" vs "h ello" both as merge
+    // keys). We need true case-sensitive map semantics here.
+    //
+    // BaseKeyFuncs' first template arg is the element type
+    // (TPair<K,V> for TMap). Second is the lookup key. Third says
+    // whether to allow duplicate keys (false = set/map semantics).
+    template<typename ValueType>
+    struct TCaseSensitiveStringKeyFuncs
+        : BaseKeyFuncs<TPair<FString, ValueType>, FString, /*bInAllowDuplicateKeys=*/false>
+    {
+        static FORCEINLINE const FString& GetSetKey(const TPair<FString, ValueType>& Element)
+        {
+            return Element.Key;
+        }
+        static FORCEINLINE bool Matches(const FString& A, const FString& B)
+        {
+            return A.Equals(B, ESearchCase::CaseSensitive);
+        }
+        static FORCEINLINE uint32 GetKeyHash(const FString& Key)
+        {
+            // FCrc::StrCrc32 walks the string byte-by-byte without
+            // case-folding — exactly the case-sensitive hash we want.
+            return FCrc::StrCrc32(*Key);
+        }
+    };
+
+    template<typename ValueType>
+    using TCaseSensitiveStringMap =
+        TMap<FString, ValueType, FDefaultSetAllocator, TCaseSensitiveStringKeyFuncs<ValueType>>;
+
     // Vocab maps.
-    TMap<FString, int64> VocabStringToId;     // "Hello" -> 12345
-    TArray<FString>      VocabIdToString;     // reverse: 12345 -> "Hello"
+    TCaseSensitiveStringMap<int64> VocabStringToId;   // "Hello" -> 15496, "hello" -> 31373
+    TArray<FString>                VocabIdToString;   // reverse: 15496 -> "Hello"
 
     // BPE merges as (a, b) pairs with their priority rank (lower = higher priority).
     // Key: "<a> <b>" concatenated with a space between (HF format).
-    TMap<FString, int32> MergeRanks;
+    TCaseSensitiveStringMap<int32> MergeRanks;
 
     // Special tokens (both <|endoftext|> and paralinguistic tags).
     // Sorted by content-length descending for greedy longest-match.
-    TArray<FString> SpecialTokenContents;
-    TMap<FString, int64> SpecialTokenIds;    // "[laugh]" -> 50275
+    TArray<FString>                SpecialTokenContents;
+    TCaseSensitiveStringMap<int64> SpecialTokenIds;   // "[laugh]" -> 50275
 
     int64 EndOfTextId = 50256;
 

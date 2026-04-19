@@ -392,27 +392,114 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
     TUniquePtr<FInoChatterboxTokenizer> Tk(new FInoChatterboxTokenizer());
 
     // Vocab: { "token_string": id }
-    const TSharedPtr<FJsonObject>* VocabObj = nullptr;
-    if (!(*ModelObj)->TryGetObjectField(TEXT("vocab"), VocabObj))
+    //
+    // CAUTION — we CANNOT iterate (*ModelObj)->GetObjectField("vocab")->Values
+    // here. FJsonObject stores its members in a default
+    // TMap<FString, TSharedPtr<FJsonValue>>, and UE's default FString TMap
+    // key-funcs are case-INSENSITIVE (operator== and GetTypeHash both fold
+    // case). Every cased pair in GPT-2's vocab — {"Hello":15496,
+    // "hello":31373}, {"Ġworld":995, "ĠWORLD":29564}, and thousands more —
+    // collides inside FJsonObject during FJsonSerializer::Deserialize above.
+    // About half the vocab vanishes before we ever touch it, and the
+    // encoder then fails to find perfectly valid sub-tokens (see the
+    // "sub-token Hello not in vocab, skipping" warnings).
+    //
+    // Walk the raw JSON stream with a second TJsonReader pass, which is
+    // a SAX-style parser that never builds an intermediate FJsonObject and
+    // therefore preserves every key's exact case. The surrounding
+    // FJsonSerializer::Deserialize pass is still useful for 'type',
+    // 'merges', 'added_tokens' — none of those exhibit case collisions
+    // at the keys we care about.
     {
-        return Fail(TEXT("tokenizer.json model.vocab is missing"));
-    }
-    Tk->VocabStringToId.Reserve((*VocabObj)->Values.Num());
-    Tk->VocabIdToString.SetNum((*VocabObj)->Values.Num());
-    int32 MaxVocabId = -1;
-    for (const auto& Pair : (*VocabObj)->Values)
-    {
-        const int64 Id = (int64)Pair.Value->AsNumber();
-        Tk->VocabStringToId.Add(Pair.Key, Id);
-        if (Id >= Tk->VocabIdToString.Num())
+        const TSharedRef<TJsonReader<>> VocabReader = TJsonReaderFactory<>::Create(Json);
+
+        int32 Depth       = 0;      // nesting level while scanning
+        bool  bInModel    = false;  // currently inside the top-level "model" object
+        bool  bInVocab    = false;  // currently inside model.vocab
+        int32 MaxVocabId  = -1;
+        int32 EntriesRead = 0;
+
+        EJsonNotation Notation;
+        while (VocabReader->ReadNext(Notation))
         {
-            Tk->VocabIdToString.SetNum((int32)Id + 1);
+            // Capture identifier BEFORE we tweak Depth — TJsonReader reports
+            // the parent member's identifier alongside the opening brace /
+            // bracket of its child.
+            const FString& Ident = VocabReader->GetIdentifier();
+
+            switch (Notation)
+            {
+            case EJsonNotation::ObjectStart:
+                if (Depth == 1 && Ident == TEXT("model"))
+                {
+                    bInModel = true;
+                }
+                else if (bInModel && Depth == 2 && Ident == TEXT("vocab"))
+                {
+                    bInVocab = true;
+                }
+                ++Depth;
+                break;
+
+            case EJsonNotation::ObjectEnd:
+                --Depth;
+                if (bInVocab && Depth == 2)      { bInVocab = false; }
+                else if (bInModel && Depth == 1) { bInModel = false; }
+                break;
+
+            case EJsonNotation::ArrayStart:
+                ++Depth;
+                break;
+
+            case EJsonNotation::ArrayEnd:
+                --Depth;
+                break;
+
+            case EJsonNotation::Number:
+                if (bInVocab)
+                {
+                    const int64 TokenId = (int64)VocabReader->GetValueAsNumber();
+                    Tk->VocabStringToId.Add(Ident, TokenId);
+                    if (TokenId >= Tk->VocabIdToString.Num())
+                    {
+                        Tk->VocabIdToString.SetNum((int32)TokenId + 1);
+                    }
+                    Tk->VocabIdToString[(int32)TokenId] = Ident;
+                    if ((int32)TokenId > MaxVocabId) MaxVocabId = (int32)TokenId;
+                    ++EntriesRead;
+                }
+                break;
+
+            default:
+                break;
+            }
         }
-        Tk->VocabIdToString[(int32)Id] = Pair.Key;
-        if ((int32)Id > MaxVocabId) MaxVocabId = (int32)Id;
+
+        if (EntriesRead == 0)
+        {
+            return Fail(TEXT("tokenizer.json model.vocab is missing or empty "
+                             "(TJsonReader pass found no numeric entries)"));
+        }
     }
 
-    // Merges: [ "token_a token_b", ... ] — one per rank.
+    // Merges: one entry per rank. HuggingFace's tokenizer.json format has
+    // two shapes in the wild, and we must support both:
+    //
+    //   Legacy:  "<a> <b>"             (single space-separated string)
+    //   Newer:   ["<a>", "<b>"]        (array of two strings)
+    //
+    // Chatterbox's tokenizer.json uses the newer array shape. Calling
+    // FJsonValue::AsString() on an array value logs
+    //   "LogJson: Error: Json Value of type 'Array' used as a 'String'."
+    // (one line per merge — thousands of lines for a full GPT-2 vocab)
+    // AND silently returns "". Every merge then collapses to the same
+    // empty-string key in MergeRanks, leaving exactly one (useless)
+    // entry and producing a BPE that never merges anything. The round
+    // trip still appears to work because encode and decode share the
+    // broken path, but the token stream is grossly wrong for the model.
+    //
+    // We dispatch on FJsonValue::Type so neither shape triggers the
+    // mismatched-accessor log path.
     const TArray<TSharedPtr<FJsonValue>>* MergesArr = nullptr;
     if (!(*ModelObj)->TryGetArrayField(TEXT("merges"), MergesArr))
     {
@@ -421,8 +508,41 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
     Tk->MergeRanks.Reserve(MergesArr->Num());
     for (int32 Rank = 0; Rank < MergesArr->Num(); ++Rank)
     {
-        const FString Merge = (*MergesArr)[Rank]->AsString();
-        Tk->MergeRanks.Add(Merge, Rank);
+        const TSharedPtr<FJsonValue>& Entry = (*MergesArr)[Rank];
+        FString Key;
+
+        if (Entry->Type == EJson::Array)
+        {
+            const TArray<TSharedPtr<FJsonValue>>& Pair = Entry->AsArray();
+            if (Pair.Num() != 2)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Chatterbox tokenizer: merge rank %d has %d elements (expected 2); skipping"),
+                       Rank, Pair.Num());
+                continue;
+            }
+            if (Pair[0]->Type != EJson::String || Pair[1]->Type != EJson::String)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Chatterbox tokenizer: merge rank %d has non-string pair elements; skipping"),
+                       Rank);
+                continue;
+            }
+            Key = Pair[0]->AsString() + TEXT(" ") + Pair[1]->AsString();
+        }
+        else if (Entry->Type == EJson::String)
+        {
+            Key = Entry->AsString();
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Chatterbox tokenizer: merge rank %d has unexpected JSON type (%d); skipping"),
+                   Rank, (int32)Entry->Type);
+            continue;
+        }
+
+        Tk->MergeRanks.Add(Key, Rank);
     }
 
     // Added tokens (special tokens including paralinguistic).
