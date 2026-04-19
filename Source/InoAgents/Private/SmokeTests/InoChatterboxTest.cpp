@@ -316,11 +316,31 @@ namespace
                 return;
             }
 
-            // bAddSpecialTokens=false: for Chatterbox the text-side EOT
-            // wrapping is handled inside the AR loop (or not at all,
-            // depending on the model's prompt template). For a plain
-            // embedding dump we want just the text tokens.
-            const TArray<int64> Ids = Tk->Encode(Text, /*bAddSpecialTokens=*/false);
+            // bAddSpecialTokens=true is MANDATORY here — not optional.
+            //
+            // The embed_tokens.onnx graph has an internal routing Where
+            // whose Equal-condition depends on the last two positions of
+            // input_ids being the <|endoftext|> markers (50256) that the
+            // tokenizer's post-processor appends via the template
+            //     A <|endoftext|> <|endoftext|>.
+            // When the last two tokens ARE 50256, Where routes a safe
+            // constant into /speech_emb/Gather. When they're raw text
+            // IDs (because we passed bAddSpecialTokens=false), Where
+            // routes the raw text IDs into /speech_emb/Gather, which
+            // fails bounds since the speech embedding table only has
+            // 6563 entries.
+            //
+            // Diagnosed by running the official Python reference
+            // (Plugins/InoAgents/Chatterbox/scripts/diagnose-embed-tokens.py)
+            // against our exact .onnx file on latest ORT. Python call
+            // tokenizer("Hello world") returns [15496, 995, 50256, 50256]
+            // (HF AutoTokenizer defaults to add_special_tokens=True).
+            // Feeding those four IDs to embed_tokens succeeds and returns
+            // shape [1, 4, 1024]. Our earlier test passed only
+            // [15496, 995] — two positions, no EOT trailers — so the
+            // safe-index substitution never fired and the bounds error
+            // tripped on our text IDs.
+            const TArray<int64> Ids = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
             if (Ids.Num() == 0)
             {
                 UE_LOG(LogInoAgents, Error,
@@ -342,26 +362,12 @@ namespace
 
             // 2) Load the embed_tokens session only.
             //
-            // Graph optimization DISABLED. The embed_tokens.onnx graph
-            // contains a dual-Gather pattern (one table for text IDs in
-            // [0, 50275], one for speech IDs in [0, 6562]) with protective
-            // Where/Clip masking so text IDs that would be out-of-range
-            // for the speech table get folded to safe indices before the
-            // speech Gather runs. With ORT's default "All" optimizations,
-            // the optimizer appears to fold away the masking (it can't
-            // prove the input range statically, so constant folding is
-            // conservative on the mask path but not on the raw Gather),
-            // exposing the unchecked Gather to real text IDs and tripping
-            // a bounds error (seen during Phase B3 chunk 1 bring-up:
-            // "idx=15496 must be within the inclusive range [-6563,6562]"
-            // against the /speech_emb/Gather node). DDATT's working C++
-            // port also uses ORT_DISABLE_ALL for the same session, which
-            // corroborates the diagnosis. The per-inference cost of
-            // disabling optimization here is expected to be small because
-            // embed_tokens is just two Gather + a Where + a matmul/norm
-            // tail — very little optimizer headroom.
-            FInoOnnxSessionOptions Opts;  // default = CPU provider
-            Opts.GraphOptimization = EInoOnnxGraphOptimizationLevel::Disabled;
+            // Default session options (CPU provider, full graph opts).
+            // We originally set GraphOptimization=Disabled on a false lead
+            // — that didn't affect the failure, which turned out to be
+            // the missing trailing EOT pair in our input (see comment
+            // below on bAddSpecialTokens=true). Reverted to defaults.
+            FInoOnnxSessionOptions Opts;
             const double LoadT0 = FPlatformTime::Seconds();
             FString SessErr;
             TUniquePtr<FInoOnnxSession> Sess =
@@ -576,8 +582,7 @@ namespace
         Async(EAsyncExecution::ThreadPool,
               [Variant, Ids, EmbedOnnxPath]()
         {
-            FInoOnnxSessionOptions Opts;
-            Opts.GraphOptimization = EInoOnnxGraphOptimizationLevel::Disabled;
+            FInoOnnxSessionOptions Opts;  // defaults
 
             FString SessErr;
             TUniquePtr<FInoOnnxSession> Sess =
