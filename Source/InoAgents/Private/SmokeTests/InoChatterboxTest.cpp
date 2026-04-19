@@ -8,6 +8,7 @@
 
 #include "InoAgentsLog.h"
 #include "InoChatterboxModels.h"
+#include "InoChatterboxTokenizer.h"
 
 /**
  * Phase-B smoke-test console commands for the Chatterbox TTS integration.
@@ -110,4 +111,130 @@ namespace
         TEXT("Load the three Chatterbox Turbo ORT sessions and dump their I/O metadata. ")
         TEXT("Argument: variant name (fp16 default; fp32 | fp16 | q4 | q4f16 | quantized)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunLoadModelsTest));
+
+    // ========================================================================
+    //  Ino.Chatterbox.TokenizerTest — GPT-2 BPE tokenizer round-trip
+    // ========================================================================
+
+    /**
+     * `Ino.Chatterbox.TokenizerTest [variant] [text...]`
+     *
+     * Loads the HuggingFace tokenizer.json for the requested variant and
+     * exercises Encode / Decode end-to-end. Logs:
+     *   - Summary (vocab size, merges, special tokens)
+     *   - Input text verbatim
+     *   - Encoded token IDs with their sub-string representations
+     *   - Decoded text
+     *   - Round-trip verdict (PASS if input == decoded after stripping
+     *     the post-processor's trailing `<|endoftext|>` x2)
+     *
+     * Default input exercises every feature we care about:
+     *   - Plain text   ("Hello, world!")
+     *   - Contractions ("don't")
+     *   - Special tokens ([laugh])
+     *   - Mixed case + punctuation
+     *
+     * All work runs on the game thread — the tokenizer is pure CPU string
+     * processing, no async needed (unlike the model load which must
+     * dispatch to a thread pool to avoid editor hitches).
+     */
+    void RunTokenizerTest(const TArray<FString>& Args)
+    {
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+
+        // Args[1..] joined back into a single text string so the user can
+        // type `Ino.Chatterbox.TokenizerTest fp16 Hello world [laugh]`
+        // without quoting. Falls back to a canonical smoke-test input.
+        FString Text;
+        if (Args.Num() > 1)
+        {
+            for (int32 i = 1; i < Args.Num(); ++i)
+            {
+                if (!Text.IsEmpty()) { Text += TEXT(" "); }
+                Text += Args[i];
+            }
+        }
+        else
+        {
+            Text = TEXT("Hello, world! I don't know if this is a [laugh] test?");
+        }
+
+        const FString Dir = ResolveChatterboxDir(Variant);
+        const FString TokenizerJsonPath = FPaths::Combine(Dir, TEXT("tokenizer.json"));
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Ino.Chatterbox.TokenizerTest: variant=%s json=%s"),
+               *Variant, *TokenizerJsonPath);
+
+        FString Error;
+        TUniquePtr<FInoChatterboxTokenizer> Tk =
+            FInoChatterboxTokenizer::LoadFromJson(TokenizerJsonPath, &Error);
+        if (!Tk.IsValid())
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("Ino.Chatterbox.TokenizerTest: FAILED to load tokenizer: %s"), *Error);
+            return;
+        }
+
+        Tk->LogSummary();
+
+        // Encode with the full template-processor terminator so we exercise
+        // the post-processor too.
+        const TArray<int64> Ids = Tk->Encode(Text, /*bAddSpecialTokens=*/true);
+
+        UE_LOG(LogInoAgents, Log, TEXT("Input:  \"%s\""), *Text);
+        UE_LOG(LogInoAgents, Log, TEXT("Encoded %d IDs:"), Ids.Num());
+
+        // Per-ID detail. Each row: "   [i] id=12345 -> \"Hello\"" so a human
+        // can eyeball that the BPE pieces look right. Decode one ID at a
+        // time via a single-element TArrayView — same path Decode uses,
+        // so we're not duplicating logic.
+        for (int32 i = 0; i < Ids.Num(); ++i)
+        {
+            const int64 Id = Ids[i];
+            const FString Piece = Tk->Decode(MakeArrayView(&Id, 1));
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("   [%3d] id=%5lld -> \"%s\""), i, Id, *Piece);
+        }
+
+        // Full round-trip.
+        const FString Decoded = Tk->Decode(MakeArrayView(Ids.GetData(), Ids.Num()));
+        UE_LOG(LogInoAgents, Log, TEXT("Decoded: \"%s\""), *Decoded);
+
+        // Round-trip check. The post-processor appends two `<|endoftext|>`
+        // markers, which decode to the literal string. Strip those from
+        // the tail before comparing.
+        const FString EotStr(TEXT("<|endoftext|>"));
+        FString DecodedStripped = Decoded;
+        if (DecodedStripped.EndsWith(EotStr))
+        {
+            DecodedStripped = DecodedStripped.LeftChop(EotStr.Len());
+        }
+        if (DecodedStripped.EndsWith(EotStr))
+        {
+            DecodedStripped = DecodedStripped.LeftChop(EotStr.Len());
+        }
+
+        const bool bRoundTripMatches = (DecodedStripped == Text);
+        if (bRoundTripMatches)
+        {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Ino.Chatterbox.TokenizerTest: PASS (round-trip matches, %d tokens for %d chars)"),
+                   Ids.Num(), Text.Len());
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Ino.Chatterbox.TokenizerTest: round-trip MISMATCH."));
+            UE_LOG(LogInoAgents, Warning, TEXT("  Expected: \"%s\""), *Text);
+            UE_LOG(LogInoAgents, Warning, TEXT("  Got:      \"%s\""), *DecodedStripped);
+        }
+    }
+
+    FAutoConsoleCommand GTokenizerTestCmd(
+        TEXT("Ino.Chatterbox.TokenizerTest"),
+        TEXT("Load the Chatterbox tokenizer.json and round-trip an input string. ")
+        TEXT("Args: [variant] [text...]. Variant defaults to fp16. ")
+        TEXT("Text defaults to a built-in sample covering specials + contractions."),
+        FConsoleCommandWithArgsDelegate::CreateStatic(&RunTokenizerTest));
 }
