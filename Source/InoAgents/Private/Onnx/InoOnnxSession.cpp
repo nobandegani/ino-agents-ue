@@ -1,0 +1,785 @@
+// Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
+
+#include "Onnx/InoOnnxSession.h"
+
+#include "InoOnnxInternal.h"
+#include "InoOnnxModule.h"
+#include "InoAgentsLog.h"
+
+#include "Async/Async.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+
+namespace
+{
+    using namespace InoAgents::Onnx;
+    using namespace InoAgents::Onnx::Internal;
+
+    // ========================================================================
+    //  Small helpers
+    // ========================================================================
+
+    bool CheckStatus(OrtStatus* Status, const TCHAR* Op, FString* OutError = nullptr)
+    {
+        return CheckOrtStatus(Status, Op, OutError);
+    }
+
+    /**
+     * Build a fresh OrtSessionOptions from FInoOnnxSessionOptions and
+     * register the requested execution providers. Returns the OrtSessionOptions*
+     * (caller owns; release via OrtApi::ReleaseSessionOptions) and
+     * populates OutRegistered with the providers that actually registered.
+     *
+     * On error returns nullptr and writes OutError.
+     */
+    OrtSessionOptions* BuildOrtSessionOptions(
+        const OrtApi* Api,
+        const FInoOnnxSessionOptions& Options,
+        TArray<EInoOnnxProvider>& OutRegistered,
+        FString* OutError)
+    {
+        OrtSessionOptions* Opts = nullptr;
+        if (!CheckStatus(Api->CreateSessionOptions(&Opts),
+                         TEXT("CreateSessionOptions"), OutError))
+        {
+            return nullptr;
+        }
+
+        // Graph optimization level.
+        if (!CheckStatus(
+                Api->SetSessionGraphOptimizationLevel(
+                    Opts, OptLevelToOrt(Options.GraphOptimization)),
+                TEXT("SetSessionGraphOptimizationLevel"), OutError))
+        {
+            Api->ReleaseSessionOptions(Opts);
+            return nullptr;
+        }
+
+        // Thread counts (0 = ORT default — don't set explicitly).
+        if (Options.IntraOpThreadCount > 0)
+        {
+            if (!CheckStatus(
+                    Api->SetIntraOpNumThreads(Opts, Options.IntraOpThreadCount),
+                    TEXT("SetIntraOpNumThreads"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+        if (Options.InterOpThreadCount > 0)
+        {
+            if (!CheckStatus(
+                    Api->SetInterOpNumThreads(Opts, Options.InterOpThreadCount),
+                    TEXT("SetInterOpNumThreads"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
+        // Custom session-config entries.
+        for (const auto& Pair : Options.SessionConfig)
+        {
+            const FTCHARToUTF8 Key(*Pair.Key);
+            const FTCHARToUTF8 Val(*Pair.Value);
+            if (!CheckStatus(
+                    Api->AddSessionConfigEntry(Opts, Key.Get(), Val.Get()),
+                    TEXT("AddSessionConfigEntry"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
+        // Profiling.
+        if (Options.bEnableProfiling)
+        {
+            // ORT takes a file prefix; it appends a timestamp + ".json".
+            // We use an absolute path under Saved/Logs/ so the output is
+            // easy to find in both editor and packaged builds.
+            const FString ProfilePrefix = FPaths::Combine(
+                FPaths::ProjectSavedDir(),
+                TEXT("Logs"),
+                TEXT("onnxruntime_profile_"));
+
+#if PLATFORM_WINDOWS
+            // Windows wants wide-char strings for file paths in the ORT API.
+            if (!CheckStatus(
+                    Api->EnableProfiling(Opts, (const ORTCHAR_T*)*ProfilePrefix),
+                    TEXT("EnableProfiling"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+#else
+            const FTCHARToUTF8 ProfileUtf8(*ProfilePrefix);
+            if (!CheckStatus(
+                    Api->EnableProfiling(Opts, ProfileUtf8.Get()),
+                    TEXT("EnableProfiling"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+#endif
+        }
+
+        // Optimized model output (optional).
+        if (!Options.OptimizedModelOutputPath.IsEmpty())
+        {
+#if PLATFORM_WINDOWS
+            if (!CheckStatus(
+                    Api->SetOptimizedModelFilePath(
+                        Opts, (const ORTCHAR_T*)*Options.OptimizedModelOutputPath),
+                    TEXT("SetOptimizedModelFilePath"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+#else
+            const FTCHARToUTF8 PathUtf8(*Options.OptimizedModelOutputPath);
+            if (!CheckStatus(
+                    Api->SetOptimizedModelFilePath(Opts, PathUtf8.Get()),
+                    TEXT("SetOptimizedModelFilePath"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+#endif
+        }
+
+        // Register execution providers in priority order. Each provider
+        // that fails to register is skipped (logged as warning); we
+        // keep going so the caller still gets a functional session as
+        // long as at least one provider succeeds.
+        //
+        // CPU is always registered by ORT as the baseline, so even if
+        // every requested provider fails, Run() still works — just
+        // slower than it might have been.
+        OutRegistered.Reset();
+        for (const EInoOnnxProvider Provider : Options.ExecutionProviders)
+        {
+            OrtStatus* RegStatus = nullptr;
+            const TCHAR* ProviderName = ProviderToString(Provider);
+
+            switch (Provider)
+            {
+                case EInoOnnxProvider::Cpu:
+                    // CPU provider is always registered implicitly. Adding
+                    // it explicitly via the "OrtSessionOptionsAppendExecutionProvider_CPU"
+                    // extension API has no effect other than enabling the
+                    // per-thread arena allocator, which ORT uses by default
+                    // anyway. Treat as always-succeeds.
+                    OutRegistered.Add(Provider);
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("InoOnnx: provider %s registered (implicit)"),
+                           ProviderName);
+                    continue;
+
+                case EInoOnnxProvider::Xnnpack:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "XNNPACK", /*keys=*/nullptr, /*vals=*/nullptr, /*num_entries=*/0);
+                    break;
+
+                case EInoOnnxProvider::Nnapi:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "NNAPI", nullptr, nullptr, 0);
+                    break;
+
+                case EInoOnnxProvider::WebGpu:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "WebGPU", nullptr, nullptr, 0);
+                    break;
+
+                case EInoOnnxProvider::DirectMl:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "DmlExecutionProvider", nullptr, nullptr, 0);
+                    break;
+
+                case EInoOnnxProvider::Cuda:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "CUDAExecutionProvider", nullptr, nullptr, 0);
+                    break;
+
+                case EInoOnnxProvider::TensorRt:
+                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
+                        Opts, "TensorrtExecutionProvider", nullptr, nullptr, 0);
+                    break;
+
+                default:
+                    UE_LOG(LogInoAgents, Warning,
+                           TEXT("InoOnnx: unknown provider enum value %d, skipping"),
+                           (int32)Provider);
+                    continue;
+            }
+
+            if (RegStatus == nullptr)
+            {
+                OutRegistered.Add(Provider);
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("InoOnnx: provider %s registered"),
+                       ProviderName);
+            }
+            else
+            {
+                // Registration failed. Log at warning and continue —
+                // the session can still be built with remaining providers.
+                const char* ErrMsg = Api->GetErrorMessage(RegStatus);
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("InoOnnx: provider %s failed to register: %s"),
+                       ProviderName, UTF8_TO_TCHAR(ErrMsg));
+                Api->ReleaseStatus(RegStatus);
+            }
+        }
+
+        return Opts;
+    }
+
+    /** Convert a UE model-file path to the OS-native form ORT wants.
+     *  On Windows ORT's CreateSession expects wchar_t*; elsewhere utf-8.
+     *  Returned FTCHARToUTF8 is only used on non-Windows platforms. */
+    FString NormalizeModelPath(const FString& In)
+    {
+        FString Out = In;
+        FPaths::NormalizeFilename(Out);
+        return Out;
+    }
+
+    /** Read input (true) or output (false) metadata at Index from the
+     *  session and append an FIOMeta entry to OutArr. Returns false on
+     *  ORT API error (which shouldn't happen on a valid session, but be
+     *  defensive). */
+    bool ReadIOMeta(
+        const OrtApi* Api,
+        OrtSession* Session,
+        bool bInput,
+        size_t Index,
+        TArray<FInoOnnxSession::FIOMeta>& OutArr)
+    {
+        // Allocator for name strings.
+        OrtAllocator* Allocator = nullptr;
+        if (!CheckStatus(
+                Api->GetAllocatorWithDefaultOptions(&Allocator),
+                TEXT("GetAllocatorWithDefaultOptions")))
+        {
+            return false;
+        }
+
+        // --- Name ---
+        char* NamePtr = nullptr;
+        OrtStatus* NameStatus = bInput
+            ? Api->SessionGetInputName(Session, Index, Allocator, &NamePtr)
+            : Api->SessionGetOutputName(Session, Index, Allocator, &NamePtr);
+        if (!CheckStatus(NameStatus,
+                         bInput ? TEXT("SessionGetInputName") : TEXT("SessionGetOutputName")))
+        {
+            return false;
+        }
+        FString Name = FString(UTF8_TO_TCHAR(NamePtr));
+        Api->AllocatorFree(Allocator, NamePtr);  // free ORT-allocated string
+
+        // --- Type info ---
+        OrtTypeInfo* TypeInfo = nullptr;
+        OrtStatus* TypeStatus = bInput
+            ? Api->SessionGetInputTypeInfo(Session, Index, &TypeInfo)
+            : Api->SessionGetOutputTypeInfo(Session, Index, &TypeInfo);
+        if (!CheckStatus(TypeStatus,
+                         bInput ? TEXT("SessionGetInputTypeInfo") : TEXT("SessionGetOutputTypeInfo")))
+        {
+            return false;
+        }
+
+        const OrtTensorTypeAndShapeInfo* TensorInfo = nullptr;
+        if (!CheckStatus(
+                Api->CastTypeInfoToTensorInfo(TypeInfo, &TensorInfo),
+                TEXT("CastTypeInfoToTensorInfo")))
+        {
+            Api->ReleaseTypeInfo(TypeInfo);
+            return false;
+        }
+
+        // CastTypeInfoToTensorInfo can set *TensorInfo to null for non-
+        // tensor model I/O (maps, sequences). We don't support those yet —
+        // log and skip.
+        if (TensorInfo == nullptr)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("InoOnnx: model %s[%zu] (%s) is not a tensor type; skipping metadata."),
+                   bInput ? TEXT("input") : TEXT("output"), Index, *Name);
+            Api->ReleaseTypeInfo(TypeInfo);
+            FInoOnnxSession::FIOMeta Stub;
+            Stub.Name = Name;
+            OutArr.Add(MoveTemp(Stub));
+            return true;
+        }
+
+        // Dtype.
+        ONNXTensorElementDataType OrtDtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+        CheckStatus(Api->GetTensorElementType(TensorInfo, &OrtDtype),
+                    TEXT("GetTensorElementType"));
+
+        // Shape.
+        size_t DimCount = 0;
+        TArray<int64> Shape;
+        if (CheckStatus(Api->GetDimensionsCount(TensorInfo, &DimCount),
+                        TEXT("GetDimensionsCount")) && DimCount > 0)
+        {
+            Shape.SetNumUninitialized((int32)DimCount);
+            CheckStatus(Api->GetDimensions(TensorInfo, Shape.GetData(), DimCount),
+                        TEXT("GetDimensions"));
+        }
+
+        Api->ReleaseTypeInfo(TypeInfo);
+
+        FInoOnnxSession::FIOMeta Entry;
+        Entry.Name  = MoveTemp(Name);
+        Entry.Shape = MoveTemp(Shape);
+        Entry.Dtype = OrtToDtype(OrtDtype);
+        OutArr.Add(MoveTemp(Entry));
+        return true;
+    }
+}
+
+// ============================================================================
+//  FInoOnnxSession — static factories
+// ============================================================================
+
+TUniquePtr<FInoOnnxSession> FInoOnnxSession::Create(
+    const FString& ModelPath,
+    const FInoOnnxSessionOptions& Options,
+    FString* OutError)
+{
+    const OrtApi* Api = InoAgents::Onnx::GetApi();
+    if (Api == nullptr)
+    {
+        const FString Err(TEXT("ONNX Runtime is not initialized (GetApi() == nullptr)."));
+        if (OutError) *OutError = Err;
+        UE_LOG(LogInoAgents, Error, TEXT("FInoOnnxSession::Create: %s"), *Err);
+        return nullptr;
+    }
+
+    OrtEnv* Env = InoAgents::Onnx::Internal::GetGlobalOrtEnv();
+    if (Env == nullptr)
+    {
+        const FString Err(TEXT("Failed to obtain global OrtEnv."));
+        if (OutError) *OutError = Err;
+        return nullptr;
+    }
+
+    // Verify the file exists up-front — ORT's error for a missing file
+    // is not terribly informative.
+    const FString FullPath = NormalizeModelPath(ModelPath);
+    if (!IFileManager::Get().FileExists(*FullPath))
+    {
+        const FString Err = FString::Printf(
+            TEXT("Model file does not exist: %s"), *FullPath);
+        if (OutError) *OutError = Err;
+        UE_LOG(LogInoAgents, Error, TEXT("FInoOnnxSession::Create: %s"), *Err);
+        return nullptr;
+    }
+
+    TArray<EInoOnnxProvider> RegisteredProviders;
+    OrtSessionOptions* Opts = BuildOrtSessionOptions(Api, Options, RegisteredProviders, OutError);
+    if (Opts == nullptr)
+    {
+        return nullptr;
+    }
+
+    // ORT's CreateSession signature on Windows takes wchar_t*; on other
+    // platforms it takes char* (utf-8). Our PLATFORM_TCHAR_IS_WCHAR
+    // handling keeps this cleanish.
+    OrtSession* Native = nullptr;
+#if PLATFORM_WINDOWS
+    OrtStatus* CreateStatus = Api->CreateSession(Env, (const ORTCHAR_T*)*FullPath, Opts, &Native);
+#else
+    const FTCHARToUTF8 PathUtf8(*FullPath);
+    OrtStatus* CreateStatus = Api->CreateSession(Env, PathUtf8.Get(), Opts, &Native);
+#endif
+
+    if (!CheckStatus(CreateStatus, TEXT("CreateSession"), OutError))
+    {
+        Api->ReleaseSessionOptions(Opts);
+        return nullptr;
+    }
+
+    // Wrap into our class.
+    TUniquePtr<FInoOnnxSession> Session = TUniquePtr<FInoOnnxSession>(new FInoOnnxSession());
+    Session->NativeSession = Native;
+    Session->NativeOptions = Opts;
+
+    if (!Session->FinishConstruction(Options, MoveTemp(RegisteredProviders), OutError))
+    {
+        // FinishConstruction cleans up on failure via our destructor.
+        return nullptr;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("InoOnnx: loaded session '%s' (%d inputs, %d outputs)"),
+           *FPaths::GetCleanFilename(FullPath),
+           Session->GetInputCount(),
+           Session->GetOutputCount());
+
+    return Session;
+}
+
+TUniquePtr<FInoOnnxSession> FInoOnnxSession::CreateFromMemory(
+    TArrayView<const uint8> ModelBytes,
+    const FInoOnnxSessionOptions& Options,
+    FString* OutError)
+{
+    const OrtApi* Api = InoAgents::Onnx::GetApi();
+    if (Api == nullptr)
+    {
+        const FString Err(TEXT("ONNX Runtime is not initialized (GetApi() == nullptr)."));
+        if (OutError) *OutError = Err;
+        return nullptr;
+    }
+
+    OrtEnv* Env = InoAgents::Onnx::Internal::GetGlobalOrtEnv();
+    if (Env == nullptr)
+    {
+        const FString Err(TEXT("Failed to obtain global OrtEnv."));
+        if (OutError) *OutError = Err;
+        return nullptr;
+    }
+
+    if (ModelBytes.Num() == 0)
+    {
+        const FString Err(TEXT("ModelBytes is empty."));
+        if (OutError) *OutError = Err;
+        UE_LOG(LogInoAgents, Error, TEXT("FInoOnnxSession::CreateFromMemory: %s"), *Err);
+        return nullptr;
+    }
+
+    TArray<EInoOnnxProvider> RegisteredProviders;
+    OrtSessionOptions* Opts = BuildOrtSessionOptions(Api, Options, RegisteredProviders, OutError);
+    if (Opts == nullptr)
+    {
+        return nullptr;
+    }
+
+    OrtSession* Native = nullptr;
+    OrtStatus* CreateStatus = Api->CreateSessionFromArray(
+        Env, ModelBytes.GetData(), (size_t)ModelBytes.Num(), Opts, &Native);
+
+    if (!CheckStatus(CreateStatus, TEXT("CreateSessionFromArray"), OutError))
+    {
+        Api->ReleaseSessionOptions(Opts);
+        return nullptr;
+    }
+
+    TUniquePtr<FInoOnnxSession> Session = TUniquePtr<FInoOnnxSession>(new FInoOnnxSession());
+    Session->NativeSession = Native;
+    Session->NativeOptions = Opts;
+
+    if (!Session->FinishConstruction(Options, MoveTemp(RegisteredProviders), OutError))
+    {
+        return nullptr;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("InoOnnx: loaded session from memory (%d bytes, %d inputs, %d outputs)"),
+           ModelBytes.Num(),
+           Session->GetInputCount(),
+           Session->GetOutputCount());
+
+    return Session;
+}
+
+FInoOnnxSession::~FInoOnnxSession()
+{
+    const OrtApi* Api = InoAgents::Onnx::GetApi();
+    if (Api == nullptr)
+    {
+        // Shutdown order issue: ORT already torn down. Can't release
+        // safely; process is probably exiting anyway. Leak is unavoidable.
+        return;
+    }
+
+    if (NativeSession)
+    {
+        Api->ReleaseSession(NativeSession);
+        NativeSession = nullptr;
+    }
+    if (NativeOptions)
+    {
+        Api->ReleaseSessionOptions(NativeOptions);
+        NativeOptions = nullptr;
+    }
+}
+
+bool FInoOnnxSession::FinishConstruction(
+    const FInoOnnxSessionOptions& Options,
+    TArray<EInoOnnxProvider> RegisteredProviders,
+    FString* OutError)
+{
+    const OrtApi* Api = InoAgents::Onnx::GetApi();
+    ActiveProviders = MoveTemp(RegisteredProviders);
+
+    // Populate input metadata.
+    size_t InputCount = 0;
+    if (!CheckStatus(Api->SessionGetInputCount(NativeSession, &InputCount),
+                     TEXT("SessionGetInputCount"), OutError))
+    {
+        return false;
+    }
+    InputMeta.Reserve((int32)InputCount);
+    for (size_t i = 0; i < InputCount; ++i)
+    {
+        if (!ReadIOMeta(Api, NativeSession, /*bInput=*/true, i, InputMeta))
+        {
+            if (OutError) *OutError = FString::Printf(
+                TEXT("Failed to read metadata for input %zu"), i);
+            return false;
+        }
+    }
+
+    // Populate output metadata.
+    size_t OutputCount = 0;
+    if (!CheckStatus(Api->SessionGetOutputCount(NativeSession, &OutputCount),
+                     TEXT("SessionGetOutputCount"), OutError))
+    {
+        return false;
+    }
+    OutputMeta.Reserve((int32)OutputCount);
+    for (size_t i = 0; i < OutputCount; ++i)
+    {
+        if (!ReadIOMeta(Api, NativeSession, /*bInput=*/false, i, OutputMeta))
+        {
+            if (OutError) *OutError = FString::Printf(
+                TEXT("Failed to read metadata for output %zu"), i);
+            return false;
+        }
+    }
+
+    (void)Options; // currently no post-Create Options post-processing
+    return true;
+}
+
+// ============================================================================
+//  Metadata accessors
+// ============================================================================
+
+FString FInoOnnxSession::GetInputName(int32 Index) const
+{
+    return InputMeta.IsValidIndex(Index) ? InputMeta[Index].Name : FString();
+}
+
+FString FInoOnnxSession::GetOutputName(int32 Index) const
+{
+    return OutputMeta.IsValidIndex(Index) ? OutputMeta[Index].Name : FString();
+}
+
+TArray<int64> FInoOnnxSession::GetInputShape(int32 Index) const
+{
+    return InputMeta.IsValidIndex(Index) ? InputMeta[Index].Shape : TArray<int64>{};
+}
+
+TArray<int64> FInoOnnxSession::GetOutputShape(int32 Index) const
+{
+    return OutputMeta.IsValidIndex(Index) ? OutputMeta[Index].Shape : TArray<int64>{};
+}
+
+EInoOnnxDtype FInoOnnxSession::GetInputDtype(int32 Index) const
+{
+    return InputMeta.IsValidIndex(Index) ? InputMeta[Index].Dtype : EInoOnnxDtype::Undefined;
+}
+
+EInoOnnxDtype FInoOnnxSession::GetOutputDtype(int32 Index) const
+{
+    return OutputMeta.IsValidIndex(Index) ? OutputMeta[Index].Dtype : EInoOnnxDtype::Undefined;
+}
+
+void FInoOnnxSession::LogMetadata() const
+{
+    using namespace InoAgents::Onnx::Internal;
+
+    FString ProvList;
+    for (const EInoOnnxProvider P : ActiveProviders)
+    {
+        if (!ProvList.IsEmpty()) ProvList += TEXT(", ");
+        ProvList += ProviderToString(P);
+    }
+    UE_LOG(LogInoAgents, Log, TEXT("InoOnnx session — active providers: %s"),
+           ProvList.IsEmpty() ? TEXT("(none)") : *ProvList);
+
+    auto DumpShape = [](const TArray<int64>& Shape) {
+        FString S = TEXT("[");
+        for (int32 i = 0; i < Shape.Num(); ++i)
+        {
+            if (i > 0) S += TEXT(", ");
+            S += FString::Printf(TEXT("%lld"), Shape[i]);
+        }
+        S += TEXT("]");
+        return S;
+    };
+
+    UE_LOG(LogInoAgents, Log, TEXT("InoOnnx session — %d inputs:"), InputMeta.Num());
+    for (int32 i = 0; i < InputMeta.Num(); ++i)
+    {
+        UE_LOG(LogInoAgents, Log, TEXT("  [%d] %s : dtype=%d shape=%s"),
+               i, *InputMeta[i].Name, (int32)InputMeta[i].Dtype, *DumpShape(InputMeta[i].Shape));
+    }
+
+    UE_LOG(LogInoAgents, Log, TEXT("InoOnnx session — %d outputs:"), OutputMeta.Num());
+    for (int32 i = 0; i < OutputMeta.Num(); ++i)
+    {
+        UE_LOG(LogInoAgents, Log, TEXT("  [%d] %s : dtype=%d shape=%s"),
+               i, *OutputMeta[i].Name, (int32)OutputMeta[i].Dtype, *DumpShape(OutputMeta[i].Shape));
+    }
+}
+
+// ============================================================================
+//  Inference
+// ============================================================================
+
+bool FInoOnnxSession::Run(
+    TArrayView<const FInoOnnxTensor> Inputs,
+    TArray<FInoOnnxTensor>& OutOutputs,
+    FString* OutError)
+{
+    const OrtApi* Api = InoAgents::Onnx::GetApi();
+    if (Api == nullptr)
+    {
+        const FString Err(TEXT("ONNX Runtime is not initialized."));
+        if (OutError) *OutError = Err;
+        return false;
+    }
+
+    if (NativeSession == nullptr)
+    {
+        const FString Err(TEXT("Session is null."));
+        if (OutError) *OutError = Err;
+        return false;
+    }
+
+    if (Inputs.Num() != InputMeta.Num())
+    {
+        const FString Err = FString::Printf(
+            TEXT("Inputs.Num() == %d but model expects %d"),
+            Inputs.Num(), InputMeta.Num());
+        if (OutError) *OutError = Err;
+        UE_LOG(LogInoAgents, Error, TEXT("FInoOnnxSession::Run: %s"), *Err);
+        return false;
+    }
+
+    // Build raw input arrays ORT wants:
+    //   const char** InputNames
+    //   const OrtValue** InputValues
+    //   const char** OutputNames
+    //   OrtValue**    OutputValues  (output — allocated and filled by Run)
+    TArray<const char*> InputNamesRaw;
+    TArray<FTCHARToUTF8> InputNameConverters;    // keep the utf-8 buffers alive
+    TArray<const OrtValue*> InputValuesRaw;
+    InputNamesRaw.Reserve(InputMeta.Num());
+    InputNameConverters.Reserve(InputMeta.Num());
+    InputValuesRaw.Reserve(Inputs.Num());
+
+    for (int32 i = 0; i < InputMeta.Num(); ++i)
+    {
+        InputNameConverters.Emplace(*InputMeta[i].Name);
+        InputNamesRaw.Add(InputNameConverters.Last().Get());
+        InputValuesRaw.Add(Inputs[i].GetNativeHandle());
+    }
+
+    TArray<const char*> OutputNamesRaw;
+    TArray<FTCHARToUTF8> OutputNameConverters;
+    OutputNamesRaw.Reserve(OutputMeta.Num());
+    OutputNameConverters.Reserve(OutputMeta.Num());
+    for (int32 i = 0; i < OutputMeta.Num(); ++i)
+    {
+        OutputNameConverters.Emplace(*OutputMeta[i].Name);
+        OutputNamesRaw.Add(OutputNameConverters.Last().Get());
+    }
+
+    TArray<OrtValue*> OutputValuesRaw;
+    OutputValuesRaw.SetNumZeroed(OutputMeta.Num());
+
+    // Run. RunOptions == nullptr means default ORT options (no
+    // cancellation, default verbosity, etc.) — appropriate for nearly
+    // every caller. If we ever need cancellation, switch to creating
+    // one per inference.
+    OrtStatus* Status = Api->Run(
+        NativeSession,
+        /*run_options=*/ nullptr,
+        InputNamesRaw.GetData(),
+        InputValuesRaw.GetData(),
+        (size_t)InputValuesRaw.Num(),
+        OutputNamesRaw.GetData(),
+        (size_t)OutputNamesRaw.Num(),
+        OutputValuesRaw.GetData());
+
+    if (!CheckStatus(Status, TEXT("Run"), OutError))
+    {
+        // Any partial output tensors ORT managed to allocate before
+        // erroring need to be released so we don't leak.
+        for (OrtValue* V : OutputValuesRaw)
+        {
+            if (V) Api->ReleaseValue(V);
+        }
+        return false;
+    }
+
+    // Wrap outputs in FInoOnnxTensors. Each Adopt takes ownership of
+    // the OrtValue; shape/dtype come from the cached output metadata
+    // (ORT guarantees outputs have the declared dtype, and the shape
+    // is dynamic-dim-bound to actual values — we refresh from the
+    // OrtValue to get concrete dims instead of the -1 placeholders).
+    OutOutputs.Reserve(OutOutputs.Num() + OutputMeta.Num());
+    for (int32 i = 0; i < OutputValuesRaw.Num(); ++i)
+    {
+        OutOutputs.Add(FInoOnnxTensor::Adopt(
+            OutputValuesRaw[i],
+            OutputMeta[i].Dtype,
+            /*Shape=*/ {}));
+        // Adopt() calls RefreshShapeAndDtype when shape is empty, so
+        // the concrete runtime shape is populated.
+        OutputValuesRaw[i] = nullptr;  // transferred ownership
+    }
+
+    return true;
+}
+
+void FInoOnnxSession::RunAsync(
+    TArray<FInoOnnxTensor>&& Inputs,
+    TFunction<void(TArray<FInoOnnxTensor>, FString)> OnComplete)
+{
+    // Move captures are important: we move Inputs into the lambda so
+    // the caller's tensors become invalid (preventing use-after-move
+    // races) and they get destroyed only when Run returns.
+    Async(EAsyncExecution::ThreadPool,
+        [this, MovedInputs = MoveTemp(Inputs), OnComplete = MoveTemp(OnComplete)]() mutable
+        {
+            TArray<FInoOnnxTensor> Outputs;
+            FString Error;
+
+            const bool bOk = this->Run(
+                TArrayView<const FInoOnnxTensor>(MovedInputs.GetData(), MovedInputs.Num()),
+                Outputs,
+                &Error);
+
+            if (!bOk)
+            {
+                Outputs.Reset();
+                if (Error.IsEmpty())
+                {
+                    Error = TEXT("Unknown Run error");
+                }
+            }
+
+            // Marshal completion to the game thread so Blueprint / UI
+            // callbacks don't have to worry about thread safety. This
+            // mirrors the LiteRT-LM worker's completion dispatch pattern
+            // (see InoLiteRtLmConversationWorker.cpp).
+            //
+            // Move the outputs array + error into the game-thread
+            // lambda; they'll be destroyed after OnComplete returns.
+            AsyncTask(ENamedThreads::GameThread,
+                [Outputs = MoveTemp(Outputs), Error = MoveTemp(Error), OnComplete = MoveTemp(OnComplete)]() mutable
+                {
+                    if (OnComplete)
+                    {
+                        OnComplete(MoveTemp(Outputs), MoveTemp(Error));
+                    }
+                });
+        });
+}
