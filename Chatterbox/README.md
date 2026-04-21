@@ -49,30 +49,35 @@ work without waiting on a first-run download.
 
 The `ResembleAI/chatterbox-turbo-ONNX` repo exposes four logical
 components, each in five quantization variants (fp32 / fp16 / q4 /
-q4f16 / quantized). The runtime pipeline uses three; the fourth
-(`speech_encoder`) runs at authoring time only.
+q4f16 / quantized). **All four run at inference time** — this matches
+the official reference script at
+https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX verbatim.
 
-| Component            | Role                                            | Runtime? |
-|----------------------|-------------------------------------------------|----------|
-| `language_model`     | T3 backbone — autoregressive text → speech tokens | ✅       |
-| `embed_tokens`       | Token embedding lookup                          | ✅       |
-| `conditional_decoder`| S3Gen mel decoder + HiFi-GAN vocoder (merged)   | ✅       |
-| `speech_encoder`     | Reference audio → speaker embedding              | Dev-time only |
+| Component            | Role                                                          | Runtime? |
+|----------------------|---------------------------------------------------------------|----------|
+| `speech_encoder`     | Reference audio → (cond_emb, prompt_token, speaker_embeddings, speaker_features) — voice cloning | ✅       |
+| `embed_tokens`       | Token embedding lookup                                        | ✅       |
+| `language_model`     | T3 backbone — autoregressive text → speech tokens             | ✅       |
+| `conditional_decoder`| S3Gen mel decoder + HiFi-GAN vocoder (merged)                 | ✅       |
+
+`speech_encoder` runs exactly once per voice (outputs are cached), while
+`embed_tokens` and `language_model` run per generated token, and the
+`conditional_decoder` runs once at the end.
 
 Weights larger than ~2 GB spill into a `<name>.onnx_data` companion
 file. The setup script downloads both together automatically.
 
 ### Variant size trade-off
 
-Approximate total on-disk size for the three runtime components:
+Approximate total on-disk size for all four runtime components:
 
 | Variant    | Total  | Quality vs fp32         | Targeted at |
 |------------|--------|-------------------------|-------------|
-| fp32       | ~2.3 GB | reference              | local-only benchmark |
-| **fp16**   | ~1.1 GB | essentially identical  | desktop default |
-| q4         | ~470 MB | small quality drop     | intermediate |
-| **q4f16**  | ~380 MB | similar drop, smaller   | mobile default |
-| quantized  | ~760 MB | int8 — varies by model  | niche |
+| fp32       | ~3.2 GB | reference              | local-only benchmark |
+| **fp16**   | ~1.5 GB | essentially identical  | desktop default |
+| q4         | ~640 MB | small quality drop     | intermediate |
+| **q4f16**  | ~510 MB | similar drop, smaller   | mobile default |
+| quantized  | ~1.0 GB | int8 — varies by model  | niche |
 
 The plugin defaults to **fp16 on Windows** and **q4f16 on Android**.
 The Phase D subsystem selects the variant at runtime based on
@@ -89,9 +94,9 @@ cd Plugins/InoAgents/Chatterbox/scripts
 # Pull the mobile-parity variant too (downloads to a separate directory):
 ./setup-chatterbox.ps1 -Variant q4f16
 
-# Include the authoring-only speech_encoder (needed for voice-embedding
-# extraction, not for runtime synthesis):
-./setup-chatterbox.ps1 -IncludeAuthoring
+# Also grab a 24 kHz reference WAV (from the onnx-community sibling
+# repo under MIT) so SynthTest has a default voice to prime against:
+./setup-chatterbox.ps1 -IncludeDefaultVoice
 
 # Force re-download even if locally cached:
 ./setup-chatterbox.ps1 -Force

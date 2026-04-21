@@ -13,13 +13,17 @@
 # Usage:
 #   ./setup-chatterbox.ps1                       # default variant from VERSION file
 #   ./setup-chatterbox.ps1 -Variant q4f16        # override (for mobile-parity tests)
-#   ./setup-chatterbox.ps1 -IncludeAuthoring     # also download speech_encoder (voice-embedding extraction)
+#   ./setup-chatterbox.ps1 -IncludeDefaultVoice  # also grab the 24 kHz reference voice WAV
 #
-# The four components on HuggingFace (ResembleAI/chatterbox-turbo-ONNX):
-#   language_model        T3 backbone; autoregressive text->speech-token decoder
+# The four runtime components on HuggingFace (ResembleAI/chatterbox-turbo-ONNX).
+# All four run at inference time — matches the official reference script at
+# https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX :
+#   speech_encoder        reference-audio -> (cond_emb, prompt_token,
+#                         speaker_embeddings, speaker_features). Required at
+#                         runtime for voice cloning; runs once per voice.
 #   embed_tokens          token-embedding lookup; separate file so the LM can be memory-mapped
+#   language_model        T3 backbone; autoregressive text->speech-token decoder
 #   conditional_decoder   S3Gen mel decoder + HiFi-GAN vocoder, combined into one ORT model
-#   speech_encoder        reference-audio -> speaker embedding (AUTHORING ONLY)
 #
 # Each component ships in five quantization variants:
 #   fp32, fp16, q4, q4f16, quantized
@@ -35,18 +39,18 @@
 #         Models/
 #           Chatterbox/
 #             <variant>/
-#               language_model_<variant>.onnx
-#               language_model_<variant>.onnx_data
+#               speech_encoder_<variant>.onnx
+#               speech_encoder_<variant>.onnx_data
 #               embed_tokens_<variant>.onnx
 #               embed_tokens_<variant>.onnx_data
+#               language_model_<variant>.onnx
+#               language_model_<variant>.onnx_data
 #               conditional_decoder_<variant>.onnx
 #               conditional_decoder_<variant>.onnx_data
 #               tokenizer.json
 #               config.json
 #               generation_config.json
-#               speech_encoder_<variant>.onnx        (only if -IncludeAuthoring)
-#               speech_encoder_<variant>.onnx_data   (only if -IncludeAuthoring)
-#               default_voice.wav                    (only if -IncludeAuthoring; cross-borrowed from
+#               default_voice.wav                    (only if -IncludeDefaultVoice; cross-borrowed from
 #                                                     onnx-community/chatterbox-ONNX; 24 kHz mono)
 #
 # UInoChatterboxSubsystem uses FPaths::ProjectPersistentDownloadDir() +
@@ -60,10 +64,11 @@ param(
     # same working tree.
     [string] $Variant = $null,
 
-    # Also download the speech encoder (needed for the authoring workflow
-    # that converts a reference .wav into a speaker embedding). Off by
-    # default — speech_encoder is ~1 GB fp32 and never runs on-device.
-    [switch] $IncludeAuthoring,
+    # Also download a reference-voice WAV from the onnx-community sibling
+    # repo so SynthTest has something to prime speech_encoder with. Off by
+    # default — the file is ~700 kB, but developers who already have their
+    # own reference clip don't need it.
+    [switch] $IncludeDefaultVoice,
 
     # Force re-download even if cached files are present with correct size.
     [switch] $Force
@@ -114,7 +119,7 @@ Write-Host "Project dir:        $ProjectDir"
 Write-Host "Pinned variant:     $PinnedVariant"
 Write-Host "Active variant:     $ActiveVariant$(if ($Variant) { '  (command-line override)' })"
 Write-Host "Revision:           $PinnedRevision"
-Write-Host "Include authoring:  $($IncludeAuthoring.IsPresent)"
+Write-Host "Include default voice: $($IncludeDefaultVoice.IsPresent)"
 
 #---------------------------------------------------------------------
 # 2. Compute target directory + URL bases
@@ -141,8 +146,18 @@ if (-not (Test-Path $TargetDir)) {
 # file on HuggingFace when the weights exceed ~2 GB; we don't pre-check
 # and instead try to download both and tolerate a 404 on the _data side.
 # (In practice every variant except maybe the tiniest has a _data file.)
-$RuntimeComponents  = @('language_model', 'embed_tokens', 'conditional_decoder')
-$AuthoringComponents = @('speech_encoder')
+#
+# All four run at inference time — speech_encoder is not "authoring-only"
+# despite previous docs claiming otherwise. The official reference script
+# calls speech_encoder_session.run() inside the AR loop's first iteration
+# to produce the cond_emb / prompt_token / speaker_embeddings /
+# speaker_features tensors that drive voice cloning.
+$RuntimeComponents = @(
+    'speech_encoder',
+    'embed_tokens',
+    'language_model',
+    'conditional_decoder'
+)
 
 # Config + tokenizer files (same for every variant; downloaded into each
 # variant's directory for self-containment so the subsystem doesn't have
@@ -175,38 +190,21 @@ foreach ($comp in $RuntimeComponents) {
     })
 }
 
-if ($IncludeAuthoring) {
-    foreach ($comp in $AuthoringComponents) {
-        $OnnxFile = "${comp}_${ActiveVariant}.onnx"
-        $Downloads.Add([pscustomobject]@{
-            SourceUrl = "$HfBase/onnx/$OnnxFile"
-            DestPath  = Join-Path $TargetDir $OnnxFile
-            Required  = $true
-        })
-        $DataFile = "${comp}_${ActiveVariant}.onnx_data"
-        $Downloads.Add([pscustomobject]@{
-            SourceUrl = "$HfBase/onnx/$DataFile"
-            DestPath  = Join-Path $TargetDir $DataFile
-            Required  = $false
-        })
-    }
-
-    # Reference audio for authoring/smoke-testing. ResembleAI's turbo
-    # repo does NOT ship a default voice file (checked the tree manually
-    # in April 2026 — only README/configs/tokenizer and the onnx/
-    # directory, no .wav assets). The sibling non-turbo export
-    # (onnx-community/chatterbox-ONNX) ships default_voice.wav (714 KB,
-    # 24 kHz mono) under MIT, and the speaker-embedding interface is
-    # architecturally identical between regular and turbo (same x-vector
-    # 192-dim conditioning), so the same reference clip works for
-    # priming either encoder. Cross-borrow it here so SynthTest has
-    # something to run against without asking every developer to supply
-    # their own reference clip.
+if ($IncludeDefaultVoice) {
+    # Reference audio for smoke-testing. ResembleAI's turbo repo does NOT
+    # ship a default voice file (checked the tree manually in April 2026 —
+    # only README/configs/tokenizer and the onnx/ directory, no .wav
+    # assets). The sibling non-turbo export (onnx-community/chatterbox-ONNX)
+    # ships default_voice.wav (714 KB, 24 kHz mono) under MIT, and the
+    # speaker-embedding interface is architecturally identical between
+    # regular and turbo (same x-vector 192-dim conditioning), so the same
+    # reference clip works for priming either encoder. Cross-borrow it
+    # here so SynthTest has something to run against without asking every
+    # developer to supply their own reference clip.
     #
-    # At shipping time this file is NOT used — voice assets get baked
-    # at dev time via the authoring pipeline into a small .bin shipped
-    # per-voice. This download only covers dev-time smoke-testing of
-    # the end-to-end pipeline.
+    # Shipping games typically bake voice conditioning at dev time into a
+    # per-voice .bin asset — this download only covers dev-time smoke
+    # testing of the end-to-end pipeline.
     $Downloads.Add([pscustomobject]@{
         SourceUrl = "https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/main/default_voice.wav"
         DestPath  = Join-Path $TargetDir "default_voice.wav"
