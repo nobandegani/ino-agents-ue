@@ -42,7 +42,8 @@
       "Bash(cmd /c \"dir \\\\\"C:\\\\\\\\Program Files\\\\\\\\Epic Games\\\\\\\\UE_5.7\\\\\\\\Engine\\\\\\\\Source\\\\\\\\Runtime\\\\\\\\Core\\\\\\\\Public\\\\\\\\Hash\\\\\" /B 2>&1\")",
       "Bash(MSYS_NO_PATHCONV=1 /c/Windows/System32/cmd.exe /c 'dir \"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Source\\\\Runtime\\\\Core\\\\Public\\\\Misc\" /B 2>&1 | findstr /I sha')",
       "PowerShell(\"-- root check --\")",
-      "PowerShell(\"-- plugin intermediate contents \\(first level\\) --\")"
+      "PowerShell(\"-- plugin intermediate contents \\(first level\\) --\")",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
