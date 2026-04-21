@@ -89,10 +89,7 @@ public:
      *                         silence, ready for AppendAudioDataFromRAW.
      */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Audio",
-              meta = (DisplayName = "Generate Dithered Silence",
-                      ToolTip   = "Silent-sounding audio with an inaudible "
-                                  "noise floor so ML lip-sync models don't "
-                                  "misfire on pure-zero input."))
+              meta = (DisplayName = "Generate Dithered Silence"))
     static TArray<uint8> GenerateDitheredSilence(
         float DurationMs,
         int32 SampleRate,
