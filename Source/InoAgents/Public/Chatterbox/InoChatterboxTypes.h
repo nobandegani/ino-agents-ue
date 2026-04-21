@@ -1,0 +1,344 @@
+// Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "UObject/ObjectMacros.h"
+
+#include "InoChatterboxTypes.generated.h"
+
+// ============================================================================
+// Quantization variant
+// ============================================================================
+
+/**
+ * Which ONNX quantization variant of Chatterbox Turbo to load.
+ *
+ * All five variants implement the same pipeline (speech_encoder →
+ * embed_tokens → language_model → conditional_decoder); they differ only
+ * in weight / activation precision. Total on-disk size for all four
+ * runtime components, approximate:
+ *
+ *   fp32       ~3.2 GB    reference quality benchmark
+ *   fp16       ~1.5 GB    essentially identical to fp32 on Chatterbox
+ *   q4         ~640 MB    small quality drop; good on x86 without AVX-512 FP16
+ *   q4f16      ~510 MB    small quality drop; default (smallest + fastest)
+ *   Quantized  ~1.0 GB    INT8 everywhere; quality varies
+ *
+ * The variant string (lowercase — "q4f16", "fp16", etc.) is embedded in
+ * each ONNX file's name, matches the on-disk directory name, and is
+ * required to resolve the file paths at load time.
+ *
+ * See Plugins/InoAgents/Chatterbox/README.md for the full size /
+ * quality tradeoff discussion.
+ */
+UENUM(BlueprintType)
+enum class EInoChatterboxVariant : uint8
+{
+    Q4F16    UMETA(DisplayName = "q4f16 (default — smallest + fastest)"),
+    FP16     UMETA(DisplayName = "fp16 (desktop quality)"),
+    Q4       UMETA(DisplayName = "q4 (x86 without AVX-512 FP16)"),
+    FP32     UMETA(DisplayName = "fp32 (benchmark)"),
+    Quantized UMETA(DisplayName = "quantized (int8)"),
+};
+
+/** Convert a variant enum to its canonical lowercase string
+ *  ("q4f16", "fp16", "q4", "fp32", "quantized"). The returned value
+ *  is the exact string embedded in ONNX filenames and used as the
+ *  on-disk directory name. */
+INOAGENTS_API FString ChatterboxVariantToString(EInoChatterboxVariant Variant);
+
+/** Parse a variant string (case-insensitive) into an enum value.
+ *  Returns false on unknown input and leaves OutVariant untouched. */
+INOAGENTS_API bool ChatterboxVariantFromString(
+    const FString& InString,
+    EInoChatterboxVariant& OutVariant);
+
+// ============================================================================
+// Path resolution
+// ============================================================================
+
+/**
+ * Resolve the directory where a specific variant's staged files live.
+ *
+ * Always returns:
+ *   <ProjectPersistentDownloadDir>/InoAgents/Models/Chatterbox/<variant>/
+ *
+ * Matches the layout produced by
+ * Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1 so dev-time
+ * and runtime populate the same path. Does NOT check existence — that
+ * is UInoChatterboxTtsSubsystem::IsModelDownloaded's job.
+ */
+INOAGENTS_API FString ChatterboxResolveVariantDir(EInoChatterboxVariant Variant);
+
+// ============================================================================
+// Load-time model configuration
+// ============================================================================
+
+/**
+ * What UInoChatterboxTtsSubsystem::LoadModelsAsync needs to resolve
+ * which files to download / load from disk. Plain struct — create one
+ * in Blueprint, set Variant, pass it in.
+ *
+ * Only one variant can be resident in RAM at a time. Switching variants
+ * means UnloadModels → LoadModelsAsync with a new Variant. Each variant
+ * loads independently (no shared cache) and may need a fresh download
+ * if the player hasn't used that variant before.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxModelConfig
+{
+    GENERATED_BODY()
+
+    /** Which quantization variant to load. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    EInoChatterboxVariant Variant = EInoChatterboxVariant::Q4F16;
+};
+
+// ============================================================================
+// Per-utterance synthesis options
+// ============================================================================
+
+/**
+ * Generation parameters for one SynthesizeAsync call. Forwarded
+ * verbatim to FInoChatterboxRunner::FSynthesisOptions — this struct
+ * exists as a USTRUCT so Blueprint graphs can set the values without
+ * touching internal types.
+ *
+ * Defaults match Resemble AI's published reference script. Change with
+ * care: RepetitionPenalty outside the 1.1–1.3 range visibly degrades
+ * prosody, and MaxNewTokens over 1024 is wasted CPU because the AR loop
+ * almost never emits that many speech tokens for a single utterance.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxSynthesisOptions
+{
+    GENERATED_BODY()
+
+    /** Upper bound on speech tokens generated before the AR loop
+     *  force-stops. Typical real utterances fit in 256–512 tokens;
+     *  long narration may need up to 1024. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (ClampMin = "1", ClampMax = "1024"))
+    int32 MaxNewTokens = 1024;
+
+    /** Divisor applied to already-seen token logits so the model
+     *  stops repeating itself. 1.0 disables; 1.2 is the reference
+     *  default and the sweet spot for English speech. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (ClampMin = "1.0", ClampMax = "2.0"))
+    float RepetitionPenalty = 1.2f;
+};
+
+// ============================================================================
+// Reference voice
+// ============================================================================
+
+/**
+ * Reference audio that drives voice cloning for one SynthesizeAsync
+ * call. Supplies the "speak like this voice" signal that the speech
+ * encoder converts into speaker conditioning tensors.
+ *
+ * Three input paths, in priority order:
+ *
+ *   1. WavFilePath — absolute or project-relative WAV file on disk.
+ *      The subsystem reads it off the game thread via the internal
+ *      InoChatterboxAudioIO reader. Must be 24 kHz mono PCM int16 or
+ *      IEEE float32. Other sample rates / channel layouts cause
+ *      SynthesizeAsync to error out with a clear message (no silent
+ *      resampling — voice cloning quality is extremely sensitive to
+ *      resample artifacts; do it properly offline, or supply a
+ *      correctly-formatted clip).
+ *
+ *   2. ReferenceSamples — raw 24 kHz mono float32 samples in [-1, +1].
+ *      Used when the voice is already in memory (e.g. captured from
+ *      the microphone in-engine). Ignored if WavFilePath is non-empty.
+ *
+ *   3. PrecomputedConditioningPath — RESERVED for Phase E. A future
+ *      authoring step will bake (cond_emb, prompt_token,
+ *      speaker_embeddings, speaker_features) into a .bin sidecar, and
+ *      setting this path will skip the speech_encoder run entirely at
+ *      synthesis time. **Setting this in Phase D causes
+ *      SynthesizeAsync to error** — the field is declared now so
+ *      Blueprint graphs that wire it today survive the Phase E
+ *      implementation change without needing a node edit.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxVoice
+{
+    GENERATED_BODY()
+
+    /** Absolute or project-relative WAV path. 24 kHz mono, PCM int16
+     *  or IEEE float32. See the struct-level comment for the exact
+     *  contract. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FString WavFilePath;
+
+    /** Raw 24 kHz mono float32 samples, [-1, +1]. Ignored if
+     *  WavFilePath is non-empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    TArray<float> ReferenceSamples;
+
+    /** RESERVED for Phase E (precomputed voice conditioning). Leave
+     *  empty in Phase D — setting it errors the synthesis call. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FString PrecomputedConditioningPath;
+};
+
+// ============================================================================
+// Synthesis result
+// ============================================================================
+
+/**
+ * Output of one successful SynthesizeAsync call — the PCM waveform
+ * plus diagnostic timings. Mirrors FInoChatterboxRunner::FSynthesisResult,
+ * re-expressed as a USTRUCT so Blueprints can read the timings / token
+ * counts directly without a C++ wrapper.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxSynthesisResult
+{
+    GENERATED_BODY()
+
+    /** Waveform samples, float32 at SampleRate Hz, mono.
+     *  Always non-empty on success. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    TArray<float> AudioSamples;
+
+    /** Always 24000 for Chatterbox Turbo. Included so callers passing
+     *  AudioSamples to an audio pipeline don't have to hardcode the rate. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    int32 SampleRate = 24000;
+
+    /** How many speech tokens the AR loop produced. Excludes the
+     *  leading START and (if present) trailing STOP markers. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    int32 NumGeneratedTokens = 0;
+
+    /** True if the loop terminated on the STOP token (normal); false
+     *  if it hit MaxNewTokens (utterance may be truncated). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    bool bHitStopToken = false;
+
+    /** Wall-clock time from start of SynthesizeAsync's worker dispatch
+     *  to OnComplete being fired on the game thread. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float TotalElapsedMs = 0.0f;
+
+    /** Per-stage diagnostics (speech_encoder). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float EncoderMs = 0.0f;
+
+    /** Per-stage diagnostics (embed_tokens across the whole loop). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float EmbedTotalMs = 0.0f;
+
+    /** Per-stage diagnostics (language_model AR loop). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float LanguageModelMs = 0.0f;
+
+    /** Per-stage diagnostics (conditional_decoder). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float DecoderMs = 0.0f;
+};
+
+// ============================================================================
+// Project Settings — model registry
+// ============================================================================
+
+/**
+ * One entry in the Chatterbox model registry (Project Settings →
+ * Plugins → InoAgents → Chatterbox → Models). Describes where to
+ * download a variant's files from when they are missing from disk.
+ *
+ * URL composition matches Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1:
+ *
+ *   <HuggingFaceRepoUrl>/resolve/<Revision>/onnx/<component>_<variant>.onnx
+ *   <HuggingFaceRepoUrl>/resolve/<Revision>/onnx/<component>_<variant>.onnx_data
+ *   <HuggingFaceRepoUrl>/resolve/<Revision>/tokenizer.json
+ *   <HuggingFaceRepoUrl>/resolve/<Revision>/config.json
+ *   <HuggingFaceRepoUrl>/resolve/<Revision>/generation_config.json
+ *
+ * where <component> is one of {speech_encoder, embed_tokens,
+ * language_model, conditional_decoder}.
+ *
+ * TODO(Phase E): add per-file SHA-256 verification once canonical
+ * hashes are available. The plugin already ships ComputeFileSha256 in
+ * InoSha256.h (used by the LiteRT-LM subsystem); a forward-compatible
+ * extension here will be a TMap<FString, FString> keyed by relative
+ * filename.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxModelEntry
+{
+    GENERATED_BODY()
+
+    /** Human-readable name for the editor. Purely cosmetic. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FString DisplayName;
+
+    /** Which quantization variant this entry describes. The subsystem
+     *  matches on this (not on DisplayName) when resolving downloads. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    EInoChatterboxVariant Variant = EInoChatterboxVariant::Q4F16;
+
+    /** HuggingFace repo root, e.g.
+     *  "https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX". No
+     *  trailing slash. The subsystem appends "/resolve/<rev>/..." per
+     *  file. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FString HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+
+    /** Git-style revision to pull — a commit hash for reproducible
+     *  builds, or "main" during development. Matches the <rev> field
+     *  in Plugins/InoAgents/Chatterbox/CHATTERBOX_VERSION. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FString Revision = TEXT("main");
+};
+
+// ============================================================================
+// Delegates
+// ============================================================================
+//
+// All Chatterbox-facing delegates are dynamic (Blueprint-visible).
+// Single-cast for the terminal events (OnLoaded / OnComplete) mirrors
+// the LiteRT-LM pattern — one operation, one handler. Multicast for
+// progress since it's useful to have UI + logger both bound.
+// ============================================================================
+
+/**
+ * Fired once by UInoChatterboxTtsSubsystem::LoadModelsAsync when the
+ * load finishes (successfully or not). On failure, ErrorMessage is
+ * a human-readable summary suitable for logging or showing to the user.
+ */
+DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoChatterboxModelsLoaded,
+    bool, bSuccess,
+    FString, ErrorMessage);
+
+/**
+ * Fired once by UInoChatterboxTtsSubsystem::SynthesizeAsync per call.
+ * On success, bSuccess is true, Result.AudioSamples is the 24 kHz mono
+ * float32 waveform, and ErrorMessage is empty. On failure, bSuccess is
+ * false, Result is default-initialized (AudioSamples empty), and
+ * ErrorMessage describes what went wrong.
+ */
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoChatterboxSynthesisComplete,
+    bool, bSuccess,
+    FInoChatterboxSynthesisResult, Result,
+    FString, ErrorMessage);
+
+/**
+ * Fired during multi-file model downloads. Percent is the aggregate
+ * across every file in the queue (0..100), BytesReceived is the
+ * rolling sum of bytes written across all files so far, TotalBytes is
+ * the aggregate total (or -1 if the server didn't advertise
+ * Content-Length for any file — HF's 302 redirects sometimes strip it).
+ *
+ * Declared separately from the LiteRT-LM delegate of the same shape
+ * to keep the Chatterbox feature self-contained — Blueprint graphs do
+ * not cross-pollinate LiteRT-LM and Chatterbox types.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoChatterboxDownloadProgress,
+    float, Percent,
+    int64, BytesReceived,
+    int64, TotalBytes);

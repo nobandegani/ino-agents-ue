@@ -15,6 +15,19 @@ UInoAgentsSettings::UInoAgentsSettings()
         TEXT("gemma-4-E4B-it.litertlm"),
         TEXT("https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm")
     });
+
+    // Default Chatterbox entry — pulls q4f16 (the plugin default) from
+    // the canonical Resemble AI HuggingFace repo. Users who want fp16
+    // for desktop quality can add a second entry under Project Settings
+    // pointing at the same repo with a different Variant.
+    {
+        FInoChatterboxModelEntry ChatterboxDefault;
+        ChatterboxDefault.DisplayName        = TEXT("Chatterbox Turbo q4f16");
+        ChatterboxDefault.Variant            = EInoChatterboxVariant::Q4F16;
+        ChatterboxDefault.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        ChatterboxDefault.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(ChatterboxDefault));
+    }
 }
 
 FString UInoAgentsSettings::GetEffectiveElevenLabsBaseUrl() const
@@ -64,6 +77,25 @@ const FInoLiteRtLmModelEntry* UInoAgentsSettings::FindModel(
     for (const FInoLiteRtLmModelEntry& Entry : Models)
     {
         if (Entry.DisplayName.Equals(NameOrFileName, ESearchCase::IgnoreCase))
+        {
+            return &Entry;
+        }
+    }
+    return nullptr;
+}
+
+const FInoChatterboxModelEntry* UInoAgentsSettings::FindChatterboxModel(
+    EInoChatterboxVariant Variant) const
+{
+    // First match wins — multiple entries for the same variant is a
+    // configuration error, but we don't actively complain about it
+    // here (the Chatterbox subsystem will just use whichever entry
+    // the user put first). Matches FindModelByFileName's style: a
+    // trivial linear scan, cheap enough given the array will have
+    // at most ~5 entries (one per quantization variant).
+    for (const FInoChatterboxModelEntry& Entry : ChatterboxModels)
+    {
+        if (Entry.Variant == Variant)
         {
             return &Entry;
         }

@@ -1,0 +1,292 @@
+// Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Subsystems/GameInstanceSubsystem.h"
+#include "Templates/UniquePtr.h"
+
+#include "Chatterbox/InoChatterboxTypes.h"
+
+#include "InoChatterboxTtsSubsystem.generated.h"
+
+// Forward declarations — these are private classes under
+// Private/Chatterbox/ that we own via TUniquePtr. The subsystem .cpp
+// includes their full headers where the complete type is needed.
+//
+// Because TUniquePtr<IncompleteType>'s deleter instantiates with the
+// complete type, the default constructor / destructor / FVTableHelper
+// constructor MUST be declared out-of-line (below) and defined in
+// InoChatterboxTtsSubsystem.cpp. Leaving any of them implicit produces
+// C4150 "delete of pointer to incomplete type" — exact same gotcha as
+// UInoLiteRtLmConversation documents for its worker TUniquePtr.
+class FInoChatterboxModels;
+class FInoChatterboxTokenizer;
+
+/**
+ * Game-instance-wide Chatterbox Turbo TTS runtime owner.
+ *
+ * ONE instance per game instance (created on game start, destroyed on
+ * game shutdown). Accessed via:
+ *
+ *     UGameInstance* GI = GetGameInstance();
+ *     UInoChatterboxTtsSubsystem* Subsys =
+ *         GI->GetSubsystem<UInoChatterboxTtsSubsystem>();
+ *
+ * Owns:
+ *   - The loaded FInoChatterboxModels (four ORT sessions — speech_encoder,
+ *     embed_tokens, language_model, conditional_decoder)
+ *   - The loaded FInoChatterboxTokenizer (GPT-2 BPE + paralinguistic
+ *     tag support, parsed from tokenizer.json)
+ *   - The currently-loaded variant identity (for
+ *     IsModelsLoaded/GetLoadedVariant Blueprint queries)
+ *
+ * Single-variant invariant:
+ *   Only one variant is resident at a time. To switch, call
+ *   UnloadModels() then LoadModelsAsync() with a new variant. This
+ *   matches UInoLiteRtLmSubsystem's one-engine-at-a-time ergonomics
+ *   and bounds the subsystem's peak RAM at ~1.5 GB (fp16) / ~510 MB
+ *   (q4f16).
+ *
+ * Lifecycle:
+ *   Initialize()        : UE calls at game start. Zero-inits members.
+ *                         Does NOT load a model (a 500+ MB load would
+ *                         hitch the editor on Play-In-Editor).
+ *   LoadModelsAsync()   : Game code calls to download (if needed) +
+ *                         load a variant. Async. Fires OnLoaded on the
+ *                         game thread when done.
+ *   SynthesizeAsync()   : Per-utterance TTS. Dispatches to a worker
+ *                         thread, marshals OnComplete back to the game
+ *                         thread with the PCM waveform.
+ *   UnloadModels()      : Frees the 4 ORT sessions + tokenizer. Safe
+ *                         with nothing loaded.
+ *   Deinitialize()      : UE calls at game shutdown. Cancels in-flight
+ *                         operations, calls UnloadModels.
+ *
+ * Threading:
+ *   All UFUNCTIONs MUST be called from the game thread. The subsystem
+ *   dispatches heavy work (model load, synthesis) to ThreadPool workers
+ *   and marshals completion callbacks back via AsyncTask(GameThread).
+ *   Delegate handlers fire on the game thread — safe to touch UObjects.
+ *
+ * NOTE (Commit 1 scaffolding): LoadModelsAsync and SynthesizeAsync are
+ * currently stubs that fail immediately with an error message. The real
+ * implementations land in Commits 2 (load, files already on disk),
+ * 3 (synth + cancel + worker thread), and 4 (download flow).
+ * IsModelDownloaded is fully implemented in Commit 1 because it's pure
+ * file-IO and useful for Blueprint dev work.
+ */
+UCLASS()
+class INOAGENTS_API UInoChatterboxTtsSubsystem : public UGameInstanceSubsystem
+{
+    GENERATED_BODY()
+
+public:
+    // Out-of-line ctor/dtor (see the TUniquePtr / incomplete-type
+    // comment above the forward declarations). UHT generates TWO
+    // implicit constructors for every UCLASS: the default ctor AND a
+    // hot-reload vtable helper ctor (DEFINE_VTABLE_PTR_HELPER_CTOR_NS).
+    // BOTH must be declared here and supplied out-of-line in the cpp
+    // where the forward-declared types are complete, otherwise UHT's
+    // generated .gen.cpp emits them inline and fails with C4150.
+    // Same gotcha UInoLiteRtLmConversation documents for its worker.
+    UInoChatterboxTtsSubsystem();
+    UInoChatterboxTtsSubsystem(FVTableHelper& Helper);
+    virtual ~UInoChatterboxTtsSubsystem();
+
+    //~ UGameInstanceSubsystem interface
+    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+    virtual void Deinitialize() override;
+    //~ End UGameInstanceSubsystem interface
+
+    // ------------------------------------------------------------------
+    // Model lifecycle
+    // ------------------------------------------------------------------
+
+    /**
+     * Fires during multi-file model download. Percent is the aggregate
+     * across the whole variant (4 ONNX files + 3 config files = 7
+     * required files, optionally plus .onnx_data companions). See
+     * FOnInoChatterboxDownloadProgress for the exact semantics.
+     *
+     * Only fires when files are missing from disk and need to be
+     * fetched from the URL configured in Project Settings → Plugins →
+     * InoAgents → Chatterbox → Models. For a fully-cached variant,
+     * LoadModelsAsync skips the download and goes straight to ORT
+     * session creation — no progress events fire.
+     */
+    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Chatterbox")
+    FOnInoChatterboxDownloadProgress OnDownloadProgress;
+
+    /**
+     * Asynchronously load a Chatterbox variant. Returns immediately.
+     * When loading finishes (success or failure), OnLoaded fires on
+     * the game thread.
+     *
+     * Flow:
+     *   1. Look up Config.Variant in Project Settings to find its
+     *      download URL + revision (FInoChatterboxModelEntry).
+     *   2. Check ChatterboxResolveVariantDir for required files
+     *      (the 4 .onnx + tokenizer.json + configs). If all present,
+     *      skip to step 4.
+     *   3. Download missing files via HTTP → PersistentDownloadDir.
+     *      Fires OnDownloadProgress repeatedly during this phase.
+     *   4. Dispatch ThreadPool: load tokenizer (tokenizer.json) +
+     *      FInoChatterboxModels::LoadFromDir (the 4 ORT sessions).
+     *   5. Marshal result to the game thread; fire OnLoaded.
+     *
+     * Error cases that fire OnLoaded with bSuccess=false:
+     *   - Another LoadModelsAsync is already in flight
+     *   - A variant is already loaded (call UnloadModels first)
+     *   - No Project Settings entry for the requested variant
+     *   - A required file is missing and no URL is configured
+     *   - HTTP download failed (network error / 404 / etc.)
+     *   - tokenizer.json parse failed
+     *   - Any of the 4 ORT sessions failed to construct (corrupt /
+     *     missing .onnx_data companion / unsupported variant)
+     *
+     * MUST be called on the game thread.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox",
+              meta = (AutoCreateRefTerm = "OnLoaded"))
+    void LoadModelsAsync(
+        const FInoChatterboxModelConfig& Config,
+        const FOnInoChatterboxModelsLoaded& OnLoaded);
+
+    /**
+     * Destroy the loaded ORT sessions + tokenizer. Safe to call with
+     * nothing loaded (no-op). Cancels any in-flight SynthesizeAsync
+     * cooperatively before freeing the bundle so the worker can't
+     * deref-after-free.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox")
+    void UnloadModels();
+
+    /**
+     * True if LoadModelsAsync has successfully completed and
+     * UnloadModels has not yet been called. False during an in-flight
+     * load.
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
+    bool IsModelsLoaded() const;
+
+    /**
+     * True if the required on-disk files for the given variant are
+     * present and non-empty — i.e. LoadModelsAsync would NOT need to
+     * download anything before loading.
+     *
+     * Required set:
+     *   speech_encoder_<v>.onnx
+     *   embed_tokens_<v>.onnx
+     *   language_model_<v>.onnx
+     *   conditional_decoder_<v>.onnx
+     *   tokenizer.json
+     *
+     * The .onnx_data companion files are NOT required — some variants
+     * inline weights into the .onnx and don't produce a _data sidecar.
+     * config.json / generation_config.json are downloaded for
+     * completeness but the runtime pipeline doesn't read them, so
+     * their absence doesn't block a load either.
+     *
+     * Does NOT verify file contents (no SHA check) — cheap file-stat
+     * only, safe to call every frame from a UMG widget polling for
+     * "should I show the download button".
+     *
+     * Pure — can be called from any thread, any context.
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
+    bool IsModelDownloaded(EInoChatterboxVariant Variant) const;
+
+    /**
+     * Returns the variant that's currently loaded, or the default
+     * variant (Q4F16) if nothing is loaded. Pair with IsModelsLoaded
+     * to distinguish "nothing loaded" from "Q4F16 loaded".
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
+    EInoChatterboxVariant GetLoadedVariant() const;
+
+    // ------------------------------------------------------------------
+    // Synthesis
+    // ------------------------------------------------------------------
+
+    /**
+     * Synthesize one utterance. Returns immediately; OnComplete fires
+     * on the game thread when the waveform is ready (typically 0.5–5 s
+     * on desktop CPU, 2–30 s on mobile).
+     *
+     * Concurrency: multiple SynthesizeAsync calls are queued FIFO on
+     * an internal worker thread. Fire-and-forget dialogue playback
+     * sentence-by-sentence is the intended use case — the caller does
+     * NOT need to await OnComplete before enqueuing the next line.
+     *
+     * Error cases that fire OnComplete with bSuccess=false:
+     *   - No models loaded (call LoadModelsAsync first)
+     *   - Voice.WavFilePath cannot be read / is not 24 kHz mono / has
+     *     an unsupported WAV format
+     *   - Voice has no WavFilePath AND no ReferenceSamples
+     *   - Voice.PrecomputedConditioningPath is set (Phase E feature,
+     *     not yet implemented — errors with a clear message so
+     *     Blueprint graphs wired for Phase E fail loudly today)
+     *   - Text is empty
+     *   - Synthesis was cancelled via CancelSynthesis or UnloadModels
+     *   - Internal runner failure (propagated from
+     *     FInoChatterboxRunner::SynthesizeText's OutError)
+     *
+     * MUST be called on the game thread.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox",
+              meta = (AutoCreateRefTerm = "OnComplete"))
+    void SynthesizeAsync(
+        const FString& Text,
+        const FInoChatterboxVoice& Voice,
+        const FInoChatterboxSynthesisOptions& Options,
+        const FOnInoChatterboxSynthesisComplete& OnComplete);
+
+    /**
+     * Cooperatively cancel any queued / in-flight synthesis. The
+     * currently-running AR iteration completes (tens of ms), then the
+     * worker unwinds and fires OnComplete(bSuccess=false,
+     * ErrorMessage="Cancelled"). Queued synths that haven't started
+     * yet are dropped with the same error.
+     *
+     * Safe to call with nothing pending (no-op). Non-blocking —
+     * returns immediately; the cancel is observed asynchronously by
+     * the worker.
+     *
+     * Automatically triggered by UnloadModels and PIE-end.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox")
+    void CancelSynthesis();
+
+private:
+    // ------------------------------------------------------------------
+    // Loaded state
+    //
+    // Commit 1 (scaffolding): these members exist but never hold a real
+    // bundle — LoadModelsAsync is stubbed. Commit 2 wires up the
+    // files-already-on-disk path. Commit 4 adds the download flow.
+    // ------------------------------------------------------------------
+
+    /** The 4 ORT sessions. Destroys in LIFO order when reset. */
+    TUniquePtr<FInoChatterboxModels> Models;
+
+    /** The GPT-2 BPE tokenizer, loaded once from tokenizer.json. Const
+     *  after load, thread-safe for concurrent Encode/Decode. */
+    TUniquePtr<FInoChatterboxTokenizer> Tokenizer;
+
+    /** Which variant LoadModelsAsync was called with. Only meaningful
+     *  when Models.IsValid(). */
+    EInoChatterboxVariant LoadedVariant = EInoChatterboxVariant::Q4F16;
+
+    /** Guards against a second LoadModelsAsync starting while one is
+     *  already in flight. Set on dispatch, cleared by the game-thread
+     *  result hop-back. */
+    bool bLoadInFlight = false;
+
+    /** Set by UnloadModels when called during an in-flight load. The
+     *  hop-back reads this flag and, if set, drops the freshly-loaded
+     *  bundle instead of assigning it to the subsystem, so the caller
+     *  who asked to unload actually ends up unloaded. Cleared on every
+     *  hop-back completion. Irrelevant if no load is in flight. */
+    bool bPendingUnload = false;
+};
