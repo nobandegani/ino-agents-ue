@@ -555,13 +555,13 @@ private:
     bool   bTokenInsideHash  = false;  // # ... #
 
     // When true, FilterCleanToken drops the very next character if — and
-    // only if — it is a space or newline; then clears the flag. Armed after:
-    //   - closing a stripped tag of any configured type,
-    //   - emitting a configured sentence-split punctuation char (. , ? ! ; :),
-    //   - dropping a '\n' when Newline sentence-split is enabled.
-    // Persists across chunks so a delimiter and its trailing space can land
-    // in separate token chunks. Only ONE whitespace char is ever eaten —
-    // runs of whitespace keep everything past the first.
+    // only if — it is a space or newline; then clears the flag. Armed
+    // exclusively by closing a tag of any type currently enabled in
+    // TagStripFlags. Sentence-split flags never affect CleanText — they
+    // are purely for OnSentence boundary detection in the accumulator.
+    // Persists across chunks so a tag-close and its trailing space can
+    // land in separate token chunks. Only ONE whitespace char is ever
+    // eaten — runs of whitespace keep everything past the first.
     bool bTokenEatOneWhitespace = false;
 
     /** Rolling buffer for sentence detection. Accumulates tokens until

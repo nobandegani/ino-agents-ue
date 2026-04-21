@@ -562,28 +562,25 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
     //
     //   2. After any tag closes (depth → 0 or toggle → outside) AND nothing
     //      else is still open, arm "eat one whitespace": the next char, if
-    //      it is space/newline/tab/CR, is dropped — just one, not a run.
-    //      Same flag is also armed by sentence-split punctuation emission
-    //      and by dropping a '\n' when Newline sentence-split is enabled.
+    //      it is space / newline / CR / tab, is dropped — just one, not a
+    //      run. No other events arm this flag; sentence-split flags are
+    //      purely for boundary detection in the accumulator and do NOT
+    //      affect CleanText.
     //
     //   3. Anything else is emitted verbatim.
     //
-    // Example with TagStripFlags = SquareBrackets, Period sentence-split on:
-    //     Raw:    "[hello]   test.  More"
+    // Example with TagStripFlags = SquareBrackets:
+    //     Raw:    "[hello]   test. More"
     //     Clean:  "  test. More"
-    //              ^^         ^     one WS eaten after ']' (3→2 spaces)
-    //                              one WS eaten after '.' (2→1 spaces)
+    //              ^^              one WS eaten after ']' (3→2 spaces);
+    //                              '.' and its trailing space both preserved.
     //
     // RawText in OnToken.Broadcast is always the untouched original chunk.
     FString Clean;
     Clean.Reserve(RawChunk.Len());
 
-    const EInoLiteRtLmSentenceSplit SplitFlags =
-        static_cast<EInoLiteRtLmSentenceSplit>(SentenceSplitFlags);
     const EInoLiteRtLmTagStrip TagFlags =
         static_cast<EInoLiteRtLmTagStrip>(TagStripFlags);
-
-    const bool bNewlineSplit = EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Newline);
 
     const bool bSquare = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::SquareBrackets);
     const bool bAngle  = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::AngleBrackets);
@@ -606,20 +603,6 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
         if (!InsideAnyTag())
         {
             bTokenEatOneWhitespace = true;
-        }
-    };
-
-    auto IsConfiguredSplitPunct = [SplitFlags](TCHAR C) -> bool
-    {
-        switch (C)
-        {
-            case TEXT('.'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Period);
-            case TEXT(','): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Comma);
-            case TEXT('?'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Question);
-            case TEXT('!'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Exclamation);
-            case TEXT(';'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Semicolon);
-            case TEXT(':'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Colon);
-            default:        return false;
         }
     };
 
@@ -672,21 +655,8 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
             // Non-whitespace: flag cleared, fall through and emit it.
         }
 
-        // --- Newline as a sentence-split delimiter ---
-        if (bNewlineSplit && Ch == TEXT('\n'))
-        {
-            bTokenEatOneWhitespace = true;
-            continue;
-        }
-
         // --- Emit ordinary character ---
         Clean.AppendChar(Ch);
-
-        // --- Sentence-split punctuation arms eat-one ---
-        if (IsConfiguredSplitPunct(Ch))
-        {
-            bTokenEatOneWhitespace = true;
-        }
     }
 
     return Clean;
