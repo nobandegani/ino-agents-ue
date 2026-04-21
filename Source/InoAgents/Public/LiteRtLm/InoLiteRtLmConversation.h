@@ -477,12 +477,15 @@ private:
     int32 TokenTagDepth = 0;       // [bracket] depth
     int32 TokenCurlyDepth = 0;     // {curly} depth
 
-    // When true, FilterCleanToken is currently swallowing whitespace that
-    // immediately follows a configured sentence-split delimiter (e.g. the
-    // space in ". ", or the newline itself when Newline split is on). The
-    // first non-whitespace character clears the flag. Persists across chunks
-    // so a split that straddles a chunk boundary still strips cleanly.
-    bool bTokenEatingWhitespaceAfterSplit = false;
+    // When true, FilterCleanToken drops the very next character if — and
+    // only if — it is a space or newline; then clears the flag. Armed after:
+    //   - closing a stripped [bracket] or {curly} tag,
+    //   - emitting a configured sentence-split punctuation char (. , ? ! ; :),
+    //   - dropping a '\n' when Newline sentence-split is enabled.
+    // Persists across chunks so a delimiter and its trailing space can land
+    // in separate token chunks. Only ONE whitespace char is ever eaten —
+    // runs of whitespace keep everything past the first.
+    bool bTokenEatOneWhitespace = false;
 
     /** Rolling buffer for sentence detection. Accumulates tokens until
      *  a sentence-ending delimiter is found, at which point the complete
