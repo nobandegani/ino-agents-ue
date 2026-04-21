@@ -477,6 +477,13 @@ private:
     int32 TokenTagDepth = 0;       // [bracket] depth
     int32 TokenCurlyDepth = 0;     // {curly} depth
 
+    // When true, FilterCleanToken is currently swallowing whitespace that
+    // immediately follows a configured sentence-split delimiter (e.g. the
+    // space in ". ", or the newline itself when Newline split is on). The
+    // first non-whitespace character clears the flag. Persists across chunks
+    // so a split that straddles a chunk boundary still strips cleanly.
+    bool bTokenEatingWhitespaceAfterSplit = false;
+
     /** Rolling buffer for sentence detection. Accumulates tokens until
      *  a sentence-ending delimiter is found, at which point the complete
      *  sentence is broadcast via OnSentence and the buffer shifts to

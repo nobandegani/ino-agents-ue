@@ -282,6 +282,7 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
     SentenceBuffer.Empty();
     TokenTagDepth = 0;
     TokenCurlyDepth = 0;
+    bTokenEatingWhitespaceAfterSplit = false;
 
     // Record the user message in history (original text, not augmented).
     FInoLiteRtLmMessage UserMsg;
@@ -509,22 +510,89 @@ FString UInoLiteRtLmConversation::StripTags(const FString& Raw)
 
 FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
 {
-    // Stateful per-character filter. TokenTagDepth persists across
-    // calls so a [tag] split across multiple tokens (e.g. "[cheer"
-    // then "fully]") is handled correctly. Characters inside brackets
-    // are suppressed; characters outside are emitted.
+    // Stateful per-character filter. Three jobs, all carried across chunks via
+    // member state so delimiters that straddle a chunk boundary still work:
+    //
+    //   1. Strip [bracketed] and {curly} stage-direction tags — TokenTagDepth /
+    //      TokenCurlyDepth track nesting so "[cheer" + "fully]" collapses to "".
+    //
+    //   2. Swallow whitespace that immediately follows a configured sentence
+    //      split delimiter, so UI observers of OnToken.CleanText don't see the
+    //      space/newline that conceptually belongs to the sentence boundary.
+    //      Triggered by:
+    //        - Emitting one of the split-punctuation chars (".", ",", "?", "!",
+    //          ";", ":") when that flag is enabled in SentenceSplitFlags — the
+    //          ACTUAL split only fires when the punctuation is followed by a
+    //          space, but we set the eat flag on every punct emission: if the
+    //          punct turns out to be mid-word ("3.14"), no whitespace follows,
+    //          so the flag is a no-op and gets cleared by the next non-WS char.
+    //        - Seeing a '\n' when the Newline split flag is on — in that case
+    //          we also drop the newline itself (newlines aren't wanted in the
+    //          clean stream when they're being used as sentence boundaries).
+    //      Cleared by emitting any non-whitespace character.
+    //
+    //   3. Emit everything else verbatim.
+    //
+    // RawText from OnToken.Broadcast is unaffected — raw remains lossless.
     FString Clean;
     Clean.Reserve(RawChunk.Len());
 
+    const EInoLiteRtLmSentenceSplit Flags =
+        static_cast<EInoLiteRtLmSentenceSplit>(SentenceSplitFlags);
+    const bool bNewlineSplit = EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Newline);
+
+    auto IsConfiguredSplitPunct = [Flags](TCHAR C) -> bool
+    {
+        switch (C)
+        {
+            case TEXT('.'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Period);
+            case TEXT(','): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Comma);
+            case TEXT('?'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Question);
+            case TEXT('!'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Exclamation);
+            case TEXT(';'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Semicolon);
+            case TEXT(':'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Colon);
+            default:        return false;
+        }
+    };
+
     for (const TCHAR Ch : RawChunk)
     {
-        if (Ch == TEXT('[')) { TokenTagDepth++; continue; }
-        if (Ch == TEXT(']') && TokenTagDepth > 0) { TokenTagDepth--; continue; }
-        if (Ch == TEXT('{')) { TokenCurlyDepth++; continue; }
+        // Bracket / curly stage-direction stripping.
+        if (Ch == TEXT('[')) { TokenTagDepth++;                        continue; }
+        if (Ch == TEXT(']') && TokenTagDepth   > 0) { TokenTagDepth--; continue; }
+        if (Ch == TEXT('{')) { TokenCurlyDepth++;                      continue; }
         if (Ch == TEXT('}') && TokenCurlyDepth > 0) { TokenCurlyDepth--; continue; }
-        if (TokenTagDepth == 0 && TokenCurlyDepth == 0)
+        if (TokenTagDepth != 0 || TokenCurlyDepth != 0)
         {
-            Clean.AppendChar(Ch);
+            continue;
+        }
+
+        // Eating mode: skip whitespace until we see real content.
+        if (bTokenEatingWhitespaceAfterSplit)
+        {
+            if (FChar::IsWhitespace(Ch))
+            {
+                continue;
+            }
+            bTokenEatingWhitespaceAfterSplit = false;
+            // fall through — emit this non-whitespace char below.
+        }
+
+        // Newline as a split delimiter: drop it AND start eating subsequent
+        // whitespace (e.g. a "\n\n" paragraph break collapses to nothing).
+        if (bNewlineSplit && Ch == TEXT('\n'))
+        {
+            bTokenEatingWhitespaceAfterSplit = true;
+            continue;
+        }
+
+        Clean.AppendChar(Ch);
+
+        // Punctuation split: arm the eating flag so the whitespace that
+        // follows the punct (in the same chunk or the next one) is stripped.
+        if (IsConfiguredSplitPunct(Ch))
+        {
+            bTokenEatingWhitespaceAfterSplit = true;
         }
     }
 
