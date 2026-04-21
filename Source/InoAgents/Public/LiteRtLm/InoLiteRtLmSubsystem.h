@@ -326,6 +326,11 @@ private:
     FOnInoLiteRtLmModelLoaded PendingOnLoaded;
     IFileHandle*    DownloadFileHandle = nullptr;
     int64           DownloadBytesWritten = 0;
+    // Full file size in bytes, as learned from the first response's
+    // Content-Range (for 206 Partial Content) or Content-Length (for 200 OK).
+    // -1 means "not yet known" or "server didn't advertise it" — in which
+    // case OnDownloadProgress fires with Percent=0 and TotalBytes=-1.
+    int64           DownloadTotalBytes = -1;
     FHttpRequestPtr DownloadRequest;
 
     void StartDownload(const FString& Url, const FString& TargetPath,

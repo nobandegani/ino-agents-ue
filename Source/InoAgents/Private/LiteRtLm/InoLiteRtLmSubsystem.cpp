@@ -577,6 +577,7 @@ void UInoLiteRtLmSubsystem::StartDownload(
     PendingDownloadTargetPath = TargetPath;
     PendingOnLoaded           = OnLoaded;
     DownloadBytesWritten      = 0;
+    DownloadTotalBytes        = -1;  // learned from the first response
 
     // Open .partial temp file. A crash mid-download won't leave a
     // corrupt file that ResolveModelPath would find.
@@ -653,15 +654,78 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
         DownloadBytesWritten += Content.Num();
     }
 
-    // Broadcast progress.
-    OnDownloadProgress.Broadcast(
-        0.0f,
-        DownloadBytesWritten,
-        -1);
+    // Learn the full file size from the first response we can parse it from.
+    // HTTP 206 (Partial Content): Content-Range header carries
+    //   "bytes <start>-<end>/<total>" (or "/<*>" if unknown). We want <total>.
+    // HTTP 200 (server ignored Range): Content-Length IS the full file size.
+    if (DownloadTotalBytes < 0)
+    {
+        if (Code == 206)
+        {
+            const FString Range = Response->GetHeader(TEXT("Content-Range"));
+            int32         SlashIdx = INDEX_NONE;
+            if (Range.FindLastChar(TEXT('/'), SlashIdx))
+            {
+                const FString TotalStr = Range.Mid(SlashIdx + 1).TrimStartAndEnd();
+                if (!TotalStr.IsEmpty() && TotalStr != TEXT("*"))
+                {
+                    const int64 Parsed = FCString::Atoi64(*TotalStr);
+                    if (Parsed > 0)
+                    {
+                        DownloadTotalBytes = Parsed;
+                    }
+                }
+            }
+        }
+        else if (Code == 200)
+        {
+            const FString Len = Response->GetHeader(TEXT("Content-Length"));
+            if (!Len.IsEmpty())
+            {
+                const int64 Parsed = FCString::Atoi64(*Len);
+                if (Parsed > 0)
+                {
+                    DownloadTotalBytes = Parsed;
+                }
+            }
+        }
 
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: downloaded %lld MB so far"),
-           DownloadBytesWritten / (1024 * 1024));
+        if (DownloadTotalBytes > 0)
+        {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LoadModelAsync: full download size is %lld bytes (%.1f MB)"),
+                   DownloadTotalBytes, DownloadTotalBytes / (1024.0 * 1024.0));
+        }
+    }
+
+    // Broadcast progress with real values when we know them. Clamp Percent to
+    // [0, 100] defensively — DownloadBytesWritten should never exceed
+    // DownloadTotalBytes under normal operation, but a mis-advertised total
+    // shouldn't make the delegate report 102% to UI code.
+    float Percent = 0.0f;
+    if (DownloadTotalBytes > 0)
+    {
+        Percent = FMath::Clamp(
+            static_cast<float>(static_cast<double>(DownloadBytesWritten) * 100.0 /
+                               static_cast<double>(DownloadTotalBytes)),
+            0.0f, 100.0f);
+    }
+    OnDownloadProgress.Broadcast(Percent, DownloadBytesWritten, DownloadTotalBytes);
+
+    if (DownloadTotalBytes > 0)
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LoadModelAsync: downloaded %lld / %lld MB (%.1f%%)"),
+               DownloadBytesWritten / (1024 * 1024),
+               DownloadTotalBytes   / (1024 * 1024),
+               Percent);
+    }
+    else
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LoadModelAsync: downloaded %lld MB so far (total unknown)"),
+               DownloadBytesWritten / (1024 * 1024));
+    }
 
     // If we got a 200 (full file) or the chunk was smaller than
     // what we asked for, we're done — this was the last chunk.
