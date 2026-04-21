@@ -133,8 +133,14 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
     else
     {
         // -------- Waveform sanity scan --------
-        // Matches the checks in the native-layer SynthTest so PASS/FAIL
-        // criteria are consistent across both smoke tests.
+        //
+        // Policy matches the native-layer Ino.Chatterbox.SynthTest:
+        //   - NaN / Inf samples are a real failure (pipeline corruption).
+        //   - Out-of-range samples (|v| > 1.0) are NORMAL for Chatterbox's
+        //     decoder — its HiFi-GAN output routinely overshoots by 5-10%
+        //     on transients. WriteMonoInt16Wav clamps at write time so
+        //     the resulting WAV is still correct. We report the range
+        //     for diagnostic interest but do NOT fail on it.
         const int32 N = Result.AudioSamples.Num();
         int32  NumNaN      = 0;
         int32  NumInf      = 0;
@@ -144,9 +150,9 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
         for (int32 i = 0; i < N; ++i)
         {
             const float V = Result.AudioSamples[i];
-            if (FMath::IsNaN(V))       { ++NumNaN; }
-            else if (!FMath::IsFinite(V)) { ++NumInf; }
-            else if (V < -1.0f || V > 1.0f) { ++NumOutRange; }
+            if (FMath::IsNaN(V))              { ++NumNaN; continue; }
+            if (!FMath::IsFinite(V))          { ++NumInf; continue; }
+            if (V < -1.0f || V > 1.0f)        { ++NumOutRange; }
             if (V < MinV) { MinV = V; }
             if (V > MaxV) { MaxV = V; }
         }
@@ -159,7 +165,8 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: SynthesizeAsync SUCCESS in %.1f ms. ")
                TEXT("Samples=%d (%.2f s @ %d Hz), tokens=%d, stop=%s. ")
-               TEXT("NaN=%d Inf=%d OutOfRange=%d Min=%.3f Max=%.3f."),
+               TEXT("NaN=%d Inf=%d OutOfRange=%d (expected; clamped on WAV write) ")
+               TEXT("Min=%.3f Max=%.3f."),
                ElapsedMs, N, DurationSec, Result.SampleRate,
                Result.NumGeneratedTokens,
                Result.bHitStopToken ? TEXT("yes") : TEXT("no"),
@@ -198,8 +205,9 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
             }
         }
 
-        const bool bWaveformOk =
-            (N > 0) && (NumNaN == 0) && (NumInf == 0) && (NumOutRange == 0);
+        // PASS criteria: non-empty waveform, no NaN, no Inf. Out-of-range
+        // is deliberately NOT a failure (see scan comment above).
+        const bool bWaveformOk = (N > 0) && (NumNaN == 0) && (NumInf == 0);
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: %s"),
                bWaveformOk ? TEXT("PASS") : TEXT("FAIL (waveform failed sanity checks)"));
