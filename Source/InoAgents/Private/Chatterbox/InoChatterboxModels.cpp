@@ -11,7 +11,8 @@ namespace
 {
     /**
      * Build an FInoOnnxSessionOptions with Chatterbox-appropriate
-     * defaults for the current platform.
+     * defaults for the current platform, layered with the caller's
+     * FInoChatterboxPerformanceOptions.
      *
      * Chatterbox's four runtime models are all large-ish autoregressive
      * / convolutional pieces where graph optimization and fast CPU
@@ -28,8 +29,14 @@ namespace
      *            we skip it because inconsistency across OEM drivers
      *            (the same class of issue we documented in the ONNX
      *            Runtime section of CLAUDE.md).
+     *
+     * Performance overlay: IntraOpThreadCount / InterOpThreadCount /
+     * bEnableOrtProfiling from the input struct are forwarded verbatim
+     * to FInoOnnxSessionOptions. Values of 0 mean "ORT default" and
+     * are left untouched.
      */
-    FInoOnnxSessionOptions MakeChatterboxOptions()
+    FInoOnnxSessionOptions MakeChatterboxOptions(
+        const FInoChatterboxPerformanceOptions& Performance)
     {
         FInoOnnxSessionOptions Options;
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
@@ -42,6 +49,13 @@ namespace
 #else
         Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
 #endif
+
+        // Apply caller-supplied tuning. Zero values pass through as
+        // "ORT default" — FInoOnnxSession::Create checks > 0 before
+        // forwarding to OrtSessionOptionsSetIntraOpNumThreads etc.
+        Options.IntraOpThreadCount = Performance.IntraOpThreadCount;
+        Options.InterOpThreadCount = Performance.InterOpThreadCount;
+        Options.bEnableProfiling   = Performance.bEnableOrtProfiling;
 
         return Options;
     }
@@ -57,6 +71,7 @@ namespace
         const FString& BaseDir,
         const FString& Variant,
         const TCHAR* Component,
+        const FInoChatterboxPerformanceOptions& Performance,
         FString* OutError)
     {
         const FString FileName = FString::Printf(TEXT("%s_%s.onnx"), Component, *Variant);
@@ -74,7 +89,7 @@ namespace
             return nullptr;
         }
 
-        const FInoOnnxSessionOptions Options = MakeChatterboxOptions();
+        const FInoOnnxSessionOptions Options = MakeChatterboxOptions(Performance);
         const double TStart = FPlatformTime::Seconds();
 
         FString SessionError;
@@ -107,7 +122,8 @@ namespace
 TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     const FString& BaseDir,
     const FString& Variant,
-    FString* OutError)
+    FString* OutError,
+    const FInoChatterboxPerformanceOptions& Performance)
 {
     if (BaseDir.IsEmpty() || Variant.IsEmpty())
     {
@@ -129,8 +145,11 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: loading models from %s (variant=%s)..."),
-           *BaseDir, *Variant);
+           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s)..."),
+           *BaseDir, *Variant,
+           Performance.IntraOpThreadCount,
+           Performance.InterOpThreadCount,
+           Performance.bEnableOrtProfiling ? TEXT("yes") : TEXT("no"));
 
     TUniquePtr<FInoChatterboxModels> Bundle(new FInoChatterboxModels());
     Bundle->Variant = Variant;
@@ -140,25 +159,25 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     // the whole bundle — a half-loaded set is never useful. Order matches
     // the official reference script (speech_encoder first so voice
     // conditioning is ready before the AR loop needs it).
-    Bundle->SpeechEncoder = LoadChatterboxSession(BaseDir, Variant, TEXT("speech_encoder"), OutError);
+    Bundle->SpeechEncoder = LoadChatterboxSession(BaseDir, Variant, TEXT("speech_encoder"), Performance, OutError);
     if (!Bundle->SpeechEncoder.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->EmbedTokens = LoadChatterboxSession(BaseDir, Variant, TEXT("embed_tokens"), OutError);
+    Bundle->EmbedTokens = LoadChatterboxSession(BaseDir, Variant, TEXT("embed_tokens"), Performance, OutError);
     if (!Bundle->EmbedTokens.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->LanguageModel = LoadChatterboxSession(BaseDir, Variant, TEXT("language_model"), OutError);
+    Bundle->LanguageModel = LoadChatterboxSession(BaseDir, Variant, TEXT("language_model"), Performance, OutError);
     if (!Bundle->LanguageModel.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->ConditionalDecoder = LoadChatterboxSession(BaseDir, Variant, TEXT("conditional_decoder"), OutError);
+    Bundle->ConditionalDecoder = LoadChatterboxSession(BaseDir, Variant, TEXT("conditional_decoder"), Performance, OutError);
     if (!Bundle->ConditionalDecoder.IsValid())
     {
         return nullptr;

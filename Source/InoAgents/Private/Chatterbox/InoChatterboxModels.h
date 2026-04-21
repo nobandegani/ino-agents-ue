@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Onnx/InoOnnxSession.h"
 
+#include "Chatterbox/InoChatterboxTypes.h"
+
 /**
  * FInoChatterboxModels — owns the four ORT sessions that make up
  * Chatterbox Turbo's runtime inference pipeline, matching the official
@@ -73,7 +75,8 @@ public:
     static TUniquePtr<FInoChatterboxModels> LoadFromDir(
         const FString& BaseDir,
         const FString& Variant,
-        FString* OutError = nullptr);
+        FString* OutError = nullptr,
+        const FInoChatterboxPerformanceOptions& Performance = FInoChatterboxPerformanceOptions{});
 
     ~FInoChatterboxModels() = default;
     FInoChatterboxModels(const FInoChatterboxModels&) = delete;

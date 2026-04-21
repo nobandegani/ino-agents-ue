@@ -72,6 +72,67 @@ INOAGENTS_API bool ChatterboxVariantFromString(
 INOAGENTS_API FString ChatterboxResolveVariantDir(EInoChatterboxVariant Variant);
 
 // ============================================================================
+// Load-time performance tuning
+// ============================================================================
+
+/**
+ * Per-session ORT tuning knobs exposed at LoadModelsAsync time.
+ * Applied to every one of the four ORT sessions the subsystem builds
+ * (speech_encoder / embed_tokens / language_model / conditional_decoder),
+ * so it's a bundle-wide setting, not per-session.
+ *
+ * Default-constructed (all fields at their defaults) gives ORT's
+ * "figure it out" behaviour, which is usually fine but often
+ * over-subscribes threads on hybrid CPUs (Intel 12th gen+, Arrow
+ * Lake, Alder Lake, etc.) where E-cores drag down the AR loop.
+ *
+ * The #1 lever for CPU-only inference speed is IntraOpThreadCount.
+ */
+USTRUCT(BlueprintType)
+struct FInoChatterboxPerformanceOptions
+{
+    GENERATED_BODY()
+
+    /** Number of threads ORT uses for parallel work INSIDE a single op
+     *  (matmul parallelism, conv SIMD, etc.). 0 = ORT default (usually
+     *  one per logical core — tends to over-subscribe hybrid CPUs).
+     *
+     *  For Chatterbox's AR loop the sweet spot is typically your
+     *  physical P-core count:
+     *    0   = ORT default              (a safe shot in the dark)
+     *    4   = low-power / older laptops
+     *    8   = most modern Intel/AMD desktops (Arrow Lake, Ryzen 7/9)
+     *    16+ = HEDT / workstation / Threadripper
+     *
+     *  Pinning to P-core count on a hybrid CPU is often 10–20 %
+     *  faster than letting ORT auto-pick — E-cores lag behind
+     *  P-cores and the AR loop's slowest thread sets the pace. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance",
+              meta = (ClampMin = "0", ClampMax = "128"))
+    int32 IntraOpThreadCount = 0;
+
+    /** Number of threads for PARALLEL execution of DIFFERENT ops in the
+     *  same inference graph. 0 = ORT default, 1 = fully sequential.
+     *
+     *  For an AR-loop model like Chatterbox's language_model (each
+     *  token depends on the previous), sequential is usually fastest —
+     *  extra threads just add scheduling overhead. Leave at 1 unless
+     *  you have a specific reason to change it. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance",
+              meta = (ClampMin = "0", ClampMax = "16"))
+    int32 InterOpThreadCount = 1;
+
+    /** Write ORT's per-op profiler output (onnxruntime_profile_*.json
+     *  next to the executable) while the session is active. Costs
+     *  5-10 % runtime overhead; off by default. Load the output in
+     *  chrome://tracing or Perfetto to see what's actually dominating
+     *  a given inference. Only turn on when diagnosing a specific
+     *  slowdown. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance")
+    bool bEnableOrtProfiling = false;
+};
+
+// ============================================================================
 // Load-time model configuration
 // ============================================================================
 
@@ -93,6 +154,13 @@ struct FInoChatterboxModelConfig
     /** Which quantization variant to load. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
     EInoChatterboxVariant Variant = EInoChatterboxVariant::Q4F16;
+
+    /** Per-session ORT tuning — thread counts, profiling toggle. See
+     *  FInoChatterboxPerformanceOptions for the full doc on each field.
+     *  Default-constructed = ORT auto, which is usually fine but not
+     *  optimal on hybrid CPUs. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    FInoChatterboxPerformanceOptions Performance;
 };
 
 // ============================================================================

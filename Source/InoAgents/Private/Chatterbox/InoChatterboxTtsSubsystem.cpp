@@ -180,6 +180,10 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
     TWeakObjectPtr<UInoChatterboxTtsSubsystem> WeakThis(this);
     const FString                              VariantStr = ChatterboxVariantToString(Variant);
     const FOnInoChatterboxModelsLoaded         OnLoaded   = PendingOnLoaded;
+    // Snapshot the performance options so the worker lambda doesn't
+    // reach back into PendingConfig (which could be mutated from the
+    // game thread while the worker is mid-load).
+    const FInoChatterboxPerformanceOptions     Performance = PendingConfig.Performance;
     const double                               TStart     = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
@@ -187,7 +191,7 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
            *VariantStr, *Dir);
 
     Async(EAsyncExecution::ThreadPool,
-          [Variant, VariantStr, Dir, WeakThis, OnLoaded, TStart]()
+          [Variant, VariantStr, Dir, WeakThis, OnLoaded, Performance, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -214,7 +218,7 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
         if (LocalTokenizer.IsValid())
         {
             LocalModels = FInoChatterboxModels::LoadFromDir(
-                Dir, VariantStr, &LocalError);
+                Dir, VariantStr, &LocalError, Performance);
         }
 
         const double ElapsedMs = (FPlatformTime::Seconds() - TStart) * 1000.0;
