@@ -59,4 +59,44 @@ public:
         int32 SampleRate,
         int32 NumChannels,
         ERuntimeRAWAudioFormat Format = ERuntimeRAWAudioFormat::Int16);
+
+    /**
+     * Generate silent-sounding raw PCM with a low-amplitude white-noise
+     * floor ("dithered silence").
+     *
+     * WHY THIS EXISTS: neural-net lip-sync models (Runtime MetaHuman Lip
+     * Sync, OVRLipSync, etc.) are trained on human voice recordings with
+     * ambient noise. Feeding them mathematically-perfect zero-sample
+     * silence is out-of-distribution input, and the model's response can
+     * be anything from a static neutral pose to random mouth movement.
+     * Adding an inaudible noise floor keeps the model inside its training
+     * distribution so the mouth stays closed during pauses.
+     *
+     * The default NoiseAmplitude of 0.00015 is ~-76 dBFS — below the
+     * audible threshold on any playback device, but large enough for any
+     * float-input audio model to recognise "ambient room tone".
+     *
+     * @param DurationMs       See GenerateEmptyRawAudio.
+     * @param SampleRate       See GenerateEmptyRawAudio.
+     * @param NumChannels      See GenerateEmptyRawAudio.
+     * @param Format           See GenerateEmptyRawAudio.
+     * @param NoiseAmplitude   Peak noise deviation from silence, expressed
+     *                         as a fraction of full-scale [0.0, 1.0]. For
+     *                         Int16 the default maps to roughly ±5 sample
+     *                         counts out of 32767. Set to 0 to get the
+     *                         same output as GenerateEmptyRawAudio.
+     * @return                 Byte buffer with interleaved dithered
+     *                         silence, ready for AppendAudioDataFromRAW.
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Audio",
+              meta = (DisplayName = "Generate Dithered Silence",
+                      ToolTip   = "Silent-sounding audio with an inaudible "
+                                  "noise floor so ML lip-sync models don't "
+                                  "misfire on pure-zero input."))
+    static TArray<uint8> GenerateDitheredSilence(
+        float DurationMs,
+        int32 SampleRate,
+        int32 NumChannels,
+        ERuntimeRAWAudioFormat Format    = ERuntimeRAWAudioFormat::Int16,
+        float NoiseAmplitude             = 0.00015f);
 };
