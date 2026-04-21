@@ -223,20 +223,6 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
 
 namespace
 {
-    /** Resolve the on-disk directory for a variant — duplicate of the
-     *  local helper in InoChatterboxTest.cpp because both test files use
-     *  the same layout. Could be factored into InoSmokeTestCommon if a
-     *  third test ever needs it. */
-    FString ResolveChatterboxDir(const FString& Variant)
-    {
-        return FPaths::Combine(
-            FPaths::ProjectPersistentDownloadDir(),
-            TEXT("InoAgents"),
-            TEXT("Models"),
-            TEXT("Chatterbox"),
-            Variant);
-    }
-
     void RunSubsystemSynthTest(const TArray<FString>& Args)
     {
         // -------- Arg parsing (same shape as the native SynthTest) --------
@@ -295,7 +281,12 @@ namespace
         }
 
         // -------- Resolve paths --------
-        const FString VariantDir  = ResolveChatterboxDir(VariantStr);
+        // Use the public helper rather than duplicating it in an
+        // anonymous namespace — the pre-existing InoChatterboxTest.cpp
+        // already has its own file-local ResolveChatterboxDir, and UBT's
+        // unity build merges the two files' anonymous namespaces into one
+        // TU, so a duplicated definition here collides at link time.
+        const FString VariantDir  = ChatterboxResolveVariantDir(VariantEnum);
         const FString VoiceWav    = FPaths::Combine(VariantDir, TEXT("default_voice.wav"));
         const FString OutputWav   = FPaths::Combine(
             FPaths::ProjectSavedDir(), TEXT("Chatterbox"),
