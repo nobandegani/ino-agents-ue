@@ -32,7 +32,12 @@
       "Bash(rm Config/DefaultEngine.ini)",
       "Bash(rmdir Config)",
       "Bash(rm -f Source/InoAgents/Public/Audio/InoAudioTypes.h Source/InoAgents/Public/Audio/InoImportedSoundWave.h Source/InoAgents/Public/Audio/InoStreamingSoundWave.h Source/InoAgents/Public/Audio/InoCapturableSoundWave.h Source/InoAgents/Private/Audio/InoImportedSoundWave.cpp Source/InoAgents/Private/Audio/InoStreamingSoundWave.cpp Source/InoAgents/Private/Audio/InoCapturableSoundWave.cpp Source/InoAgents/Private/Audio/InoMp3Decoder.h Source/InoAgents/Private/Audio/InoMp3Decoder.cpp Source/InoAgents/Private/SmokeTests/InoSoundWaveStreamingTest.h Source/InoAgents/Private/SmokeTests/InoSoundWaveStreamingTest.cpp Source/InoAgents/Private/SmokeTests/InoSoundWaveCapturableTest.h Source/InoAgents/Private/SmokeTests/InoSoundWaveCapturableTest.cpp)",
-      "Bash(rm -rf Source/InoAgents/Private/Audio/ThirdParty)"
+      "Bash(rm -rf Source/InoAgents/Private/Audio/ThirdParty)",
+      "Bash(dir \"C:\\\\Program Files\\\\Epic Games\" /B)",
+      "Bash(dir \"D:\\\\Program Files\\\\Epic Games\" /B)",
+      "Bash(dir \"E:\\\\Program Files\\\\Epic Games\" /B)",
+      "Bash(dir \"C:\\\\Epic Games\" /B)",
+      "Bash(dir \"D:\\\\Epic Games\" /B)"
     ]
   }
 }
