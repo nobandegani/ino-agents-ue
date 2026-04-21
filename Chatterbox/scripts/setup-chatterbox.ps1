@@ -59,9 +59,9 @@
 
 [CmdletBinding()]
 param(
-    # Override the variant pinned in CHATTERBOX_VERSION. Useful for pulling
-    # both fp16 (desktop tests) and q4f16 (mobile-parity tests) into the
-    # same working tree.
+    # Override the variant pinned in CHATTERBOX_VERSION. Useful for
+    # side-by-side quality comparisons (e.g. pulling fp16 alongside the
+    # q4f16 default, into separate <variant> directories).
     [string] $Variant = $null,
 
     # Also download a reference-voice WAV from the onnx-community sibling
@@ -94,7 +94,7 @@ $VersionLine = Get-Content $VersionFile `
     | Where-Object { $_ -and ($_.Trim() -notmatch '^\s*#') } `
     | Select-Object -First 1
 if (-not $VersionLine) {
-    Write-Error "CHATTERBOX_VERSION contains no pin line (only comments). Expected format like 'fp16@main'."
+    Write-Error "CHATTERBOX_VERSION contains no pin line (only comments). Expected format like 'q4f16@main'."
 }
 $VersionLine = $VersionLine.Trim()
 

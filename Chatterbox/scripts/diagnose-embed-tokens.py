@@ -40,7 +40,7 @@ SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".."))
 MODEL_DIR    = os.path.join(
     PROJECT_ROOT, "Saved", "PersistentDownloadDir", "InoAgents",
-    "Models", "Chatterbox", "fp16"
+    "Models", "Chatterbox", "q4f16"
 )
 
 SEPARATOR = "=" * 72
@@ -103,8 +103,8 @@ def main():
             sz = -1
         print(f"  {f}  ({sz} bytes)")
 
-    embed_path = os.path.join(MODEL_DIR, "embed_tokens_fp16.onnx")
-    embed_data = os.path.join(MODEL_DIR, "embed_tokens_fp16.onnx_data")
+    embed_path = os.path.join(MODEL_DIR, "embed_tokens_q4f16.onnx")
+    embed_data = os.path.join(MODEL_DIR, "embed_tokens_q4f16.onnx_data")
     tok_path   = os.path.join(MODEL_DIR, "tokenizer.json")
 
     for p in (embed_path, embed_data, tok_path):
@@ -120,9 +120,9 @@ def main():
         print(f"    size   = {os.path.getsize(p)}")
         print(f"    sha256 = {h}")
     print()
-    print("(Cross-check sizes: upstream reports embed_tokens_fp16.onnx ≈ 1754")
-    print(" bytes and embed_tokens_fp16.onnx_data ≈ 116 MB. If ours match,")
-    print(" the download is not corrupted.)")
+    print("(Cross-check the sizes above against HuggingFace's file listing at")
+    print(" https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/tree/main/onnx")
+    print(" — if they match, the download is not corrupted.)")
 
     hr("Section 3 — HF AutoTokenizer cross-check (rule out our C++ tokenizer)")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)

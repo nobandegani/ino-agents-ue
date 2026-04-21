@@ -96,7 +96,7 @@ namespace
      * `Ino.Chatterbox.LoadModelsTest [variant]`
      *
      * Loads the four staged ORT sessions for the given variant (default
-     * "fp16") and logs their full I/O metadata. Use the output to:
+     * "q4f16") and logs their full I/O metadata. Use the output to:
      *   - Confirm setup-chatterbox.ps1 staged the correct files
      *   - Design the tokenizer token-space (output logit count)
      *   - Design the AR loop I/O (KV-cache shapes, position IDs, etc.)
@@ -104,7 +104,7 @@ namespace
      */
     void RunLoadModelsTest(const TArray<FString>& Args)
     {
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
         LoadAndLogMetadataAsync(Variant);
         UE_LOG(LogInoAgents, Log,
                TEXT("Ino.Chatterbox.LoadModelsTest: dispatched (check log in ~1-5 s)."));
@@ -113,7 +113,7 @@ namespace
     FAutoConsoleCommand GLoadModelsTestCmd(
         TEXT("Ino.Chatterbox.LoadModelsTest"),
         TEXT("Load the four Chatterbox Turbo ORT sessions and dump their I/O metadata. ")
-        TEXT("Argument: variant name (fp16 default; fp32 | fp16 | q4 | q4f16 | quantized)."),
+        TEXT("Argument: variant name (q4f16 default; fp32 | fp16 | q4 | q4f16 | quantized)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunLoadModelsTest));
 
     // ========================================================================
@@ -144,7 +144,7 @@ namespace
      */
     void RunTokenizerTest(const TArray<FString>& Args)
     {
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         // Args[1..] joined back into a single text string so the user can
         // type `Ino.Chatterbox.TokenizerTest fp16 Hello world [laugh]`
@@ -238,7 +238,7 @@ namespace
     FAutoConsoleCommand GTokenizerTestCmd(
         TEXT("Ino.Chatterbox.TokenizerTest"),
         TEXT("Load the Chatterbox tokenizer.json and round-trip an input string. ")
-        TEXT("Args: [variant] [text...]. Variant defaults to fp16. ")
+        TEXT("Args: [variant] [text...]. Variant defaults to q4f16. ")
         TEXT("Text defaults to a built-in sample covering specials + contractions."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunTokenizerTest));
 
@@ -274,7 +274,7 @@ namespace
      */
     void RunEmbedTest(const TArray<FString>& Args)
     {
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         FString Text;
         if (Args.Num() > 1)
@@ -521,7 +521,7 @@ namespace
         TEXT("Ino.Chatterbox.EmbedTest"),
         TEXT("Run the Chatterbox embed_tokens session on a tokenized input ")
         TEXT("and dump the fp32 embedding stats. Args: [variant] [text...]. ")
-        TEXT("Variant defaults to fp16; text defaults to \"Hello world\"."),
+        TEXT("Variant defaults to q4f16; text defaults to \"Hello world\"."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunEmbedTest));
 
     // ========================================================================
@@ -718,7 +718,8 @@ namespace
     //       position_ids=position_ids,
     //       **past_kv))
 
-    // These are Chatterbox Turbo's fp16 variant. Verified against the
+    // These are Chatterbox Turbo's architecture constants (same across all
+    // quantization variants — fp32 / fp16 / q4 / q4f16 / quantized). Verified against the
     // LoadModelsTest output (51 inputs, 49 outputs).
     static constexpr int32 kChatterboxLMNumLayers       = 24;
     static constexpr int32 kChatterboxLMNumKVHeads      = 16;
@@ -795,7 +796,7 @@ namespace
 
     void RunARStepTest(const TArray<FString>& Args)
     {
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         FString Text;
         if (Args.Num() > 1)
@@ -1259,10 +1260,10 @@ namespace
     void RunARLoopTest(const TArray<FString>& Args)
     {
         // --- Parse args ---
-        //   Args[0]        : variant            (default: fp16)
+        //   Args[0]        : variant            (default: q4f16)
         //   Args[1] digits : max_new_tokens     (default: 64)
         //   Args[1..] text : text to synthesize (default: "Hello world")
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         int32 MaxNewTokens = kARLoopDefaultMaxNewTokens;
         int32 TextStartIdx = 1;
@@ -1620,7 +1621,7 @@ namespace
         TEXT("Ino.Chatterbox.ARLoopTest"),
         TEXT("Run the full Chatterbox AR generation loop. Produces a stream of ")
         TEXT("speech token IDs until STOP_SPEECH_TOKEN or max_new_tokens reached. ")
-        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: q4f16, 64, \"Hello world\". ")
         TEXT("NOTE: without voice conditioning the tokens won't be musically sensible."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunARLoopTest));
 
@@ -1723,10 +1724,10 @@ namespace
     void RunDecodeTest(const TArray<FString>& Args)
     {
         // Same arg parsing shape as ARLoopTest:
-        //   Args[0]        : variant            (default: fp16)
+        //   Args[0]        : variant            (default: q4f16)
         //   Args[1] digits : max_new_tokens     (default: 64)
         //   Args[1..] text : text to synthesize (default: "Hello world")
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         int32 MaxNewTokens = kARLoopDefaultMaxNewTokens;
         int32 TextStartIdx = 1;
@@ -2193,7 +2194,7 @@ namespace
         TEXT("End-to-end text -> speech tokens -> PCM WAV. Runs tokenizer + embed + ")
         TEXT("AR loop + conditional_decoder with zero-filled speaker conditioning. ")
         TEXT("Writes <Project>/Saved/Chatterbox/decode_test.wav (24 kHz mono int16). ")
-        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 64, \"Hello world\". ")
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: q4f16, 64, \"Hello world\". ")
         TEXT("NOTE: audio will NOT sound like speech — no voice conditioning yet (chunk 5)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunDecodeTest));
 
@@ -2371,7 +2372,7 @@ namespace
 
     void RunEncoderTest(const TArray<FString>& Args)
     {
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
         const FString WavFileName = Args.Num() > 1 ? Args[1] : FString(TEXT("default_voice.wav"));
 
         const FString Dir = ResolveChatterboxDir(Variant);
@@ -2583,7 +2584,7 @@ namespace
         TEXT("Ino.Chatterbox.EncoderTest"),
         TEXT("Chunk-5a diagnostic: load default_voice.wav and run speech_encoder. ")
         TEXT("Dumps each of the 4 outputs' name/shape/dtype + preview. ")
-        TEXT("Args: [variant] [wav_filename]. Defaults: fp16, default_voice.wav ")
+        TEXT("Args: [variant] [wav_filename]. Defaults: q4f16, default_voice.wav ")
         TEXT("(resolved inside the staged variant dir)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunEncoderTest));
 
@@ -2689,7 +2690,7 @@ namespace
     void RunSynthTest(const TArray<FString>& Args)
     {
         // Same arg parsing as ARLoopTest / DecodeTest.
-        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
+        const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("q4f16"));
 
         int32 MaxNewTokens = 256;   // bigger default than ARLoopTest: real utterances need >64
         int32 TextStartIdx = 1;
@@ -3248,6 +3249,6 @@ namespace
         TEXT("staged in the variant dir, tokenizes text, runs the full encoder + AR + ")
         TEXT("decoder pipeline with real voice conditioning, writes ")
         TEXT("<Project>/Saved/Chatterbox/synth_test.wav. ")
-        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: fp16, 256, \"Hello world\"."),
+        TEXT("Args: [variant] [max_new_tokens] [text...]. Defaults: q4f16, 256, \"Hello world\"."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunSynthTest));
 }

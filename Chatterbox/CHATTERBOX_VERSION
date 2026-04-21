@@ -6,10 +6,10 @@
 #
 # Variants (per component — speech_encoder / embed_tokens / language_model /
 # conditional_decoder; all four run at inference time):
-#   fp32       default, largest  (~3.2 GB total)   highest quality
-#   fp16       half precision    (~1.5 GB total)   default: desktop-friendly
+#   fp32       largest  (~3.2 GB total)           reference benchmark
+#   fp16       half precision    (~1.5 GB total)  desktop-friendly alternative
 #   q4         int4 weights, fp32 activations  (~640 MB)
-#   q4f16      int4 weights, fp16 activations  (~510 MB)   mobile-targeted
+#   q4f16      int4 weights, fp16 activations  (~510 MB)  ← default (smallest + fastest)
 #   quantized  int8 all          (~1.0 GB)
 #
 # The setup script accepts a -Variant command-line arg that overrides the
@@ -20,4 +20,4 @@
 # hash for reproducible builds. Bump whenever upstream publishes a
 # quality / compatibility change and we've validated it.
 
-fp16@main
+q4f16@main

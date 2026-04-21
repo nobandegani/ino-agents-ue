@@ -32,7 +32,7 @@ Turbo is the best fit for the plugin's constraints:
 
 ```
 Chatterbox/
-├── CHATTERBOX_VERSION            ← pinned variant + revision ("fp16@main")
+├── CHATTERBOX_VERSION            ← pinned variant + revision ("q4f16@main")
 ├── scripts/
 │   ├── setup-chatterbox.ps1      ← dev-time model downloader
 │   └── authoring/                ← (Phase E) voice-embedding extraction
@@ -74,15 +74,18 @@ Approximate total on-disk size for all four runtime components:
 | Variant    | Total  | Quality vs fp32         | Targeted at |
 |------------|--------|-------------------------|-------------|
 | fp32       | ~3.2 GB | reference              | local-only benchmark |
-| **fp16**   | ~1.5 GB | essentially identical  | desktop default |
-| q4         | ~640 MB | small quality drop     | intermediate |
-| **q4f16**  | ~510 MB | similar drop, smaller   | mobile default |
+| fp16       | ~1.5 GB | essentially identical  | quality-first desktop |
+| q4         | ~640 MB | small quality drop     | x86 without AVX-512 FP16 |
+| **q4f16**  | ~510 MB | similar drop, smaller   | **default — smallest + fastest** |
 | quantized  | ~1.0 GB | int8 — varies by model  | niche |
 
-The plugin defaults to **fp16 on Windows** and **q4f16 on Android**.
-The Phase D subsystem selects the variant at runtime based on
-`PLATFORM_WINDOWS` / `PLATFORM_ANDROID`. The setup script here defaults
-to fp16 (override with `-Variant q4f16` for mobile-parity testing).
+The plugin defaults to **q4f16 on both Windows and Android**. 4-bit
+weights + fp16 activations give the smallest RAM / disk footprint and
+are the fastest choice on ARM mobile (native fp16 NEON) as well as
+modern x86 CPUs with AVX-512 FP16 (Zen 4/5, Sapphire Rapids+). On older
+x86 without hardware fp16 you can override with `-Variant q4` for a
+slightly faster but slightly larger bundle. On loud-speaker production
+work where every bit of quality matters, use `-Variant fp16`.
 
 ## Usage
 
@@ -91,8 +94,9 @@ to fp16 (override with `-Variant q4f16` for mobile-parity testing).
 cd Plugins/InoAgents/Chatterbox/scripts
 ./setup-chatterbox.ps1
 
-# Pull the mobile-parity variant too (downloads to a separate directory):
-./setup-chatterbox.ps1 -Variant q4f16
+# Pull an alternate variant too (downloads to a separate directory —
+# the q4f16 default stays on disk untouched):
+./setup-chatterbox.ps1 -Variant fp16
 
 # Also grab a 24 kHz reference WAV (from the onnx-community sibling
 # repo under MIT) so SynthTest has a default voice to prime against:

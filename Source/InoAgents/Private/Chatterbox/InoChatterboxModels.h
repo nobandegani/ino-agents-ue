@@ -96,7 +96,7 @@ public:
     FInoOnnxSession* GetLanguageModel() const       { return LanguageModel.Get(); }
     FInoOnnxSession* GetConditionalDecoder() const  { return ConditionalDecoder.Get(); }
 
-    /** Which quantization variant was loaded (e.g. "fp16" or "q4f16").
+    /** Which quantization variant was loaded (e.g. "q4f16" or "fp16").
      *  The same variant string is also embedded in each session's
      *  on-disk filename. */
     const FString& GetVariant() const { return Variant; }
