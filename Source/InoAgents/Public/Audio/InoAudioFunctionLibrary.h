@@ -96,4 +96,37 @@ public:
         int32 NumChannels,
         ERuntimeRAWAudioFormat Format    = ERuntimeRAWAudioFormat::Int16,
         float NoiseAmplitude             = 0.00015f);
+
+    /**
+     * Save a 16-bit PCM mono byte buffer to disk as a playable WAV file.
+     *
+     * Intended as a diagnostic / debug helper: paste
+     * FInoChatterboxSynthesisResult::AudioSamples straight in and get a
+     * file you can open in any media player. Useful for verifying the
+     * synth output when a streaming-audio pipeline somewhere else is
+     * misbehaving ("is the problem my playback setup, or the bytes I
+     * got from Synthesize Async?").
+     *
+     * Wraps the bytes with a 44-byte RIFF/fmt/data header — no
+     * re-quantization, no resampling, no conversion. Byte count must
+     * be a multiple of 2 (one int16 sample = 2 bytes), mono only.
+     *
+     * @param FilePath     Absolute or project-relative path to write
+     *                     to. Parent directory must exist (use
+     *                     FPaths::ProjectSavedDir() for scratch).
+     * @param PcmBytes     Int16 PCM LE bytes, typically straight from
+     *                     FInoChatterboxSynthesisResult::AudioSamples.
+     * @param SampleRate   Typically 24000 for Chatterbox output. Stored
+     *                     in the WAV header so media players know the
+     *                     playback rate.
+     * @return             True on successful write. False on any failure
+     *                     (byte count not int16-aligned, directory
+     *                     doesn't exist, permissions, disk full, etc.).
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Audio",
+              meta = (DisplayName = "Save Int16 PCM As WAV"))
+    static bool SaveInt16PcmAsWav(
+        const FString& FilePath,
+        const TArray<uint8>& PcmBytes,
+        int32 SampleRate = 24000);
 };

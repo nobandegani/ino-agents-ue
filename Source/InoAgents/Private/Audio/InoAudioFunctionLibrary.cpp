@@ -4,6 +4,11 @@
 
 #include "Math/RandomStream.h"
 
+// WAV writer lives in the Chatterbox private tree (first consumer).
+// Private/Chatterbox is in PrivateIncludePaths via InoAgents.Build.cs,
+// so this resolves without relative paths.
+#include "InoChatterboxAudioIO.h"
+
 namespace
 {
     /** Bytes per interleaved sample for a given raw format. 0 for
@@ -243,4 +248,23 @@ TArray<uint8> UInoAudioFunctionLibrary::GenerateDitheredSilence(
     }
 
     return Bytes;
+}
+
+bool UInoAudioFunctionLibrary::SaveInt16PcmAsWav(
+    const FString& FilePath,
+    const TArray<uint8>& PcmBytes,
+    int32 SampleRate)
+{
+    if (FilePath.IsEmpty())
+    {
+        UE_LOG(LogTemp, Warning,
+               TEXT("SaveInt16PcmAsWav: empty file path"));
+        return false;
+    }
+
+    // Delegate to the Chatterbox-private helper — it handles odd-byte-count
+    // rejection and the WAV-header framing. We just surface the result
+    // as a Blueprint-callable bool.
+    return InoChatterbox::WriteInt16PcmBytesAsWav(
+        FilePath, MakeArrayView(PcmBytes), SampleRate);
 }
