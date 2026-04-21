@@ -35,6 +35,7 @@
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
 #include "ElevenLabs/InoElevenLabsTextToDialogueStream.h"
 #include "InoAgentsLog.h"
+#include "InoSmokeTestCommon.h"
 
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -62,25 +63,6 @@ namespace
     // are the strings you want.
     constexpr const TCHAR* kDefaultVoiceA = TEXT("AyCt0WmAXUcPJR11zeeP");
     constexpr const TCHAR* kDefaultVoiceB = TEXT("lhgliD0TncfFOY1Nc93M");
-
-    UInoElevenLabsSubsystem* FindSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (UInoElevenLabsSubsystem* Subsys = GI->GetSubsystem<UInoElevenLabsSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
 
     UObject* FindWorldContext()
     {
@@ -206,7 +188,7 @@ void UInoElevenLabsDialogueStreamTestObserver::Finish()
 
 static void RunElevenLabsDialogueStreamTest(const TArray<FString>& Args)
 {
-    UInoElevenLabsSubsystem* Subsys = FindSubsystem();
+    UInoElevenLabsSubsystem* Subsys = InoSmokeTest::FindElevenLabsSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
@@ -298,7 +280,7 @@ static FAutoConsoleCommand GElevenLabsDialogueStreamTestCommand(
 
 static void RunElevenLabsReloadSettings(const TArray<FString>& /*Args*/)
 {
-    UInoElevenLabsSubsystem* Subsys = FindSubsystem();
+    UInoElevenLabsSubsystem* Subsys = InoSmokeTest::FindElevenLabsSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

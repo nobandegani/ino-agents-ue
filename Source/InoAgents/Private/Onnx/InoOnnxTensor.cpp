@@ -12,7 +12,7 @@ namespace
      * One-liner for every ORT call that might fail inside this TU.
      * Wraps CheckOrtStatus so we don't repeat the OpDescription boilerplate.
      */
-    bool CheckStatus(OrtStatus* Status, const TCHAR* Op)
+    bool CheckTensorStatus(OrtStatus* Status, const TCHAR* Op)
     {
         return InoAgents::Onnx::Internal::CheckOrtStatus(Status, Op, /*OutError=*/ nullptr);
     }
@@ -29,7 +29,7 @@ namespace
 
         OrtAllocator* Allocator = nullptr;
         OrtStatus* Status = Api->GetAllocatorWithDefaultOptions(&Allocator);
-        if (!CheckStatus(Status, TEXT("GetAllocatorWithDefaultOptions")))
+        if (!CheckTensorStatus(Status, TEXT("GetAllocatorWithDefaultOptions")))
         {
             return nullptr;
         }
@@ -161,7 +161,7 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
         DtypeToOrt(Dtype),
         &Native);
 
-    if (!CheckStatus(Status, TEXT("CreateTensorAsOrtValue")))
+    if (!CheckTensorStatus(Status, TEXT("CreateTensorAsOrtValue")))
     {
         return FInoOnnxTensor{};
     }
@@ -210,7 +210,7 @@ bool FInoOnnxTensor::RefreshShapeAndDtype()
 
     // Get a TypeAndShapeInfo handle — ORT needs it to read dtype + shape.
     OrtTensorTypeAndShapeInfo* TypeInfo = nullptr;
-    if (!CheckStatus(
+    if (!CheckTensorStatus(
             Api->GetTensorTypeAndShape(NativeValue, &TypeInfo),
             TEXT("GetTensorTypeAndShape")))
     {
@@ -219,7 +219,7 @@ bool FInoOnnxTensor::RefreshShapeAndDtype()
 
     // Query element dtype.
     ONNXTensorElementDataType OrtDtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    bool bOk = CheckStatus(
+    bool bOk = CheckTensorStatus(
         Api->GetTensorElementType(TypeInfo, &OrtDtype),
         TEXT("GetTensorElementType"));
 
@@ -227,7 +227,7 @@ bool FInoOnnxTensor::RefreshShapeAndDtype()
     size_t DimCount = 0;
     if (bOk)
     {
-        bOk = CheckStatus(
+        bOk = CheckTensorStatus(
             Api->GetDimensionsCount(TypeInfo, &DimCount),
             TEXT("GetDimensionsCount"));
     }
@@ -238,7 +238,7 @@ bool FInoOnnxTensor::RefreshShapeAndDtype()
         Shape.SetNumUninitialized((int32)DimCount);
         // reinterpret_cast: UE's int64 (long long) vs ORT's int64_t (long
         // on Android). Same representation, different C++ types.
-        bOk = CheckStatus(
+        bOk = CheckTensorStatus(
             Api->GetDimensions(TypeInfo, reinterpret_cast<int64_t*>(Shape.GetData()), DimCount),
             TEXT("GetDimensions"));
     }
@@ -313,7 +313,7 @@ void* FInoOnnxTensor::GetDataPtrRaw(SIZE_T TypeSizeCheck, const TCHAR* TypeName)
     }
 
     void* Data = nullptr;
-    if (!CheckStatus(
+    if (!CheckTensorStatus(
             Api->GetTensorMutableData(NativeValue, &Data),
             TEXT("GetTensorMutableData")))
     {

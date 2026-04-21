@@ -25,40 +25,12 @@
 #include "InoLiteRtLmSubsystemLoadTest.h"
 
 #include "InoAgentsLog.h"
+#include "InoSmokeTestCommon.h"
 // FInoLiteRtLmModelConfig struct is in InoLiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-
-namespace
-{
-    /**
-     * Get a UInoLiteRtLmSubsystem from any game instance currently alive.
-     * Console commands run outside of a specific world context, so we
-     * iterate world contexts to find one.
-     */
-    UInoLiteRtLmSubsystem* FindSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (UInoLiteRtLmSubsystem* Subsys = GI->GetSubsystem<UInoLiteRtLmSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
-}
 
 void UInoLiteRtLmSubsystemLoadTestObserver::HandleLoaded(
     bool bSuccess, FString ErrorMessage)
@@ -99,7 +71,7 @@ void UInoLiteRtLmSubsystemLoadTestObserver::HandleLoaded(
 
 static void RunLiteRtLmSubsystemLoadTest(const TArray<FString>& /*Args*/)
 {
-    UInoLiteRtLmSubsystem* Subsys = FindSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

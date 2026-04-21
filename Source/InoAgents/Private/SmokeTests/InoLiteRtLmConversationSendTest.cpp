@@ -31,42 +31,13 @@
 #include "InoLiteRtLmConversationSendTest.h"
 
 #include "InoAgentsLog.h"
+#include "InoSmokeTestCommon.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
 // FInoLiteRtLmModelConfig struct is in InoLiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-
-namespace
-{
-    /**
-     * Get the UInoLiteRtLmSubsystem from the first game instance that has one.
-     * UInoLiteRtLmSubsystem is a UGameInstanceSubsystem, so it only exists
-     * during PIE or standalone game runs — the test must be invoked from
-     * inside a PIE session (or from a running game build).
-     */
-    UInoLiteRtLmSubsystem* FindSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (UInoLiteRtLmSubsystem* Subsys = GI->GetSubsystem<UInoLiteRtLmSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
-}
 
 void UInoLiteRtLmConversationSendTestObserver::HandleModelLoaded(
     bool bSuccess, FString ErrorMessage)
@@ -176,7 +147,7 @@ void UInoLiteRtLmConversationSendTestObserver::Finish()
 
 static void RunLiteRtLmConversationSendTest(const TArray<FString>& Args)
 {
-    UInoLiteRtLmSubsystem* Subsys = FindSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

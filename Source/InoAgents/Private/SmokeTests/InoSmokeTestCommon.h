@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 
 class FJsonObject;
+class UInoLiteRtLmSubsystem;
+class UInoElevenLabsSubsystem;
 
 /**
  * Helpers shared between the phase-1 smoke test console commands in
@@ -15,6 +17,20 @@ class FJsonObject;
  */
 namespace InoSmokeTest
 {
+    /**
+     * Walk GEngine->GetWorldContexts() and return the first UGameInstance's
+     * UInoLiteRtLmSubsystem (typically the PIE game instance). Returns
+     * nullptr if GEngine is null, there are no world contexts, or no
+     * context has the subsystem available yet.
+     *
+     * Centralizing this here avoids per-file anonymous-namespace copies
+     * that collide under UBT's unity build.
+     */
+    UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem();
+
+    /** Twin of FindLiteRtLmSubsystem for the ElevenLabs side. */
+    UInoElevenLabsSubsystem* FindElevenLabsSubsystem();
+
     /**
      * Resolve the default phase-1 Gemma 4 E2B model path:
      *     Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm

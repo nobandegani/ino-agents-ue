@@ -3,9 +3,14 @@
 #include "InoSmokeTestCommon.h"
 
 #include "InoAgentsLog.h"
+#include "ElevenLabs/InoElevenLabsSubsystem.h"
+#include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -14,6 +19,41 @@
 
 namespace InoSmokeTest
 {
+
+namespace
+{
+    // Shared world-context walker. Returns the first GameInstance-owned
+    // subsystem of type T across every FWorldContext UE knows about.
+    template <typename TSubsystem>
+    TSubsystem* FindGameInstanceSubsystem()
+    {
+        if (GEngine == nullptr)
+        {
+            return nullptr;
+        }
+        for (const FWorldContext& Context : GEngine->GetWorldContexts())
+        {
+            if (UGameInstance* GI = Context.OwningGameInstance)
+            {
+                if (TSubsystem* Subsys = GI->GetSubsystem<TSubsystem>())
+                {
+                    return Subsys;
+                }
+            }
+        }
+        return nullptr;
+    }
+}
+
+UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
+{
+    return FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
+}
+
+UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
+{
+    return FindGameInstanceSubsystem<UInoElevenLabsSubsystem>();
+}
 
 FString ResolveDefaultModelPath()
 {

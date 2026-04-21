@@ -36,35 +36,12 @@
 #include "InoLiteRtLmConversationContextTest.h"
 
 #include "InoAgentsLog.h"
+#include "InoSmokeTestCommon.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-
-namespace
-{
-    UInoLiteRtLmSubsystem* FindSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (UInoLiteRtLmSubsystem* Subsys = GI->GetSubsystem<UInoLiteRtLmSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
-}
 
 void UInoLiteRtLmConversationContextTestObserver::HandleModelLoaded(
     bool bSuccess, FString ErrorMessage)
@@ -218,7 +195,7 @@ void UInoLiteRtLmConversationContextTestObserver::Finish()
 
 static void RunLiteRtLmConversationContextTest(const TArray<FString>& Args)
 {
-    UInoLiteRtLmSubsystem* Subsys = FindSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

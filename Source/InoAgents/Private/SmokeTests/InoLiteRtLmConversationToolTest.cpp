@@ -35,38 +35,15 @@
 #include "InoLiteRtLmConversationToolTest.h"
 
 #include "InoAgentsLog.h"
+#include "InoSmokeTestCommon.h"
 #include "LiteRtLm/InoLiteRtLmAddNumbersTool.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
 // FInoLiteRtLmModelConfig struct is in InoLiteRtLmTypes.h (included via subsystem header)
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 #include "LiteRtLm/InoLiteRtLmToolBase.h"
 
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
-
-namespace
-{
-    UInoLiteRtLmSubsystem* FindSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (UInoLiteRtLmSubsystem* Subsys = GI->GetSubsystem<UInoLiteRtLmSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
-}
 
 void UInoLiteRtLmConversationToolTestObserver::HandleModelLoaded(
     bool bSuccess, FString ErrorMessage)
@@ -248,7 +225,7 @@ void UInoLiteRtLmConversationToolTestObserver::Finish()
 
 static void RunLiteRtLmConversationToolTest(const TArray<FString>& Args)
 {
-    UInoLiteRtLmSubsystem* Subsys = FindSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
