@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GenericPlatform/GenericPlatformFile.h"
+#include "Interfaces/IHttpRequest.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Templates/UniquePtr.h"
 
@@ -301,4 +303,103 @@ private:
      *  Tokenizer are reset (the worker borrows references to both).
      *  Null when no models are loaded. */
     TUniquePtr<FInoChatterboxSynthesisWorker> Worker;
+
+    // ------------------------------------------------------------------
+    // Auto-download state
+    //
+    // Commit 4 lands the download flow: when LoadModelsAsync is called
+    // with a variant that isn't staged on disk, the subsystem walks a
+    // hardcoded 11-file queue (4 .onnx + 4 .onnx_data + 3 configs),
+    // HEAD-probes each to learn Content-Length for aggregate progress
+    // reporting, then downloads them single-shot with .partial
+    // staging + atomic rename. Once all files are present, the flow
+    // chains into the existing ThreadPool load path (DispatchLoadWorker).
+    //
+    // HTTP operations run on the game thread (UE's HTTP module marshals
+    // completions via the task graph). Only one download is ever in
+    // flight at a time — sequential by design, simpler to reason about
+    // than a parallel pool.
+    // ------------------------------------------------------------------
+
+    /** Single entry in the download queue. Built once at the start of
+     *  StartDownload and consumed sequentially. */
+    struct FDownloadFile
+    {
+        /** Absolute URL to fetch. */
+        FString Url;
+        /** Absolute target path on disk (not the .partial). */
+        FString TargetPath;
+        /** If true, a 404 or error on this file fails the whole load.
+         *  False for .onnx_data companions — some variants inline weights
+         *  and the server legitimately returns 404 for them. */
+        bool    bRequired = true;
+        /** Size learned from HEAD probe. -1 = unknown (HF sometimes
+         *  strips Content-Length across its CDN redirect; treat as
+         *  "report bytes-only, not percent" downstream). */
+        int64   ExpectedBytes = -1;
+        /** Live byte count during the active GET, latched on completion. */
+        int64   BytesWritten = 0;
+        /** Set to true once the file is either fully downloaded (success)
+         *  or skipped (optional 404). Used to avoid re-downloading. */
+        bool    bDone = false;
+    };
+
+    /** Build, then consume, during one download session. Cleared in
+     *  CleanupDownload. */
+    TArray<FDownloadFile> DownloadQueue;
+
+    /** Index into DownloadQueue of the file currently being HEAD-probed
+     *  or GET-downloaded. Advances sequentially. */
+    int32 DownloadCursor = 0;
+
+    /** True while we're in the sequential HEAD-probe phase (first pass).
+     *  False while we're in the GET-download phase (second pass). */
+    bool bDownloadProbing = false;
+
+    /** Live HTTP request in flight. Held to keep the request alive long
+     *  enough for its callbacks to fire, and so Deinitialize / UnloadModels
+     *  can cancel it cleanly. */
+    FHttpRequestPtr DownloadRequest;
+
+    /** Open file handle for the current download's .partial file. Closed
+     *  in CleanupDownload. */
+    IFileHandle* DownloadFileHandle = nullptr;
+
+    /** The config LoadModelsAsync was called with — we remember it so the
+     *  post-download hop into DispatchLoadWorker knows the variant. */
+    FInoChatterboxModelConfig PendingConfig;
+
+    /** The OnLoaded delegate LoadModelsAsync was called with — we remember
+     *  it so FinishDownloadSuccess / FinishDownloadError can fire it. */
+    FOnInoChatterboxModelsLoaded PendingOnLoaded;
+
+    /** Download-flow helpers — see InoChatterboxTtsSubsystem.cpp for the
+     *  narrative; flow is:
+     *    StartDownload           (called when files missing)
+     *     └─ StartHeadProbe       (sequential HEADs for aggregate total)
+     *         └─ HandleHeadComplete / advance cursor
+     *             └─ StartNextFileDownload  (sequential GETs)
+     *                 └─ HandleDownloadProgress / HandleDownloadComplete
+     *                     └─ FinishDownloadSuccess  (chains into DispatchLoadWorker)
+     *                     or  FinishDownloadError   (fires PendingOnLoaded false)
+     *                     or  CleanupDownload       (state reset, called from both) */
+    void StartDownload();
+    void StartHeadProbe();
+    void HandleHeadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void StartNextFileDownload();
+    void HandleDownloadProgress(FHttpRequestPtr Request, int32 BytesSent, int32 BytesReceived);
+    void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+    void FinishDownloadSuccess();
+    void FinishDownloadError(const FString& Err);
+    void CleanupDownload();
+
+    /** Broadcast OnDownloadProgress with the current aggregate. Extracted
+     *  because several call sites need to update progress (HEAD complete,
+     *  GET progress, GET complete). */
+    void BroadcastDownloadProgress();
+
+    /** Shared ThreadPool dispatch — files are on disk, now load them.
+     *  Called both from LoadModelsAsync's files-present fast path and
+     *  from FinishDownloadSuccess after an auto-download. */
+    void DispatchLoadWorker(EInoChatterboxVariant Variant, const FString& Dir);
 };

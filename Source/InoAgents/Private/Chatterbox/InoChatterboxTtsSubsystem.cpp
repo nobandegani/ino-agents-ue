@@ -4,10 +4,14 @@
 
 #include "Async/Async.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpResponse.h"
 #include "Misc/Paths.h"
 
 #include "InoAgentsLog.h"
+#include "InoAgentsSettings.h"
 #include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxSynthesisWorker.h"
@@ -63,6 +67,16 @@ void UInoChatterboxTtsSubsystem::Initialize(FSubsystemCollectionBase& Collection
 
 void UInoChatterboxTtsSubsystem::Deinitialize()
 {
+    // Cancel any in-flight download so the HTTP completion callback
+    // doesn't try to write to a file that's about to be gone. The
+    // CleanupDownload inside UnloadModels handles the file handle +
+    // queue state; this just stops the network traffic.
+    if (DownloadRequest.IsValid())
+    {
+        DownloadRequest->CancelRequest();
+        DownloadRequest.Reset();
+    }
+
     // Free the bundle. UnloadModels is safe to call with nothing loaded.
     UnloadModels();
     Super::Deinitialize();
@@ -108,27 +122,43 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     const FString               VariantStr  = ChatterboxVariantToString(VariantEnum);
     const FString               Dir         = ChatterboxResolveVariantDir(VariantEnum);
 
-    // Commit 2 scope: require the files to already be on disk. The
-    // auto-download flow (HEAD-probe all 11 files + chained GETs +
-    // aggregated OnDownloadProgress) lands in Commit 4. Until then,
-    // devs stage files by running
-    //   Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1
-    // which populates the exact same directory the subsystem resolves
-    // to here.
-    if (!IsModelDownloaded(VariantEnum))
+    // Remember the config + delegate for the download flow's
+    // post-download hop into DispatchLoadWorker, and (if we skip
+    // download) for symmetry.
+    bLoadInFlight   = true;
+    PendingConfig   = Config;
+    PendingOnLoaded = OnLoaded;
+
+    // -------- Files-present fast path --------
+    if (IsModelDownloaded(VariantEnum))
     {
-        const FString Err = FString::Printf(
-            TEXT("Chatterbox variant '%s' is not staged at %s. Run ")
-            TEXT("Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1 ")
-            TEXT("(or wait for the auto-download flow — landing in Commit 4)."),
-            *VariantStr, *Dir);
-        UE_LOG(LogInoAgents, Warning, TEXT("%s"), *Err);
-        OnLoaded.ExecuteIfBound(false, Err);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox LoadModelsAsync: files present, skipping download ")
+               TEXT("(variant=%s, dir=%s)"),
+               *VariantStr, *Dir);
+        DispatchLoadWorker(VariantEnum, Dir);
         return;
     }
 
-    // -------- Dispatch to ThreadPool --------
-    //
+    // -------- Download path --------
+    // Files are missing. Look up the model entry for its HF repo URL
+    // + revision and kick off the sequential HEAD-probe + GET-download
+    // state machine. All subsequent state transitions happen via HTTP
+    // callbacks on the game thread; LoadModelsAsync returns here.
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox LoadModelsAsync: files missing — starting download ")
+           TEXT("(variant=%s, dir=%s)"),
+           *VariantStr, *Dir);
+
+    StartDownload();
+}
+
+void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
+    EInoChatterboxVariant Variant, const FString& Dir)
+{
+    check(IsInGameThread());
+    check(bLoadInFlight);
+
     // Loading the 4 ORT sessions + parsing tokenizer.json takes 1–5 s
     // on first run (XNNPACK cache generation) and ~1 s on warm runs.
     // We never block the game thread for this.
@@ -137,17 +167,17 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     // the delegate struct). WeakThis guards the final hop-back so we
     // no-op cleanly if the subsystem is torn down mid-load.
 
-    bLoadInFlight = true;
-
     TWeakObjectPtr<UInoChatterboxTtsSubsystem> WeakThis(this);
-    const double TStart = FPlatformTime::Seconds();
+    const FString                              VariantStr = ChatterboxVariantToString(Variant);
+    const FOnInoChatterboxModelsLoaded         OnLoaded   = PendingOnLoaded;
+    const double                               TStart     = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox LoadModelsAsync: dispatching (variant=%s, dir=%s)"),
+           TEXT("Chatterbox DispatchLoadWorker: dispatching (variant=%s, dir=%s)"),
            *VariantStr, *Dir);
 
     Async(EAsyncExecution::ThreadPool,
-          [VariantEnum, VariantStr, Dir, WeakThis, OnLoaded, TStart]()
+          [Variant, VariantStr, Dir, WeakThis, OnLoaded, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -185,7 +215,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
         // the lambda is `mutable` so we can then MoveTemp them again
         // into the subsystem's members.
         AsyncTask(ENamedThreads::GameThread,
-            [WeakThis, OnLoaded, ElapsedMs, VariantEnum,
+            [WeakThis, OnLoaded, ElapsedMs, Variant,
              LocalError = MoveTemp(LocalError),
              LocalTokenizer = MoveTemp(LocalTokenizer),
              LocalModels = MoveTemp(LocalModels)]() mutable
@@ -197,7 +227,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
             if (!WeakThis.IsValid())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox LoadModelsAsync completion: subsystem is gone; ")
+                       TEXT("Chatterbox DispatchLoadWorker completion: subsystem is gone; ")
                        TEXT("dropping result"));
                 return;
             }
@@ -213,7 +243,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
             {
                 Subsys->bPendingUnload = false;
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("Chatterbox LoadModelsAsync: result dropped after %.1f ms ")
+                       TEXT("Chatterbox DispatchLoadWorker: result dropped after %.1f ms ")
                        TEXT("because UnloadModels was called during load"),
                        ElapsedMs);
                 OnLoaded.ExecuteIfBound(
@@ -226,7 +256,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
             if (!bSuccess)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("Chatterbox LoadModelsAsync: FAILED after %.1f ms: %s"),
+                       TEXT("Chatterbox DispatchLoadWorker: FAILED after %.1f ms: %s"),
                        ElapsedMs, *LocalError);
                 OnLoaded.ExecuteIfBound(false, LocalError);
                 return;
@@ -238,7 +268,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
             // racing us in).
             Subsys->Tokenizer     = MoveTemp(LocalTokenizer);
             Subsys->Models        = MoveTemp(LocalModels);
-            Subsys->LoadedVariant = VariantEnum;
+            Subsys->LoadedVariant = Variant;
 
             // Spin up the synthesis worker now that its borrowed refs
             // (Models + Tokenizer) are stable. The worker's destructor
@@ -248,8 +278,8 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
                 *Subsys->Models, *Subsys->Tokenizer);
 
             UE_LOG(LogInoAgents, Log,
-                   TEXT("Chatterbox LoadModelsAsync: SUCCESS variant=%s in %.1f ms"),
-                   *ChatterboxVariantToString(VariantEnum), ElapsedMs);
+                   TEXT("Chatterbox DispatchLoadWorker: SUCCESS variant=%s in %.1f ms"),
+                   *ChatterboxVariantToString(Variant), ElapsedMs);
             OnLoaded.ExecuteIfBound(true, FString());
         });
     });
@@ -265,14 +295,51 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
     // so by the time Worker.Reset() returns the worker thread is
     // gone and nobody is holding references into Models/Tokenizer.
 
-    if (bLoadInFlight)
+    // -------- Cancel in-flight download --------
+    //
+    // If a download is in progress, we have two sub-cases:
+    //   (a) Actively probing/downloading (DownloadRequest valid) — cancel
+    //       the HTTP request; its completion callback won't fire (or will
+    //       see bSucceeded=false which CleanupDownload handles).
+    //   (b) In between HTTP calls (advancing cursor) — nothing to cancel.
+    //
+    // Either way, we clean up the queue state, delete any dangling
+    // .partial, and fire PendingOnLoaded with a cancellation error so
+    // the Blueprint caller's loading-screen UI unwinds.
+    const bool bWasDownloading = DownloadQueue.Num() > 0;
+    if (bWasDownloading)
     {
-        // A load is in flight. We cannot cancel the ThreadPool worker
-        // (tokenizer / ORT session creation is synchronous), but we
-        // CAN tell its game-thread hop-back to drop the result so the
-        // caller actually ends up unloaded after this returns. Without
-        // this flag, the hop-back would blindly assign into
-        // Models/Tokenizer seconds later, silently undoing the unload.
+        UE_LOG(LogInoAgents, Log,
+               TEXT("UnloadModels called during download — cancelling download ")
+               TEXT("at cursor %d of %d"),
+               DownloadCursor, DownloadQueue.Num());
+
+        if (DownloadRequest.IsValid())
+        {
+            DownloadRequest->CancelRequest();
+            DownloadRequest.Reset();
+        }
+
+        const FOnInoChatterboxModelsLoaded OnLoadedCopy = PendingOnLoaded;
+        CleanupDownload();
+        bLoadInFlight  = false;
+        bPendingUnload = false;
+        OnLoadedCopy.ExecuteIfBound(
+            false,
+            TEXT("Chatterbox download cancelled (UnloadModels)"));
+        // NOTE: no early return — continue on to the Models / Tokenizer
+        // teardown below, even though neither is loaded during download,
+        // so the function's behaviour reads uniformly.
+    }
+    else if (bLoadInFlight)
+    {
+        // A post-download ThreadPool load is in flight. We cannot
+        // cancel the ThreadPool worker (tokenizer / ORT session
+        // creation is synchronous), but we CAN tell its game-thread
+        // hop-back to drop the result so the caller actually ends up
+        // unloaded after this returns. Without this flag, the hop-back
+        // would blindly assign into Models/Tokenizer seconds later,
+        // silently undoing the unload.
         UE_LOG(LogInoAgents, Log,
                TEXT("UnloadModels called during in-flight load — the load's ")
                TEXT("result will be dropped when it completes"));
@@ -489,4 +556,515 @@ void UInoChatterboxTtsSubsystem::CancelSynthesis()
     }
     // No worker = nothing to cancel (either never loaded or already
     // unloaded). Silent no-op — matches the doc on the header.
+}
+
+// ============================================================================
+// Auto-download flow
+//
+// High-level flow:
+//
+//   LoadModelsAsync (files missing)
+//     └─ StartDownload
+//         ├─ build DownloadQueue from the settings entry
+//         └─ StartHeadProbe              [sequential HEADs]
+//             └─ HandleHeadComplete → advance DownloadCursor
+//                 └─ when cursor hits end, switch to download phase:
+//                     └─ StartNextFileDownload  [sequential GETs]
+//                         └─ HandleDownloadComplete → write file,
+//                             rename .partial → final, advance cursor
+//                             └─ when cursor hits end:
+//                                 FinishDownloadSuccess → DispatchLoadWorker
+//
+// The HEAD phase exists so OnDownloadProgress can report aggregate
+// Percent across the whole variant (11 files), not just per-file. If
+// any HEAD fails to produce Content-Length (HF sometimes strips it
+// across the CDN redirect), DownloadAggregateTotal stays -1 and we
+// report BytesReceived-only.
+// ============================================================================
+
+namespace
+{
+    /** Build the URL + target path + required-ness for every file the
+     *  subsystem needs to fetch for a given variant. Mirrors the file
+     *  list in Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1
+     *  exactly so dev-time and runtime populate identical directories. */
+    TArray<UInoChatterboxTtsSubsystem::FDownloadFile> BuildDownloadQueue(
+        const FInoChatterboxModelEntry& Entry,
+        EInoChatterboxVariant           Variant,
+        const FString&                  TargetDir)
+    {
+        using FFile = UInoChatterboxTtsSubsystem::FDownloadFile;
+
+        // Trim any trailing slash on the repo URL so the composed URLs
+        // don't end up with a double slash (HF tolerates it but it's
+        // ugly in logs).
+        FString RepoUrl = Entry.HuggingFaceRepoUrl;
+        while (RepoUrl.EndsWith(TEXT("/"))) { RepoUrl.LeftChopInline(1); }
+
+        const FString Rev      = Entry.Revision.IsEmpty() ? TEXT("main") : Entry.Revision;
+        const FString Base     = FString::Printf(TEXT("%s/resolve/%s"), *RepoUrl, *Rev);
+        const FString Variant2 = ChatterboxVariantToString(Variant);
+
+        TArray<FFile> Queue;
+
+        // The four ONNX graph components. Each has a paired .onnx_data
+        // companion that MAY be present (spill-over weights for >2 GB
+        // variants) or may 404 (tiny variants inline weights). We queue
+        // both unconditionally and tolerate 404 on the _data side via
+        // bRequired = false.
+        static const TCHAR* const Components[] = {
+            TEXT("speech_encoder"),
+            TEXT("embed_tokens"),
+            TEXT("language_model"),
+            TEXT("conditional_decoder"),
+        };
+        for (const TCHAR* Comp : Components)
+        {
+            const FString OnnxName = FString::Printf(TEXT("%s_%s.onnx"), Comp, *Variant2);
+            Queue.Add(FFile{
+                /*Url*/        FString::Printf(TEXT("%s/onnx/%s"), *Base, *OnnxName),
+                /*TargetPath*/ FPaths::Combine(TargetDir, OnnxName),
+                /*bRequired*/  true,
+            });
+
+            const FString DataName = FString::Printf(TEXT("%s_%s.onnx_data"), Comp, *Variant2);
+            Queue.Add(FFile{
+                /*Url*/        FString::Printf(TEXT("%s/onnx/%s"), *Base, *DataName),
+                /*TargetPath*/ FPaths::Combine(TargetDir, DataName),
+                /*bRequired*/  false,   // 404 legal for variants that inline weights
+            });
+        }
+
+        // Three repo-root config files. tokenizer.json is required by
+        // FInoChatterboxTokenizer::LoadFromJson; the other two aren't
+        // consumed at runtime by our pipeline but they're tiny, we
+        // download them for self-containment so a later tool has
+        // everything it needs.
+        static const TCHAR* const ConfigFiles[] = {
+            TEXT("tokenizer.json"),
+            TEXT("config.json"),
+            TEXT("generation_config.json"),
+        };
+        for (const TCHAR* Cfg : ConfigFiles)
+        {
+            Queue.Add(FFile{
+                /*Url*/        FString::Printf(TEXT("%s/%s"), *Base, Cfg),
+                /*TargetPath*/ FPaths::Combine(TargetDir, Cfg),
+                /*bRequired*/  true,
+            });
+        }
+
+        return Queue;
+    }
+}   // anonymous namespace
+
+void UInoChatterboxTtsSubsystem::StartDownload()
+{
+    check(IsInGameThread());
+    check(bLoadInFlight);
+
+    // Look up the settings entry so we have a repo URL + revision to
+    // compose per-file URLs from. FindChatterboxModel matches by
+    // variant (unlike LiteRT-LM's match-by-filename), so multiple
+    // entries for the same variant aren't a thing — the first match
+    // wins and the user's expected to not double up.
+    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const FInoChatterboxModelEntry* Entry = Settings
+        ? Settings->FindChatterboxModel(PendingConfig.Variant)
+        : nullptr;
+    if (Entry == nullptr)
+    {
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox download: no Project Settings entry for variant '%s'. ")
+            TEXT("Add one under Project Settings → Plugins → InoAgents → Chatterbox → Models."),
+            *ChatterboxVariantToString(PendingConfig.Variant)));
+        return;
+    }
+
+    const FString TargetDir = ChatterboxResolveVariantDir(PendingConfig.Variant);
+
+    // Ensure the target directory exists. FFileHelper won't create
+    // intermediate dirs on its own.
+    IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/ true);
+
+    DownloadQueue   = BuildDownloadQueue(*Entry, PendingConfig.Variant, TargetDir);
+    DownloadCursor  = 0;
+    bDownloadProbing = true;
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox StartDownload: variant=%s, %d files (repo=%s, rev=%s)"),
+           *ChatterboxVariantToString(PendingConfig.Variant),
+           DownloadQueue.Num(),
+           *Entry->HuggingFaceRepoUrl, *Entry->Revision);
+
+    StartHeadProbe();
+}
+
+void UInoChatterboxTtsSubsystem::StartHeadProbe()
+{
+    check(IsInGameThread());
+
+    // End of HEAD phase → switch to download phase.
+    if (DownloadCursor >= DownloadQueue.Num())
+    {
+        // Compute the aggregate total by summing every known
+        // ExpectedBytes. If any file had an unknown size, the sum is
+        // still correct for what we know — but we flag it by leaving
+        // the running total accessible via BroadcastDownloadProgress,
+        // which reads the queue directly each time.
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox HEAD phase complete — %d files probed"),
+               DownloadQueue.Num());
+
+        bDownloadProbing = false;
+        DownloadCursor   = 0;
+        StartNextFileDownload();
+        return;
+    }
+
+    const FDownloadFile& File = DownloadQueue[DownloadCursor];
+
+    DownloadRequest = FHttpModule::Get().CreateRequest();
+    DownloadRequest->SetURL(File.Url);
+    DownloadRequest->SetVerb(TEXT("HEAD"));
+    DownloadRequest->OnProcessRequestComplete().BindUObject(
+        this, &UInoChatterboxTtsSubsystem::HandleHeadComplete);
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox HEAD %d/%d: %s"),
+           DownloadCursor + 1, DownloadQueue.Num(), *File.Url);
+
+    DownloadRequest->ProcessRequest();
+}
+
+void UInoChatterboxTtsSubsystem::HandleHeadComplete(
+    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
+{
+    check(IsInGameThread());
+    DownloadRequest.Reset();
+
+    // If the download state was torn down between dispatch and this
+    // callback (UnloadModels), DownloadQueue is empty and the cursor
+    // is meaningless — bail silently; PendingOnLoaded has already been
+    // fired by UnloadModels.
+    if (DownloadQueue.Num() == 0 || DownloadCursor >= DownloadQueue.Num())
+    {
+        return;
+    }
+
+    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
+
+    if (bSucceeded && Response.IsValid() && (Code == 200 || (Code >= 200 && Code < 400)))
+    {
+        // Try to read Content-Length. HuggingFace's 302 redirect sometimes
+        // strips it — treat missing as "unknown", not an error.
+        const FString Len = Response->GetHeader(TEXT("Content-Length"));
+        if (!Len.IsEmpty())
+        {
+            const int64 Parsed = FCString::Atoi64(*Len);
+            if (Parsed > 0)
+            {
+                File.ExpectedBytes = Parsed;
+            }
+        }
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox HEAD %d/%d: ok, ExpectedBytes=%lld"),
+               DownloadCursor + 1, DownloadQueue.Num(), File.ExpectedBytes);
+    }
+    else if (bSucceeded && Code == 404 && !File.bRequired)
+    {
+        // Optional file genuinely not on the server (variant inlines
+        // weights). Mark as done so the download phase skips it.
+        File.bDone = true;
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox HEAD %d/%d: 404 on optional file %s — skipping"),
+               DownloadCursor + 1, DownloadQueue.Num(), *File.TargetPath);
+    }
+    else if (bSucceeded && Code == 404 && File.bRequired)
+    {
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox download: required file 404 on HEAD: %s"),
+            *File.Url));
+        return;
+    }
+    else
+    {
+        // HEAD failed (network error, 5xx, etc.). Don't treat this as
+        // fatal — HF's HEAD flakes sometimes. Fall through with
+        // ExpectedBytes=-1; the GET will either succeed (and we report
+        // progress in bytes-only mode) or fail conclusively.
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox HEAD %d/%d: non-fatal probe failure (code=%d); ")
+               TEXT("continuing with unknown total size"),
+               DownloadCursor + 1, DownloadQueue.Num(), Code);
+    }
+
+    ++DownloadCursor;
+    StartHeadProbe();
+}
+
+void UInoChatterboxTtsSubsystem::StartNextFileDownload()
+{
+    check(IsInGameThread());
+
+    // Skip already-done entries (optional 404s marked during HEAD).
+    while (DownloadCursor < DownloadQueue.Num()
+           && DownloadQueue[DownloadCursor].bDone)
+    {
+        ++DownloadCursor;
+    }
+
+    if (DownloadCursor >= DownloadQueue.Num())
+    {
+        FinishDownloadSuccess();
+        return;
+    }
+
+    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    File.BytesWritten = 0;
+
+    // Open .partial for writing. If a prior aborted run left one
+    // behind, OpenWrite(..., bAppend=false) truncates it — correct
+    // behaviour.
+    const FString PartialPath = File.TargetPath + TEXT(".partial");
+    if (DownloadFileHandle != nullptr)
+    {
+        // Defensive — a previous file's handle should have been closed
+        // in the completion handler, but never hurts to ensure.
+        delete DownloadFileHandle;
+        DownloadFileHandle = nullptr;
+    }
+    DownloadFileHandle = FPlatformFileManager::Get().GetPlatformFile().OpenWrite(*PartialPath);
+    if (DownloadFileHandle == nullptr)
+    {
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox download: failed to open %s for writing"),
+            *PartialPath));
+        return;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox GET %d/%d: %s (%lld bytes expected)"),
+           DownloadCursor + 1, DownloadQueue.Num(),
+           *File.Url, File.ExpectedBytes);
+
+    DownloadRequest = FHttpModule::Get().CreateRequest();
+    DownloadRequest->SetURL(File.Url);
+    DownloadRequest->SetVerb(TEXT("GET"));
+    DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
+
+    // OnRequestProgress fires with (BytesSent, BytesReceived) during
+    // the download — use it to fire OnDownloadProgress with smooth
+    // per-file updates.
+    DownloadRequest->OnRequestProgress().BindUObject(
+        this, &UInoChatterboxTtsSubsystem::HandleDownloadProgress);
+    DownloadRequest->OnProcessRequestComplete().BindUObject(
+        this, &UInoChatterboxTtsSubsystem::HandleDownloadComplete);
+
+    DownloadRequest->ProcessRequest();
+}
+
+void UInoChatterboxTtsSubsystem::HandleDownloadProgress(
+    FHttpRequestPtr /*Request*/, int32 /*BytesSent*/, int32 BytesReceived)
+{
+    check(IsInGameThread());
+    if (DownloadQueue.Num() == 0 || DownloadCursor >= DownloadQueue.Num())
+    {
+        return;
+    }
+
+    DownloadQueue[DownloadCursor].BytesWritten = BytesReceived;
+    BroadcastDownloadProgress();
+}
+
+void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
+    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
+{
+    check(IsInGameThread());
+    DownloadRequest.Reset();
+
+    if (DownloadQueue.Num() == 0 || DownloadCursor >= DownloadQueue.Num())
+    {
+        return;   // teardown during request
+    }
+
+    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
+
+    // -------- Handle 404 on optional files --------
+    if (bSucceeded && Code == 404 && !File.bRequired)
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox GET %d/%d: 404 on optional %s — skipping"),
+               DownloadCursor + 1, DownloadQueue.Num(), *File.TargetPath);
+        if (DownloadFileHandle)
+        {
+            delete DownloadFileHandle;
+            DownloadFileHandle = nullptr;
+            // Delete the empty .partial we opened speculatively.
+            IFileManager::Get().Delete(*(File.TargetPath + TEXT(".partial")));
+        }
+        File.bDone = true;
+        ++DownloadCursor;
+        StartNextFileDownload();
+        return;
+    }
+
+    // -------- Hard errors --------
+    if (!bSucceeded || !Response.IsValid() || Code != 200)
+    {
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox GET %d/%d failed: %s (HTTP %d)"),
+            DownloadCursor + 1, DownloadQueue.Num(), *File.Url, Code));
+        return;
+    }
+
+    // -------- Success: write + atomic rename --------
+    const TArray<uint8>& Content = Response->GetContent();
+    if (DownloadFileHandle == nullptr)
+    {
+        FinishDownloadError(TEXT("Chatterbox GET: file handle closed before write"));
+        return;
+    }
+    if (Content.Num() > 0)
+    {
+        DownloadFileHandle->Write(Content.GetData(), Content.Num());
+    }
+    delete DownloadFileHandle;
+    DownloadFileHandle = nullptr;
+
+    // Rename .partial → final. Move with Replace=true so a stale final
+    // file from a prior corrupt download gets replaced cleanly.
+    const FString PartialPath = File.TargetPath + TEXT(".partial");
+    if (!IFileManager::Get().Move(
+            *File.TargetPath, *PartialPath, /*Replace=*/ true))
+    {
+        IFileManager::Get().Delete(*PartialPath);
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox GET: failed to rename %s → %s"),
+            *PartialPath, *File.TargetPath));
+        return;
+    }
+
+    File.BytesWritten = Content.Num();
+    File.bDone        = true;
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox GET %d/%d: OK, %lld bytes → %s"),
+           DownloadCursor + 1, DownloadQueue.Num(),
+           File.BytesWritten, *File.TargetPath);
+
+    // Fire a final progress update to clock this file's contribution
+    // into the aggregate before we advance the cursor.
+    BroadcastDownloadProgress();
+
+    ++DownloadCursor;
+    StartNextFileDownload();
+}
+
+void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
+{
+    // Aggregate known totals across the queue. Any unknown
+    // ExpectedBytes leaves the total at -1 and the Percent at 0.
+    int64 AggregateReceived = 0;
+    int64 AggregateTotal    = 0;
+    bool  bAnyUnknown       = false;
+    for (const FDownloadFile& F : DownloadQueue)
+    {
+        if (F.bDone)
+        {
+            // Finished file's BytesWritten is authoritative (we just
+            // wrote it from the Content array).
+            AggregateReceived += F.BytesWritten;
+            AggregateTotal    += (F.ExpectedBytes > 0 ? F.ExpectedBytes : F.BytesWritten);
+        }
+        else if (F.bDone == false && F.ExpectedBytes > 0)
+        {
+            AggregateTotal += F.ExpectedBytes;
+            // If this is the current file, count its in-progress bytes.
+            if (&F == &DownloadQueue[DownloadCursor])
+            {
+                AggregateReceived += F.BytesWritten;
+            }
+        }
+        else
+        {
+            bAnyUnknown = true;
+        }
+    }
+
+    const float Percent =
+        (!bAnyUnknown && AggregateTotal > 0)
+        ? FMath::Clamp(
+              (float)((double)AggregateReceived * 100.0 / (double)AggregateTotal),
+              0.0f, 100.0f)
+        : 0.0f;
+    const int64 TotalReport = bAnyUnknown ? -1 : AggregateTotal;
+
+    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalReport);
+}
+
+void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
+{
+    check(IsInGameThread());
+
+    const int32 NumFiles = DownloadQueue.Num();
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox download complete — %d files staged for variant=%s"),
+           NumFiles, *ChatterboxVariantToString(PendingConfig.Variant));
+
+    const EInoChatterboxVariant VariantEnum = PendingConfig.Variant;
+    const FString               Dir         = ChatterboxResolveVariantDir(VariantEnum);
+
+    CleanupDownload();
+
+    // Chain into the load flow. bLoadInFlight stays true across the
+    // transition — DispatchLoadWorker's hop-back clears it when the
+    // ThreadPool worker finishes.
+    DispatchLoadWorker(VariantEnum, Dir);
+}
+
+void UInoChatterboxTtsSubsystem::FinishDownloadError(const FString& Err)
+{
+    check(IsInGameThread());
+    UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+
+    // Delete any dangling .partial for the file we were working on so
+    // next LoadModelsAsync doesn't pick up a stale half-file. Already-
+    // finished files stay on disk — they're legitimate cache entries.
+    if (DownloadQueue.IsValidIndex(DownloadCursor))
+    {
+        IFileManager::Get().Delete(
+            *(DownloadQueue[DownloadCursor].TargetPath + TEXT(".partial")));
+    }
+
+    const FOnInoChatterboxModelsLoaded OnLoadedCopy = PendingOnLoaded;
+    CleanupDownload();
+    bLoadInFlight = false;
+    OnLoadedCopy.ExecuteIfBound(false, Err);
+}
+
+void UInoChatterboxTtsSubsystem::CleanupDownload()
+{
+    // Close any open file handle. The .partial file itself is left on
+    // disk intentionally — FinishDownloadError deletes it, but success
+    // paths hand it to the rename step before calling CleanupDownload.
+    if (DownloadFileHandle != nullptr)
+    {
+        delete DownloadFileHandle;
+        DownloadFileHandle = nullptr;
+    }
+
+    // Reset the queue state. DownloadRequest is already Reset in the
+    // HTTP completion handlers; defensive Reset here too in case we
+    // arrive via an error path that didn't touch it.
+    DownloadRequest.Reset();
+    DownloadQueue.Reset();
+    DownloadCursor   = 0;
+    bDownloadProbing = false;
+    // NOTE: PendingConfig + PendingOnLoaded are NOT cleared here —
+    // FinishDownloadSuccess needs them to chain into DispatchLoadWorker,
+    // and FinishDownloadError already read PendingOnLoaded into a local
+    // before calling this. They're effectively one-shot values that get
+    // overwritten on the next LoadModelsAsync.
 }
