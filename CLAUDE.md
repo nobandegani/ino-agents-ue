@@ -327,6 +327,149 @@ Two console commands under `Source/InoAgents/Private/SmokeTests/InoOnnxTest.cpp`
 | `Ino.Onnx.ProvidersTest` | none | Calls `OrtApi::GetAvailableProviders` via the cached API vtable and logs every entry. Doubles the module-startup check; useful after Live Coding or as a first diagnostic. |
 | `Ino.Onnx.SessionFromFileTest <abs-path-to-model.onnx>` | 1 | Loads the ONNX model, calls `FInoOnnxSession::LogMetadata()` (dumps I/O shapes + dtypes + active providers). If all inputs have concrete shapes, allocates zero-filled inputs and runs one forward pass; reports load time + run time + output shapes. Exercises the full Session + Tensor API end-to-end with no per-model code. |
 
+## Chatterbox Turbo TTS (first planned ONNX consumer)
+
+Chatterbox Turbo is the first real-world consumer of the ONNX Runtime layer. It's Resemble AI's 350M-parameter English TTS model with voice cloning, paralinguistic tags (`[laugh]`, `[cough]`, `[chuckle]`), and a distilled single-step decoder. Runs on top of the same `FInoOnnxSession` / `FInoOnnxTensor` primitives described above — no ONNX-layer changes required.
+
+### Canonical source (trust this first)
+
+- **Official ONNX weights**: [`ResembleAI/chatterbox-turbo-ONNX`](https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX) — exported by Xenova (HF Staff), published under MIT. Repository also ships `tokenizer.json` + `tokenizer_config.json` + `config.json` + `generation_config.json` + `preprocessor_config.json` at the root.
+- **Official reference inference script**: the "Usage → Chatterbox-Turbo" block of the model card's README. This is Resemble AI's canonical Python loop — our C++ port is a direct translation of it.
+- **Community C++ port** (useful cross-reference): [`DDATT/Chatterbox-turbo-cpp`](https://github.com/DDATT/Chatterbox-turbo-cpp) — a working C++ implementation using ONNX Runtime. Skips `speech_encoder` at runtime and loads precomputed `.bin` files for the speaker conditioning; includes a Claude-assisted BPE tokenizer port.
+- **Xenova community fork** (slightly different I/O shape): [`onnx-community/chatterbox-ONNX`](https://huggingface.co/onnx-community/chatterbox-ONNX) and [`onnx-community/chatterbox-multilingual-ONNX`](https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX). These expose `exaggeration` + `position_ids` inputs on `embed_tokens`; the official Turbo ONNX does **not**. Do not cross-mix the two — their `embed_tokens` signatures are incompatible.
+- **Resemble source repo**: [`resemble-ai/chatterbox`](https://github.com/resemble-ai/chatterbox) (PyTorch training / research code, Apache 2.0).
+- **Deployment anecdotes** (iPhone/Mac offline run): [HF Discussion #42](https://huggingface.co/ResembleAI/chatterbox/discussions/42) — reports ~3.2 GB peak RAM for fp32 and flags the conditional_decoder's attention ops as the bottleneck.
+- **Watermarker**: [`resemble-ai/perth`](https://github.com/resemble-ai/perth) (PerTh implicit watermarking, used optionally post-generation).
+
+### The four ONNX graphs
+
+All four live under the `onnx/` subfolder of the HF repo. Each graph has a paired `{filename}_data` weights file (ONNX external-data format for models > 2 GB). Quantization variants are suffixed, using the naming convention the official `download_model()` helper uses:
+
+| `dtype` arg | Graph filename | Notes |
+|---|---|---|
+| `fp32` (default) | `<name>.onnx` | No suffix. Matches the weights bundled with the original Chatterbox Turbo checkpoint. |
+| `fp16` | `<name>_fp16.onnx` | Half-precision weights + activations. Good CPU speed / RAM tradeoff. |
+| `q8` | `<name>_quantized.onnx` | **NOTE the unusual `_quantized` suffix, not `_q8`.** INT8 quantization. |
+| `q4` | `<name>_q4.onnx` | 4-bit weights. Smallest footprint. |
+| `q4f16` | `<name>_q4f16.onnx` | 4-bit weights + fp16 activations. |
+
+The four `<name>` values:
+
+| Name | Purpose | Runs |
+|---|---|---|
+| `speech_encoder` | Reference-audio → speaker conditioning tensors | Once per voice (can be cached / precomputed). |
+| `embed_tokens` | Text token ids → hidden embeddings | Once on the full prompt, then once per generated token. |
+| `language_model` | Llama-3-style 30-layer autoregressive sampler over speech tokens (KV-cached) | Once per generated speech token, up to `max_new_tokens`. |
+| `conditional_decoder` | Speech tokens + speaker conditioning → 24 kHz waveform | Once at the end (single-step in Turbo — distilled from the original 10-step). |
+
+### Pipeline constants (hardcoded by the model)
+
+```cpp
+constexpr int32   SAMPLE_RATE           = 24000;  // 24 kHz float32 waveform output
+constexpr int64_t START_SPEECH_TOKEN    = 6561;
+constexpr int64_t STOP_SPEECH_TOKEN     = 6562;
+constexpr int64_t SILENCE_TOKEN         = 4299;   // 3× appended before decoder to pad end
+constexpr int32   NUM_KV_HEADS          = 16;     // language_model
+constexpr int32   HEAD_DIM              = 64;     // language_model
+constexpr int32   NUM_HIDDEN_LAYERS     = 30;     // language_model (inferred from onnx-community fork; discover dynamically from session input names on the official graph)
+constexpr float   REPETITION_PENALTY    = 1.2f;   // default from the reference script
+constexpr int32   DEFAULT_MAX_NEW_TOKENS = 1024;  // reference script default
+```
+
+### The full pipeline (ports the model-card reference loop)
+
+```
+                           ┌─────────────────────────────────────────────────┐
+                           │ Inputs                                          │
+                           │   text            (string, may contain [laugh]) │
+                           │   reference_audio (WAV at 24 kHz mono float32)  │
+                           └────────────────────────┬────────────────────────┘
+                                                    │
+  1.  tokenizer.json → BPE.encode(text) → input_ids (int64[1, seq_len])
+                                                    │
+  2.  embed_tokens.run({"input_ids": input_ids}) → inputs_embeds (float32[1, seq_len, hidden])
+                                                    │
+  3.  speech_encoder.run({"audio_values": reference_audio[np.newaxis, :]}) →
+          cond_emb            (float32[1, cond_seq, hidden])
+          prompt_token        (int64[1, T_prompt])
+          speaker_embeddings  (float32[1, spk_dim])
+          speaker_features    (float32[1, feat_dim])
+                                                    │
+  4.  inputs_embeds = concat(cond_emb, inputs_embeds) along axis=1
+      attention_mask = ones([1, cond_seq + seq_len], int64)
+      position_ids   = arange(0, cond_seq + seq_len, int64)
+      past_key_values = { each zero tensor [1, 16, 0, 64] matching the model's input dtype }
+      generate_tokens = [[START_SPEECH_TOKEN]]
+                                                    │
+  5.  FOR i in 0..max_new_tokens:
+          logits, *present_key_values =
+              language_model.run({
+                  inputs_embeds, attention_mask, position_ids, **past_key_values,
+              })
+          logits = logits[:, -1, :]
+          logits = RepetitionPenalty(generate_tokens, logits, penalty=1.2)
+          next_token = argmax(logits, axis=-1, keepdims=True).astype(int64)
+          generate_tokens = concat(generate_tokens, next_token)
+          if next_token == STOP_SPEECH_TOKEN: break
+          inputs_embeds  = embed_tokens.run({"input_ids": next_token})     # 1 new token only
+          attention_mask = concat(attention_mask, ones([1, 1]))
+          position_ids   = position_ids[:, -1:] + 1
+          past_key_values = present_key_values    (update every layer's K,V in place)
+                                                    │
+  6.  speech_tokens = generate_tokens[:, 1:-1]                             # drop START & STOP
+      silence_tokens = full([1, 3], SILENCE_TOKEN, int64)                  # pad end
+      speech_tokens = concat(prompt_token, speech_tokens, silence_tokens)
+                                                    │
+  7.  wav = conditional_decoder.run({
+               speech_tokens, speaker_embeddings, speaker_features,
+           })[0].squeeze(axis=0)                                           # float32 @ 24 kHz
+                                                    │
+  8.  (optional) perth.PerthImplicitWatermarker().apply_watermark(wav, 24000)
+                                                    │
+                                                    ▼
+                                 PCM waveform, float32, 24 kHz mono
+```
+
+### Three subtleties worth calling out
+
+1. **KV-cache dtype discovery.** The official reference script iterates `language_model_session.get_inputs()` and picks `float16` vs `float32` per-input based on the ONNX tensor type, rather than assuming one globally. Our C++ port must do the same — otherwise fp16 quantization variants will fail at runtime with a dtype mismatch. `FInoOnnxSession::GetInputs()` / `GetInputMeta()` already expose the per-input dtype metadata we need.
+
+2. **`embed_tokens` on Turbo takes ONLY `input_ids`.** No `position_ids`, no `exaggeration`. Those inputs exist on `onnx-community/chatterbox-ONNX` (the original non-Turbo model) but were removed during Turbo export. If you copy code from the community fork expecting those inputs, the Turbo graph will reject the call at Run() time with a missing-input error.
+
+3. **Silence padding order matters.** The decoder wants `concat(prompt_token, generated_speech_tokens, silence×3)`. `prompt_token` comes from the speech encoder (first N tokens of the reference voice) and seeds the output before the generated content — it's NOT the same as the text `input_ids`. Swapping or omitting it produces audio that starts with a click or skips the voice-cloning continuity.
+
+### Sizing / deployment realities
+
+- **Total repo size** across all 5 quantization levels: 7.39 GB. A single-dtype deployment bundle is roughly 1.4 GB (fp32) down to ~350 MB (q4) per the HF file listing plus tokenizer/config.
+- **RAM**: ~3.2 GB peak on iPhone/Mac at fp32 per HF Discussion #42. Gemma 4 E2B (~2.58 GB) + Chatterbox fp32 = ~5.8 GB resident, leaving ~2 GB for UE + OS on an 8 GB Android. Plan to ship **q4 or q4f16** on Android; fp16 or fp32 is fine on Win64.
+- **Bottleneck**: the `conditional_decoder`'s attention layers dominate wall time. Turbo's single-step decoder is already the big win — no further model-side optimization available to us.
+- **Streaming**: the reference loop is one-shot (full sentence synthesized before any audio is emitted). First-audio latency is roughly `max_new_tokens × per_token_ms + decoder_ms`. For conversational UX, plan to run the decoder incrementally on chunks of generated speech tokens so audio starts playing before the LM finishes — doable because Turbo's decoder is single-step and cheap per-chunk, but adds orchestration work.
+
+### Where the integration will land in the plugin
+
+Target layout (follows the pattern established by `InoAgentsLibrary` / `InoOnnxRuntime` / `Source/InoAgents/LiteRtLm`):
+
+```
+Plugins/InoAgents/
+├── ChatterboxModels/                              ← setup-time model downloader
+│   ├── CHATTERBOX_VERSION                         ← pins the HF revision hash
+│   ├── CHATTERBOX_DTYPE                           ← q4 on Android, fp16 on Win64 (developer-overridable)
+│   ├── scripts/download-chatterbox-turbo.ps1      ← pulls the 4 .onnx + _data files + tokenizer.json
+│   └── .cache/                                    ← gitignored; downloaded artifacts
+│
+└── Source/InoAgents/
+    ├── Public/Chatterbox/
+    │   ├── InoChatterboxTypes.h                   ← config struct (voice path, max_new_tokens, etc.)
+    │   └── InoChatterboxSubsystem.h               ← UInoChatterboxTtsSubsystem (UGameInstanceSubsystem)
+    └── Private/Chatterbox/
+        ├── InoBpeTokenizer.{h,cpp}                ← loads tokenizer.json, encodes FString → int64 tokens
+        ├── InoChatterboxPipeline.{h,cpp}          ← 4-session orchestrator, owns KV-cache state
+        ├── InoChatterboxSubsystem.cpp             ← Blueprint-facing glue, threads via AsyncTask
+        └── SmokeTests/InoChatterboxSynthTest.cpp  ← Ino.Chatterbox.SynthTest console command
+```
+
+None of this touches `Source/InoAgents/Public/Onnx/` or its Private siblings — the TTS layer is strictly a consumer of `FInoOnnxSession`. If you need to add model-agnostic ONNX capabilities (e.g. new dtype support, new provider), do it there first before the Chatterbox layer.
+
 ## Toolchain requirements (Windows host)
 
 A developer machine needs all of the following before `scripts/build-win64.ps1` or `scripts/build-android-arm64.ps1` can succeed. All Android builds use the Windows host as the cross-compilation host — we do not build LiteRT-LM on Android itself.
