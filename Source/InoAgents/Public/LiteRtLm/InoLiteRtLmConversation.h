@@ -48,6 +48,42 @@ enum class EInoLiteRtLmSentenceSplit : uint8
 ENUM_CLASS_FLAGS(EInoLiteRtLmSentenceSplit);
 
 /**
+ * Bitmask of delimiter pairs that get stripped from OnToken.CleanText and
+ * OnSentence.CleanText. OnToken.RawText and OnSentence.RawText are never
+ * affected — the raw surfaces always preserve the original characters so
+ * TTS or markup-aware consumers still see the tags.
+ *
+ * Asymmetric pairs (square / angle / curly / parens) are nest-aware: the
+ * filter tracks depth per pair, so "[outer [inner] tail]" collapses to ""
+ * correctly. Symmetric pairs (slash / pipe / hash) toggle an inside/outside
+ * bool on each occurrence — be aware that stray single occurrences of those
+ * characters in ordinary prose will unbalance the toggle (e.g. enabling
+ * ForwardSlashes and then encountering a URL like "http://example.com/path"
+ * would strip the segment between the first two '/'s).
+ *
+ * A tag-close also arms the "eat one whitespace" rule (same rule as
+ * sentence-split punctuation): the single space / newline immediately after
+ * a closed tag gets dropped, so "[hello] world" cleans to "world".
+ *
+ * Default: SquareBrackets | CurlyBraces (matches the original hard-coded
+ * behaviour from before this flag existed).
+ */
+UENUM(BlueprintType, meta = (Bitflags, UseEnumValuesAsMaskValuesInEditor = "true"))
+enum class EInoLiteRtLmTagStrip : uint8
+{
+    None             = 0      UMETA(Hidden),
+    SquareBrackets   = 0x01   UMETA(DisplayName = "Square brackets [ ... ]"),
+    AngleBrackets    = 0x02   UMETA(DisplayName = "Angle brackets < ... >"),
+    CurlyBraces      = 0x04   UMETA(DisplayName = "Curly braces { ... }"),
+    Parentheses      = 0x08   UMETA(DisplayName = "Parentheses ( ... )"),
+    ForwardSlashes   = 0x10   UMETA(DisplayName = "Forward slashes / ... /"),
+    Pipes            = 0x20   UMETA(DisplayName = "Pipes | ... |"),
+    Hashes           = 0x40   UMETA(DisplayName = "Hashes # ... #"),
+    // 0x80 reserved for the "|\" pair pending clarification of open/close chars.
+};
+ENUM_CLASS_FLAGS(EInoLiteRtLmTagStrip);
+
+/**
  * One stateful conversation with a LiteRT-LM model.
  *
  * Construction: via UInoLiteRtLmSubsystem::CreateConversation. Do NOT construct
@@ -392,6 +428,36 @@ public:
     int32 GetSentenceSplitFlags() const { return SentenceSplitFlags; }
 
     /**
+     * Bitmask of delimiter pairs that get stripped from CleanText surfaces.
+     * See EInoLiteRtLmTagStrip for the flag set.
+     *
+     * Default: SquareBrackets | CurlyBraces (matches the pre-flag hardcoded
+     * behavior — OnToken.CleanText / OnSentence.CleanText had [bracket] and
+     * {curly} tags stripped unconditionally).
+     *
+     * Changing mid-stream is allowed; the change takes effect on the NEXT
+     * character processed. Already-accumulated tag state (e.g. if we are
+     * currently inside a tag) is preserved so switching off a flag while
+     * inside a tag of that type still closes it cleanly.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
+              meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmTagStrip"))
+    int32 TagStripFlags =
+          static_cast<int32>(EInoLiteRtLmTagStrip::SquareBrackets)
+        | static_cast<int32>(EInoLiteRtLmTagStrip::CurlyBraces);
+
+    /** Replace the current tag-strip flags. Pass any combination of
+     *  EInoLiteRtLmTagStrip values OR'd into an int32. */
+    UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
+    void SetTagStripFlags(
+        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmTagStrip"))
+        int32 NewFlags);
+
+    /** Current tag-strip flags as an int32 bitmask. */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
+    int32 GetTagStripFlags() const { return TagStripFlags; }
+
+    /**
      * Diagnostic event: fires AFTER a tool has been executed and its
      * result has been fed back into the conversation. Broadcast on
      * the game thread with the tool name, the arguments JSON the
@@ -474,12 +540,21 @@ private:
     TMap<FString, FString> UserContextMap;
     FString BuildMergedContext() const;
 
-    int32 TokenTagDepth = 0;       // [bracket] depth
-    int32 TokenCurlyDepth = 0;     // {curly} depth
+    // Per-chunk cross-boundary tag state for FilterCleanToken. Matches the
+    // seven delimiter pairs exposed by EInoLiteRtLmTagStrip. Asymmetric pairs
+    // carry a depth so nesting works ("[outer [inner] tail]"); symmetric pairs
+    // carry a bool that toggles on each occurrence. All reset between sends.
+    uint16 TokenSquareDepth = 0;   // [ ... ]
+    uint16 TokenAngleDepth  = 0;   // < ... >
+    uint16 TokenCurlyDepth  = 0;   // { ... }
+    uint16 TokenParenDepth  = 0;   // ( ... )
+    bool   bTokenInsideSlash = false;  // / ... /
+    bool   bTokenInsidePipe  = false;  // | ... |
+    bool   bTokenInsideHash  = false;  // # ... #
 
     // When true, FilterCleanToken drops the very next character if — and
     // only if — it is a space or newline; then clears the flag. Armed after:
-    //   - closing a stripped [bracket] or {curly} tag,
+    //   - closing a stripped tag of any configured type,
     //   - emitting a configured sentence-split punctuation char (. , ? ! ; :),
     //   - dropping a '\n' when Newline sentence-split is enabled.
     // Persists across chunks so a delimiter and its trailing space can land

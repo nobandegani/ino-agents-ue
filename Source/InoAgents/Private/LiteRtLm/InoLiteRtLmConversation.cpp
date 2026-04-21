@@ -280,8 +280,13 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
 
     // Clear per-send state from a prior send.
     SentenceBuffer.Empty();
-    TokenTagDepth = 0;
-    TokenCurlyDepth = 0;
+    TokenSquareDepth       = 0;
+    TokenAngleDepth        = 0;
+    TokenCurlyDepth        = 0;
+    TokenParenDepth        = 0;
+    bTokenInsideSlash      = false;
+    bTokenInsidePipe       = false;
+    bTokenInsideHash       = false;
     bTokenEatOneWhitespace = false;
 
     // Record the user message in history (original text, not augmented).
@@ -489,119 +494,174 @@ void UInoLiteRtLmConversation::RecordAssistantMessage(const FString& Text)
 
 FString UInoLiteRtLmConversation::StripTags(const FString& Raw)
 {
-    // Strip both [bracketed] and {curly} tags from the text.
+    // One-shot sibling of FilterCleanToken for OnSentence.CleanText. Operates
+    // on a complete sentence (no chunk boundaries), so all state is local.
+    const EInoLiteRtLmTagStrip Flags = static_cast<EInoLiteRtLmTagStrip>(TagStripFlags);
+
+    const bool bSquare = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::SquareBrackets);
+    const bool bAngle  = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::AngleBrackets);
+    const bool bCurly  = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::CurlyBraces);
+    const bool bParen  = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::Parentheses);
+    const bool bSlash  = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::ForwardSlashes);
+    const bool bPipe   = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::Pipes);
+    const bool bHash   = EnumHasAnyFlags(Flags, EInoLiteRtLmTagStrip::Hashes);
+
     FString Clean;
     Clean.Reserve(Raw.Len());
-    int32 SquareDepth = 0;
-    int32 CurlyDepth = 0;
+
+    uint16 SquareDepth = 0, AngleDepth = 0, CurlyDepth = 0, ParenDepth = 0;
+    bool   bInSlash = false, bInPipe = false, bInHash = false;
+
+    auto InsideAny = [&]() -> bool
+    {
+        return SquareDepth > 0 || AngleDepth > 0 || CurlyDepth > 0 || ParenDepth > 0
+            || bInSlash || bInPipe || bInHash;
+    };
+
     for (const TCHAR Ch : Raw)
     {
-        if (Ch == TEXT('[')) { SquareDepth++; continue; }
-        if (Ch == TEXT(']') && SquareDepth > 0) { SquareDepth--; continue; }
-        if (Ch == TEXT('{')) { CurlyDepth++; continue; }
-        if (Ch == TEXT('}') && CurlyDepth > 0) { CurlyDepth--; continue; }
-        if (SquareDepth == 0 && CurlyDepth == 0)
+        // Asymmetric openers / closers.
+        if (bSquare && Ch == TEXT('['))                        { SquareDepth++; continue; }
+        if (bSquare && Ch == TEXT(']') && SquareDepth > 0)     { SquareDepth--; continue; }
+        if (bAngle  && Ch == TEXT('<'))                        { AngleDepth++;  continue; }
+        if (bAngle  && Ch == TEXT('>') && AngleDepth > 0)      { AngleDepth--;  continue; }
+        if (bCurly  && Ch == TEXT('{'))                        { CurlyDepth++;  continue; }
+        if (bCurly  && Ch == TEXT('}') && CurlyDepth > 0)      { CurlyDepth--;  continue; }
+        if (bParen  && Ch == TEXT('('))                        { ParenDepth++;  continue; }
+        if (bParen  && Ch == TEXT(')') && ParenDepth > 0)      { ParenDepth--;  continue; }
+
+        // Symmetric toggles (same char opens and closes).
+        if (bSlash  && Ch == TEXT('/')) { bInSlash = !bInSlash; continue; }
+        if (bPipe   && Ch == TEXT('|')) { bInPipe  = !bInPipe;  continue; }
+        if (bHash   && Ch == TEXT('#')) { bInHash  = !bInHash;  continue; }
+
+        // Inside any currently-open tag: skip content.
+        if (InsideAny())
         {
-            Clean.AppendChar(Ch);
+            continue;
         }
+
+        Clean.AppendChar(Ch);
     }
+
     return Clean.TrimStartAndEnd();
 }
 
 FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
 {
-    // Stateful per-character filter. Member state (TokenTagDepth,
-    // TokenCurlyDepth, bTokenEatOneWhitespace) persists across chunks so
-    // delimiters that straddle a chunk boundary still work end-to-end.
+    // Stateful per-character filter. Member state (the seven tag trackers
+    // and bTokenEatOneWhitespace) persists across chunks so delimiters that
+    // straddle a chunk boundary still close cleanly end-to-end.
     //
-    //   1. [bracketed] and {curly} stage-direction tags are stripped. Nesting
-    //      is tracked, so "[cheer" + "fully]" collapses to "" across chunks.
+    //   1. Stripped delimiter pairs are controlled by TagStripFlags:
+    //        - asymmetric pairs ([], <>, {}, ()) are nest-aware via depth
+    //          counters; identical types can nest ("[outer [inner] tail]")
+    //          and different types cross freely ("[<foo>]");
+    //        - symmetric pairs (//, ||, ##) toggle an inside/outside bool
+    //          on each occurrence (non-nesting by construction).
     //
-    //   2. After a "boundary" is removed, swallow AT MOST ONE trailing
-    //      whitespace character (space or newline) — just one. Keeps any
-    //      remaining whitespace intact. Boundaries that arm this behaviour:
-    //        - closing a [bracket] or {curly} stripped tag (depth returns
-    //          to 0),
-    //        - emitting a configured sentence-split punctuation char
-    //          ( .  ,  ?  !  ;  : ) — the split actually requires the punct
-    //          to be followed by whitespace, but arming on every punct
-    //          emission is harmless: if nothing whitespace follows, the flag
-    //          is cleared by the next non-whitespace char with no effect
-    //          ("3.14" stays "3.14"),
-    //        - dropping a '\n' when Newline sentence-split is enabled.
+    //   2. After any tag closes (depth → 0 or toggle → outside) AND nothing
+    //      else is still open, arm "eat one whitespace": the next char, if
+    //      it is space/newline/tab/CR, is dropped — just one, not a run.
+    //      Same flag is also armed by sentence-split punctuation emission
+    //      and by dropping a '\n' when Newline sentence-split is enabled.
     //
-    //   3. Everything else is emitted verbatim.
+    //   3. Anything else is emitted verbatim.
     //
-    // Example with Period sentence-split enabled:
+    // Example with TagStripFlags = SquareBrackets, Period sentence-split on:
     //     Raw:    "[hello]   test.  More"
     //     Clean:  "  test. More"
-    //              ^^         ^     — one WS eaten after ']' (3→2 spaces);
-    //                              one WS eaten after '.' (2→1 spaces).
+    //              ^^         ^     one WS eaten after ']' (3→2 spaces)
+    //                              one WS eaten after '.' (2→1 spaces)
     //
     // RawText in OnToken.Broadcast is always the untouched original chunk.
     FString Clean;
     Clean.Reserve(RawChunk.Len());
 
-    const EInoLiteRtLmSentenceSplit Flags =
+    const EInoLiteRtLmSentenceSplit SplitFlags =
         static_cast<EInoLiteRtLmSentenceSplit>(SentenceSplitFlags);
-    const bool bNewlineSplit = EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Newline);
+    const EInoLiteRtLmTagStrip TagFlags =
+        static_cast<EInoLiteRtLmTagStrip>(TagStripFlags);
 
-    auto IsConfiguredSplitPunct = [Flags](TCHAR C) -> bool
+    const bool bNewlineSplit = EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Newline);
+
+    const bool bSquare = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::SquareBrackets);
+    const bool bAngle  = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::AngleBrackets);
+    const bool bCurly  = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::CurlyBraces);
+    const bool bParen  = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::Parentheses);
+    const bool bSlash  = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::ForwardSlashes);
+    const bool bPipe   = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::Pipes);
+    const bool bHash   = EnumHasAnyFlags(TagFlags, EInoLiteRtLmTagStrip::Hashes);
+
+    auto InsideAnyTag = [&]() -> bool
+    {
+        return TokenSquareDepth > 0 || TokenAngleDepth > 0
+            || TokenCurlyDepth  > 0 || TokenParenDepth  > 0
+            || bTokenInsideSlash || bTokenInsidePipe || bTokenInsideHash;
+    };
+    auto OnTagClosed = [&]()
+    {
+        // Only arm eat-one once we've actually surfaced from all tags —
+        // nested closes inside other tags don't arm (there's still a wrapper).
+        if (!InsideAnyTag())
+        {
+            bTokenEatOneWhitespace = true;
+        }
+    };
+
+    auto IsConfiguredSplitPunct = [SplitFlags](TCHAR C) -> bool
     {
         switch (C)
         {
-            case TEXT('.'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Period);
-            case TEXT(','): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Comma);
-            case TEXT('?'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Question);
-            case TEXT('!'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Exclamation);
-            case TEXT(';'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Semicolon);
-            case TEXT(':'): return EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Colon);
+            case TEXT('.'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Period);
+            case TEXT(','): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Comma);
+            case TEXT('?'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Question);
+            case TEXT('!'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Exclamation);
+            case TEXT(';'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Semicolon);
+            case TEXT(':'): return EnumHasAnyFlags(SplitFlags, EInoLiteRtLmSentenceSplit::Colon);
             default:        return false;
         }
     };
 
     for (const TCHAR Ch : RawChunk)
     {
-        // --- Bracket / curly stage-direction stripping ---
-        // Armed the "eat one whitespace" flag when a tag closes, so the
-        // single space or newline immediately after "]" or "}" is dropped.
-        if (Ch == TEXT('['))
+        // --- Asymmetric tag delimiters: depth-based (nestable) ---
+        if (bSquare && Ch == TEXT('['))                            { TokenSquareDepth++; continue; }
+        if (bSquare && Ch == TEXT(']') && TokenSquareDepth > 0)    { TokenSquareDepth--; OnTagClosed(); continue; }
+        if (bAngle  && Ch == TEXT('<'))                            { TokenAngleDepth++;  continue; }
+        if (bAngle  && Ch == TEXT('>') && TokenAngleDepth  > 0)    { TokenAngleDepth--;  OnTagClosed(); continue; }
+        if (bCurly  && Ch == TEXT('{'))                            { TokenCurlyDepth++;  continue; }
+        if (bCurly  && Ch == TEXT('}') && TokenCurlyDepth  > 0)    { TokenCurlyDepth--;  OnTagClosed(); continue; }
+        if (bParen  && Ch == TEXT('('))                            { TokenParenDepth++;  continue; }
+        if (bParen  && Ch == TEXT(')') && TokenParenDepth  > 0)    { TokenParenDepth--;  OnTagClosed(); continue; }
+
+        // --- Symmetric tag delimiters: toggle ---
+        if (bSlash && Ch == TEXT('/'))
         {
-            TokenTagDepth++;
+            bTokenInsideSlash = !bTokenInsideSlash;
+            if (!bTokenInsideSlash) OnTagClosed();
             continue;
         }
-        if (Ch == TEXT(']') && TokenTagDepth > 0)
+        if (bPipe && Ch == TEXT('|'))
         {
-            TokenTagDepth--;
-            if (TokenTagDepth == 0 && TokenCurlyDepth == 0)
-            {
-                bTokenEatOneWhitespace = true;
-            }
+            bTokenInsidePipe = !bTokenInsidePipe;
+            if (!bTokenInsidePipe) OnTagClosed();
             continue;
         }
-        if (Ch == TEXT('{'))
+        if (bHash && Ch == TEXT('#'))
         {
-            TokenCurlyDepth++;
+            bTokenInsideHash = !bTokenInsideHash;
+            if (!bTokenInsideHash) OnTagClosed();
             continue;
         }
-        if (Ch == TEXT('}') && TokenCurlyDepth > 0)
-        {
-            TokenCurlyDepth--;
-            if (TokenTagDepth == 0 && TokenCurlyDepth == 0)
-            {
-                bTokenEatOneWhitespace = true;
-            }
-            continue;
-        }
-        if (TokenTagDepth != 0 || TokenCurlyDepth != 0)
+
+        // Inside any currently-open tag: drop the content entirely.
+        if (InsideAnyTag())
         {
             continue;
         }
 
-        // --- Eat-one mode ---
-        // Always clear the flag on the FIRST char seen here (whitespace or
-        // not). If that char was a space/newline, we also skip it. Any
-        // subsequent whitespace in the same run is preserved.
+        // --- Eat-one mode: consume at most ONE whitespace char ---
         if (bTokenEatOneWhitespace)
         {
             bTokenEatOneWhitespace = false;
@@ -609,12 +669,10 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
             {
                 continue;
             }
-            // Non-whitespace: fall through to emit it.
+            // Non-whitespace: flag cleared, fall through and emit it.
         }
 
         // --- Newline as a sentence-split delimiter ---
-        // Drop the '\n' itself (it's the delimiter, not content) and arm
-        // eat-one for a possible trailing space / second newline.
         if (bNewlineSplit && Ch == TEXT('\n'))
         {
             bTokenEatOneWhitespace = true;
@@ -624,10 +682,7 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
         // --- Emit ordinary character ---
         Clean.AppendChar(Ch);
 
-        // --- Punctuation sentence-split ---
-        // Arm eat-one so the space that turns ". " into a split gets
-        // dropped. Harmless for mid-word punct like the '.' in "3.14" —
-        // the next char is '1', flag clears, nothing was eaten.
+        // --- Sentence-split punctuation arms eat-one ---
         if (IsConfiguredSplitPunct(Ch))
         {
             bTokenEatOneWhitespace = true;
@@ -640,6 +695,11 @@ FString UInoLiteRtLmConversation::FilterCleanToken(const FString& RawChunk)
 void UInoLiteRtLmConversation::SetSentenceSplitFlags(int32 NewFlags)
 {
     SentenceSplitFlags = NewFlags;
+}
+
+void UInoLiteRtLmConversation::SetTagStripFlags(int32 NewFlags)
+{
+    TagStripFlags = NewFlags;
 }
 
 void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
