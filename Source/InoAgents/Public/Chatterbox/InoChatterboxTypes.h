@@ -139,7 +139,14 @@ struct FInoChatterboxSynthesisOptions
  * call. Supplies the "speak like this voice" signal that the speech
  * encoder converts into speaker conditioning tensors.
  *
- * Three input paths, in priority order:
+ * Chatterbox Turbo always needs SOME reference audio — the
+ * architecture has speaker conditioning wired into every stage
+ * (language_model + conditional_decoder both consume the encoder's
+ * output tensors). You cannot generate "neutral" speech from text
+ * alone. An empty FInoChatterboxVoice is accepted, but falls back to
+ * the auto-downloaded default voice (see priority list below).
+ *
+ * Four input paths, in priority order:
  *
  *   1. WavFilePath — absolute or project-relative WAV file on disk.
  *      The subsystem reads it off the game thread via the internal
@@ -162,6 +169,17 @@ struct FInoChatterboxSynthesisOptions
  *      SynthesizeAsync to error** — the field is declared now so
  *      Blueprint graphs that wire it today survive the Phase E
  *      implementation change without needing a node edit.
+ *
+ *   4. (fallback) Default voice at <variant_dir>/default_voice.wav —
+ *      auto-downloaded alongside the model files (714 KB, MIT-licensed,
+ *      24 kHz mono, from onnx-community/chatterbox-ONNX). Used when
+ *      all three fields above are empty. Makes the minimum
+ *      "LoadModelsAsync + SynthesizeAsync" flow a single no-args call
+ *      for prototyping. The file is marked bRequired=false in the
+ *      download queue, so a 404 or killed-mid-download means this
+ *      fallback won't be available and SynthesizeAsync will error
+ *      with a clear "no voice available" message pointing at
+ *      setup-chatterbox.ps1 -IncludeDefaultVoice as an escape hatch.
  */
 USTRUCT(BlueprintType)
 struct FInoChatterboxVoice

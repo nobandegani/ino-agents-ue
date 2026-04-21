@@ -251,11 +251,19 @@ public:
      * sentence-by-sentence is the intended use case — the caller does
      * NOT need to await OnComplete before enqueuing the next line.
      *
+     * If Voice.WavFilePath AND Voice.ReferenceSamples are both empty,
+     * the subsystem falls back to <variant_dir>/default_voice.wav —
+     * auto-downloaded alongside the model files by LoadModelsAsync.
+     * See FInoChatterboxVoice's header for the full priority list.
+     * This means the minimum "load + synth" flow can be a single
+     * no-args SynthesizeAsync call.
+     *
      * Error cases that fire OnComplete with bSuccess=false:
      *   - No models loaded (call LoadModelsAsync first)
      *   - Voice.WavFilePath cannot be read / is not 24 kHz mono / has
      *     an unsupported WAV format
-     *   - Voice has no WavFilePath AND no ReferenceSamples
+     *   - Voice empty AND the default voice file was not downloaded
+     *     (network 404, opted out, or mid-download interruption)
      *   - Voice.PrecomputedConditioningPath is set (Phase E feature,
      *     not yet implemented — errors with a clear message so
      *     Blueprint graphs wired for Phase E fail loudly today)

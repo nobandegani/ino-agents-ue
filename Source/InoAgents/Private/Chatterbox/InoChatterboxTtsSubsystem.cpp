@@ -468,43 +468,33 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
 
     // -------- Resolve reference audio --------
     //
-    // Three sources, priority order (matches FInoChatterboxVoice doc):
-    //   1. WavFilePath — read from disk here on the game thread. Read
-    //      is ~1–10 ms for a 5–10 s reference clip (UE's file IO, no
-    //      decompression beyond the int16/fp32 passthrough). Short
+    // Four sources, priority order (matches FInoChatterboxVoice doc):
+    //   1. Voice.WavFilePath — read from disk here on the game thread.
+    //      Read is ~1–10 ms for a 5–10 s reference clip (UE's file IO,
+    //      no decompression beyond the int16/fp32 passthrough). Short
     //      enough that doing it synchronously is preferable to fighting
     //      the async machinery for a one-shot load at enqueue time.
-    //   2. ReferenceSamples — use as-is. Must already be 24 kHz mono fp32
-    //      (we can't cheaply verify the sample rate of raw samples).
-    //   3. Precomputed conditioning — Phase E, errored above.
+    //   2. Voice.ReferenceSamples — use as-is. Must already be 24 kHz
+    //      mono fp32 (we can't cheaply verify the sample rate of raw
+    //      samples).
+    //   3. Voice.PrecomputedConditioningPath — Phase E, errored above.
+    //   4. Default voice fallback — <variant_dir>/default_voice.wav,
+    //      auto-downloaded alongside the model files. Kicks in when
+    //      the caller passes an empty FInoChatterboxVoice. Makes the
+    //      minimum "LoadModelsAsync + SynthesizeAsync" flow a single
+    //      no-args call for prototyping / voice-agnostic uses.
     //
     // Strict 24 kHz policy for WavFilePath: reject mismatch with a clear
     // message. Voice cloning quality is extremely sensitive to resample
     // artifacts and we would rather the developer pre-convert offline
     // than silently degrade.
+    FString       ResolvedWavPath;
+    bool          bUsingDefaultVoice = false;
     TArray<float> ReferenceAudio;
+
     if (!Voice.WavFilePath.IsEmpty())
     {
-        int32 WavSampleRate = 0;
-        FString WavError;
-        if (!InoChatterbox::ReadMonoWavAsFloat32(
-                Voice.WavFilePath, ReferenceAudio, WavSampleRate, &WavError))
-        {
-            FailNow(FString::Printf(
-                TEXT("Failed to read reference WAV '%s': %s"),
-                *Voice.WavFilePath, *WavError));
-            return;
-        }
-        if (WavSampleRate != InoChatterbox::kSampleRate)
-        {
-            FailNow(FString::Printf(
-                TEXT("Reference WAV '%s' is %d Hz; Chatterbox Turbo requires 24000 Hz. ")
-                TEXT("Pre-convert your clip (e.g. Audacity → Tracks → Resample → 24000) ")
-                TEXT("rather than relying on silent in-engine resampling (voice cloning ")
-                TEXT("quality is extremely sensitive to resample artifacts)."),
-                *Voice.WavFilePath, WavSampleRate));
-            return;
-        }
+        ResolvedWavPath = Voice.WavFilePath;
     }
     else if (Voice.ReferenceSamples.Num() > 0)
     {
@@ -515,8 +505,62 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
     }
     else
     {
-        FailNow(TEXT("Voice has no reference audio — set WavFilePath or ReferenceSamples"));
-        return;
+        // Fall back to the auto-downloaded default voice in the current
+        // variant directory. The file was queued with bRequired=false
+        // in BuildDownloadQueue, so if the HF repo 404'd or the user
+        // killed the download partway through, it may still be missing;
+        // in that case we error with a clear message telling them how
+        // to unblock (run setup-chatterbox.ps1 -IncludeDefaultVoice, or
+        // pass an explicit voice).
+        ResolvedWavPath = FPaths::Combine(
+            ChatterboxResolveVariantDir(LoadedVariant),
+            kDefaultVoiceFilename);
+        bUsingDefaultVoice = true;
+    }
+
+    if (!ResolvedWavPath.IsEmpty())
+    {
+        if (bUsingDefaultVoice && !IFileManager::Get().FileExists(*ResolvedWavPath))
+        {
+            FailNow(FString::Printf(
+                TEXT("No voice provided and default voice not found at %s. ")
+                TEXT("The default voice is auto-downloaded with LoadModelsAsync ")
+                TEXT("but is marked non-required (some deployments opt out), so ")
+                TEXT("you may need to either pass an explicit FInoChatterboxVoice ")
+                TEXT("with WavFilePath/ReferenceSamples, or run ")
+                TEXT("Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1 ")
+                TEXT("-IncludeDefaultVoice to stage it manually."),
+                *ResolvedWavPath));
+            return;
+        }
+
+        int32 WavSampleRate = 0;
+        FString WavError;
+        if (!InoChatterbox::ReadMonoWavAsFloat32(
+                ResolvedWavPath, ReferenceAudio, WavSampleRate, &WavError))
+        {
+            FailNow(FString::Printf(
+                TEXT("Failed to read reference WAV '%s': %s"),
+                *ResolvedWavPath, *WavError));
+            return;
+        }
+        if (WavSampleRate != InoChatterbox::kSampleRate)
+        {
+            FailNow(FString::Printf(
+                TEXT("Reference WAV '%s' is %d Hz; Chatterbox Turbo requires 24000 Hz. ")
+                TEXT("Pre-convert your clip (e.g. Audacity → Tracks → Resample → 24000) ")
+                TEXT("rather than relying on silent in-engine resampling (voice cloning ")
+                TEXT("quality is extremely sensitive to resample artifacts)."),
+                *ResolvedWavPath, WavSampleRate));
+            return;
+        }
+
+        if (bUsingDefaultVoice)
+        {
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("Chatterbox SynthesizeAsync: no voice supplied — using default voice at %s"),
+                   *ResolvedWavPath);
+        }
     }
 
     if (ReferenceAudio.Num() == 0)
@@ -654,8 +698,37 @@ namespace
             });
         }
 
+        // Default reference voice for SynthesizeAsync's "no voice
+        // specified" fallback. Only 714 KB, MIT-licensed, 24 kHz mono.
+        //
+        // ResembleAI's turbo repo doesn't ship one — the sibling
+        // non-turbo export (onnx-community/chatterbox-ONNX) does, and
+        // the speaker-embedding interface is architecturally identical
+        // between regular and turbo (same x-vector 192-dim
+        // conditioning), so the same clip primes either encoder. Same
+        // cross-borrow the dev-time setup-chatterbox.ps1 does under
+        // -IncludeDefaultVoice.
+        //
+        // bRequired=false: the subsystem still loads fine without it;
+        // callers who always pass their own FInoChatterboxVoice
+        // (WavFilePath or ReferenceSamples) never need this file, so
+        // a 404 or skipped download shouldn't fail the whole load.
+        // SynthesizeAsync will error at synth time if the caller
+        // provided no voice AND the default file is missing.
+        Queue.Add(FFile{
+            /*Url*/        TEXT("https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/main/default_voice.wav"),
+            /*TargetPath*/ FPaths::Combine(TargetDir, TEXT("default_voice.wav")),
+            /*bRequired*/  false,
+        });
+
         return Queue;
     }
+
+    /** Default reference-voice filename, relative to the variant dir.
+     *  Shared between BuildDownloadQueue (which adds it to the download
+     *  queue) and SynthesizeAsync (which falls back to it when the
+     *  caller provides no voice). */
+    constexpr const TCHAR* kDefaultVoiceFilename = TEXT("default_voice.wav");
 }   // anonymous namespace
 
 void UInoChatterboxTtsSubsystem::StartDownload()
