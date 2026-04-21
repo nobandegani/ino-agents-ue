@@ -27,6 +27,35 @@ class FInoChatterboxSynthesisWorker;
 class FInoChatterboxTokenizer;
 
 /**
+ * One file in the Chatterbox download queue — internal detail of the
+ * auto-download flow. Declared at namespace scope (not nested in
+ * UInoChatterboxTtsSubsystem) so the build-queue helper in the
+ * subsystem's .cpp anonymous namespace can reference it without
+ * friending or exposing a private type. Not UPROPERTY/USTRUCT —
+ * no Blueprint visibility; pure C++ implementation detail.
+ */
+struct FInoChatterboxDownloadFile
+{
+    /** Absolute URL to fetch. */
+    FString Url;
+    /** Absolute target path on disk (not the .partial). */
+    FString TargetPath;
+    /** If true, a 404 or error on this file fails the whole load.
+     *  False for .onnx_data companions — some variants inline weights
+     *  and the server legitimately returns 404 for them. */
+    bool    bRequired = true;
+    /** Size learned from HEAD probe. -1 = unknown (HF sometimes
+     *  strips Content-Length across its CDN redirect; treat as
+     *  "report bytes-only, not percent" downstream). */
+    int64   ExpectedBytes = -1;
+    /** Live byte count during the active GET, latched on completion. */
+    int64   BytesWritten = 0;
+    /** Set to true once the file is either fully downloaded (success)
+     *  or skipped (optional 404). Used to avoid re-downloading. */
+    bool    bDone = false;
+};
+
+/**
  * Game-instance-wide Chatterbox Turbo TTS runtime owner.
  *
  * ONE instance per game instance (created on game start, destroyed on
@@ -321,32 +350,12 @@ private:
     // than a parallel pool.
     // ------------------------------------------------------------------
 
-    /** Single entry in the download queue. Built once at the start of
-     *  StartDownload and consumed sequentially. */
-    struct FDownloadFile
-    {
-        /** Absolute URL to fetch. */
-        FString Url;
-        /** Absolute target path on disk (not the .partial). */
-        FString TargetPath;
-        /** If true, a 404 or error on this file fails the whole load.
-         *  False for .onnx_data companions — some variants inline weights
-         *  and the server legitimately returns 404 for them. */
-        bool    bRequired = true;
-        /** Size learned from HEAD probe. -1 = unknown (HF sometimes
-         *  strips Content-Length across its CDN redirect; treat as
-         *  "report bytes-only, not percent" downstream). */
-        int64   ExpectedBytes = -1;
-        /** Live byte count during the active GET, latched on completion. */
-        int64   BytesWritten = 0;
-        /** Set to true once the file is either fully downloaded (success)
-         *  or skipped (optional 404). Used to avoid re-downloading. */
-        bool    bDone = false;
-    };
-
     /** Build, then consume, during one download session. Cleared in
-     *  CleanupDownload. */
-    TArray<FDownloadFile> DownloadQueue;
+     *  CleanupDownload. Struct type FInoChatterboxDownloadFile is
+     *  declared at namespace scope above (not nested here) so the
+     *  build-queue helper in the .cpp's anonymous namespace can see
+     *  it without an access workaround. */
+    TArray<FInoChatterboxDownloadFile> DownloadQueue;
 
     /** Index into DownloadQueue of the file currently being HEAD-probed
      *  or GET-downloaded. Advances sequentially. */
@@ -387,7 +396,10 @@ private:
     void StartHeadProbe();
     void HandleHeadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
     void StartNextFileDownload();
-    void HandleDownloadProgress(FHttpRequestPtr Request, int32 BytesSent, int32 BytesReceived);
+    // Signature matches FHttpRequestProgressDelegate64 in UE 5.7's
+    // Interfaces/IHttpRequest.h — uint64 byte counts (the deprecated
+    // int32 variant would overflow for files > 2 GB).
+    void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
     void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
     void FinishDownloadSuccess();
     void FinishDownloadError(const FString& Err);

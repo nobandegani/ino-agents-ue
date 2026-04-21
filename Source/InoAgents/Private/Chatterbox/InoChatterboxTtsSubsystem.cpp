@@ -588,12 +588,12 @@ namespace
      *  subsystem needs to fetch for a given variant. Mirrors the file
      *  list in Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1
      *  exactly so dev-time and runtime populate identical directories. */
-    TArray<UInoChatterboxTtsSubsystem::FDownloadFile> BuildDownloadQueue(
+    TArray<FInoChatterboxDownloadFile> BuildDownloadQueue(
         const FInoChatterboxModelEntry& Entry,
         EInoChatterboxVariant           Variant,
         const FString&                  TargetDir)
     {
-        using FFile = UInoChatterboxTtsSubsystem::FDownloadFile;
+        using FFile = FInoChatterboxDownloadFile;
 
         // Trim any trailing slash on the repo URL so the composed URLs
         // don't end up with a double slash (HF tolerates it but it's
@@ -722,7 +722,7 @@ void UInoChatterboxTtsSubsystem::StartHeadProbe()
         return;
     }
 
-    const FDownloadFile& File = DownloadQueue[DownloadCursor];
+    const FInoChatterboxDownloadFile& File = DownloadQueue[DownloadCursor];
 
     DownloadRequest = FHttpModule::Get().CreateRequest();
     DownloadRequest->SetURL(File.Url);
@@ -752,7 +752,7 @@ void UInoChatterboxTtsSubsystem::HandleHeadComplete(
         return;
     }
 
-    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoChatterboxDownloadFile& File = DownloadQueue[DownloadCursor];
     const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
 
     if (bSucceeded && Response.IsValid() && (Code == 200 || (Code >= 200 && Code < 400)))
@@ -821,7 +821,7 @@ void UInoChatterboxTtsSubsystem::StartNextFileDownload()
         return;
     }
 
-    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoChatterboxDownloadFile& File = DownloadQueue[DownloadCursor];
     File.BytesWritten = 0;
 
     // Open .partial for writing. If a prior aborted run left one
@@ -854,10 +854,12 @@ void UInoChatterboxTtsSubsystem::StartNextFileDownload()
     DownloadRequest->SetVerb(TEXT("GET"));
     DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
 
-    // OnRequestProgress fires with (BytesSent, BytesReceived) during
+    // OnRequestProgress64 fires with (BytesSent, BytesReceived) during
     // the download — use it to fire OnDownloadProgress with smooth
-    // per-file updates.
-    DownloadRequest->OnRequestProgress().BindUObject(
+    // per-file updates. UE 5.7 deprecated the int32 OnRequestProgress
+    // in favour of uint64 OnRequestProgress64 to avoid overflow on
+    // files > 2 GB.
+    DownloadRequest->OnRequestProgress64().BindUObject(
         this, &UInoChatterboxTtsSubsystem::HandleDownloadProgress);
     DownloadRequest->OnProcessRequestComplete().BindUObject(
         this, &UInoChatterboxTtsSubsystem::HandleDownloadComplete);
@@ -866,7 +868,7 @@ void UInoChatterboxTtsSubsystem::StartNextFileDownload()
 }
 
 void UInoChatterboxTtsSubsystem::HandleDownloadProgress(
-    FHttpRequestPtr /*Request*/, int32 /*BytesSent*/, int32 BytesReceived)
+    FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
 {
     check(IsInGameThread());
     if (DownloadQueue.Num() == 0 || DownloadCursor >= DownloadQueue.Num())
@@ -874,7 +876,11 @@ void UInoChatterboxTtsSubsystem::HandleDownloadProgress(
         return;
     }
 
-    DownloadQueue[DownloadCursor].BytesWritten = BytesReceived;
+    // Clamp to int64 max. No real-world HTTP response will exceed
+    // that, but our BytesWritten/ExpectedBytes are int64 and we want
+    // to avoid implicit narrowing warnings.
+    DownloadQueue[DownloadCursor].BytesWritten =
+        (int64)FMath::Min<uint64>(BytesReceived, (uint64)INT64_MAX);
     BroadcastDownloadProgress();
 }
 
@@ -889,7 +895,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
         return;   // teardown during request
     }
 
-    FDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoChatterboxDownloadFile& File = DownloadQueue[DownloadCursor];
     const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
 
     // -------- Handle 404 on optional files --------
@@ -969,7 +975,7 @@ void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
     int64 AggregateReceived = 0;
     int64 AggregateTotal    = 0;
     bool  bAnyUnknown       = false;
-    for (const FDownloadFile& F : DownloadQueue)
+    for (const FInoChatterboxDownloadFile& F : DownloadQueue)
     {
         if (F.bDone)
         {
