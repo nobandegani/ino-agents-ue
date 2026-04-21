@@ -400,6 +400,11 @@ private:
     // Interfaces/IHttpRequest.h — uint64 byte counts (the deprecated
     // int32 variant would overflow for files > 2 GB).
     void HandleDownloadProgress(FHttpRequestPtr Request, uint64 BytesSent, uint64 BytesReceived);
+    // Called for each response header as it arrives — used to latch
+    // Content-Length into the current file's ExpectedBytes when the
+    // HEAD probe didn't return one (HF's CDN sometimes strips it on
+    // the 302 → cdn-lfs.hf.co redirect).
+    void HandleDownloadHeader(FHttpRequestPtr Request, const FString& HeaderName, const FString& HeaderValue);
     void HandleDownloadComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
     void FinishDownloadSuccess();
     void FinishDownloadError(const FString& Err);

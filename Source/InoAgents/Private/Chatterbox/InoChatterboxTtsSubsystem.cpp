@@ -707,14 +707,31 @@ void UInoChatterboxTtsSubsystem::StartHeadProbe()
     // End of HEAD phase → switch to download phase.
     if (DownloadCursor >= DownloadQueue.Num())
     {
-        // Compute the aggregate total by summing every known
-        // ExpectedBytes. If any file had an unknown size, the sum is
-        // still correct for what we know — but we flag it by leaving
-        // the running total accessible via BroadcastDownloadProgress,
-        // which reads the queue directly each time.
+        // Summarise what we learned so the user can tell from the log
+        // whether aggregate percent will work during the download.
+        // HF's CDN redirect sometimes strips Content-Length on HEAD
+        // responses — when that happens, the GET response headers
+        // (via HandleDownloadHeader) fill in ExpectedBytes as each
+        // file starts downloading, so we recover eventually.
+        int32 KnownSizes = 0;
+        int64 KnownTotal = 0;
+        for (const FInoChatterboxDownloadFile& F : DownloadQueue)
+        {
+            if (F.ExpectedBytes > 0)
+            {
+                ++KnownSizes;
+                KnownTotal += F.ExpectedBytes;
+            }
+        }
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox HEAD phase complete — %d files probed"),
-               DownloadQueue.Num());
+               TEXT("Chatterbox HEAD phase complete — %d/%d files reported size ")
+               TEXT("(sum of known=%.1f MB). %s"),
+               KnownSizes, DownloadQueue.Num(),
+               (double)KnownTotal / (1024.0 * 1024.0),
+               KnownSizes == DownloadQueue.Num()
+                   ? TEXT("Aggregate byte-weighted Percent will be exact.")
+                   : TEXT("Some sizes unknown; Percent falls back to file-count with ")
+                     TEXT("fractional current-file credit until GET headers arrive."));
 
         bDownloadProbing = false;
         DownloadCursor   = 0;
@@ -854,6 +871,13 @@ void UInoChatterboxTtsSubsystem::StartNextFileDownload()
     DownloadRequest->SetVerb(TEXT("GET"));
     DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
 
+    // OnHeaderReceived fires for each response header — we use it to
+    // latch Content-Length into the current file's ExpectedBytes so
+    // aggregate percent works even when HEAD stripped the size (HF's
+    // CDN sometimes does).
+    DownloadRequest->OnHeaderReceived().BindUObject(
+        this, &UInoChatterboxTtsSubsystem::HandleDownloadHeader);
+
     // OnRequestProgress64 fires with (BytesSent, BytesReceived) during
     // the download — use it to fire OnDownloadProgress with smooth
     // per-file updates. UE 5.7 deprecated the int32 OnRequestProgress
@@ -881,6 +905,50 @@ void UInoChatterboxTtsSubsystem::HandleDownloadProgress(
     // to avoid implicit narrowing warnings.
     DownloadQueue[DownloadCursor].BytesWritten =
         (int64)FMath::Min<uint64>(BytesReceived, (uint64)INT64_MAX);
+    BroadcastDownloadProgress();
+}
+
+void UInoChatterboxTtsSubsystem::HandleDownloadHeader(
+    FHttpRequestPtr /*Request*/,
+    const FString& HeaderName,
+    const FString& HeaderValue)
+{
+    check(IsInGameThread());
+    if (DownloadQueue.Num() == 0 || DownloadCursor >= DownloadQueue.Num())
+    {
+        return;
+    }
+
+    // Only interested in Content-Length. Case-insensitive compare — RFC
+    // says header names are case-insensitive, and in practice we see
+    // both "Content-Length" and "content-length" in the wild.
+    if (!HeaderName.Equals(TEXT("Content-Length"), ESearchCase::IgnoreCase))
+    {
+        return;
+    }
+
+    const int64 Parsed = FCString::Atoi64(*HeaderValue);
+    if (Parsed <= 0)
+    {
+        return;
+    }
+
+    FInoChatterboxDownloadFile& File = DownloadQueue[DownloadCursor];
+    if (File.ExpectedBytes > 0 && File.ExpectedBytes == Parsed)
+    {
+        return;   // HEAD already told us the same value; nothing to do.
+    }
+
+    if (File.ExpectedBytes <= 0)
+    {
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox GET %d/%d: learned Content-Length=%lld from GET response ")
+               TEXT("(HEAD didn't give us one)"),
+               DownloadCursor + 1, DownloadQueue.Num(), Parsed);
+    }
+    File.ExpectedBytes = Parsed;
+
+    // Refresh aggregate progress now that we have a better total.
     BroadcastDownloadProgress();
 }
 
@@ -970,42 +1038,107 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
 
 void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
 {
-    // Aggregate known totals across the queue. Any unknown
-    // ExpectedBytes leaves the total at -1 and the Percent at 0.
-    int64 AggregateReceived = 0;
-    int64 AggregateTotal    = 0;
-    bool  bAnyUnknown       = false;
-    for (const FInoChatterboxDownloadFile& F : DownloadQueue)
+    // Sizes arrive in phases: HEAD probes first (may fail silently if
+    // HF's CDN redirect strips Content-Length), then per-file GET
+    // response headers (via HandleDownloadHeader, latching ExpectedBytes
+    // as each GET starts). To keep the reported Percent monotonic
+    // regardless of when sizes land, we run two strategies and pick
+    // the best one available:
+    //
+    //   1. Byte-weighted (preferred). Used when every file's
+    //      ExpectedBytes is known, either a priori from HEAD or latched
+    //      from a completed GET. Gives an accurate percent that's
+    //      proportional to real on-disk bytes.
+    //
+    //   2. File-count with current-file partial credit (fallback).
+    //      Used when any file's size is unknown. Percent =
+    //      (done_count + current_fraction) / total_count. Monotonic —
+    //      each completed file bumps percent by 1/N, and the current
+    //      file's fractional bump interpolates smoothly. Inaccurate
+    //      in absolute terms when file sizes vary a lot, but the
+    //      shape matches user expectations ("bar fills as files
+    //      finish").
+    //
+    // AggregateReceived (real bytes on disk) is always reported
+    // accurately regardless of which strategy computed Percent, so a
+    // Blueprint showing "123 MB downloaded" stays correct.
+    //
+    // TotalBytes is reported only if strategy 1 applied (all sizes
+    // known) — otherwise -1, so Blueprints know the total is unknown.
+
+    const int32 FileCount = DownloadQueue.Num();
+    if (FileCount == 0)
     {
+        OnDownloadProgress.Broadcast(0.0f, 0, -1);
+        return;
+    }
+
+    int64 AggregateReceived = 0;
+    int64 AggregateTotalKnown = 0;
+    int32 DoneFiles           = 0;
+    bool  bAllSizesKnown      = true;
+
+    for (int32 i = 0; i < FileCount; ++i)
+    {
+        const FInoChatterboxDownloadFile& F = DownloadQueue[i];
+
         if (F.bDone)
         {
-            // Finished file's BytesWritten is authoritative (we just
-            // wrote it from the Content array).
-            AggregateReceived += F.BytesWritten;
-            AggregateTotal    += (F.ExpectedBytes > 0 ? F.ExpectedBytes : F.BytesWritten);
+            ++DoneFiles;
+            AggregateReceived   += F.BytesWritten;
+            // Done file's "size" is authoritative — use ExpectedBytes
+            // if we had it, else BytesWritten. Either way, contributes
+            // 100% of its own size to AggregateTotalKnown.
+            AggregateTotalKnown += (F.ExpectedBytes > 0 ? F.ExpectedBytes : F.BytesWritten);
+            continue;
         }
-        else if (F.bDone == false && F.ExpectedBytes > 0)
+
+        // Not done. Current-file bytes-in-flight count only for
+        // AggregateReceived.
+        if (i == DownloadCursor)
         {
-            AggregateTotal += F.ExpectedBytes;
-            // If this is the current file, count its in-progress bytes.
-            if (&F == &DownloadQueue[DownloadCursor])
-            {
-                AggregateReceived += F.BytesWritten;
-            }
+            AggregateReceived += F.BytesWritten;
+        }
+
+        if (F.ExpectedBytes > 0)
+        {
+            AggregateTotalKnown += F.ExpectedBytes;
         }
         else
         {
-            bAnyUnknown = true;
+            bAllSizesKnown = false;
         }
     }
 
-    const float Percent =
-        (!bAnyUnknown && AggregateTotal > 0)
-        ? FMath::Clamp(
-              (float)((double)AggregateReceived * 100.0 / (double)AggregateTotal),
-              0.0f, 100.0f)
-        : 0.0f;
-    const int64 TotalReport = bAnyUnknown ? -1 : AggregateTotal;
+    float Percent = 0.0f;
+
+    if (bAllSizesKnown && AggregateTotalKnown > 0)
+    {
+        // Strategy 1: byte-weighted. Exact.
+        Percent = FMath::Clamp(
+            (float)((double)AggregateReceived * 100.0 / (double)AggregateTotalKnown),
+            0.0f, 100.0f);
+    }
+    else
+    {
+        // Strategy 2: file-count with partial current-file credit.
+        double ProgressFiles = (double)DoneFiles;
+        if (DownloadCursor < FileCount && !DownloadQueue[DownloadCursor].bDone)
+        {
+            const FInoChatterboxDownloadFile& Current = DownloadQueue[DownloadCursor];
+            if (Current.ExpectedBytes > 0 && Current.BytesWritten > 0)
+            {
+                ProgressFiles += FMath::Clamp(
+                    (double)Current.BytesWritten / (double)Current.ExpectedBytes,
+                    0.0, 1.0);
+            }
+        }
+        Percent = (float)FMath::Clamp(
+            ProgressFiles * 100.0 / (double)FileCount,
+            0.0, 100.0);
+    }
+
+    const int64 TotalReport = bAllSizesKnown ? AggregateTotalKnown : -1;
 
     OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalReport);
 }
