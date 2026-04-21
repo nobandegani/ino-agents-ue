@@ -172,7 +172,8 @@ bool FInoChatterboxRunner::SynthesizeText(
     TArrayView<const float>     ReferenceAudio,
     const FSynthesisOptions&    Options,
     FSynthesisResult&           OutResult,
-    FString*                    OutError) const
+    FString*                    OutError,
+    const TAtomic<bool>*        Cancel) const
 {
     auto Fail = [&](const FString& Msg) -> bool
     {
@@ -287,6 +288,16 @@ bool FInoChatterboxRunner::SynthesizeText(
 
     for (int32 Iter = 0; Iter < ClampedMaxNewTokens; ++Iter)
     {
+        // Cooperative cancel check — sampled at the top of every AR
+        // iteration so we bail before starting ~tens of ms of ORT Runs.
+        // Relaxed load: the caller's writes to this flag don't need to
+        // synchronize with anything other than eventually being seen
+        // (no data is published through it).
+        if (Cancel && Cancel->Load(EMemoryOrder::Relaxed))
+        {
+            return Fail(TEXT("SynthesizeText: cancelled"));
+        }
+
         // --- Embed current input_ids ---
         const int64 CurInputLen = InputIds.Num();
         FInoOnnxTensor EmbedInput = FInoOnnxTensor::CreateFromBufferCopy<int64>(

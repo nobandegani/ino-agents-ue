@@ -21,6 +21,7 @@
 // C4150 "delete of pointer to incomplete type" — exact same gotcha as
 // UInoLiteRtLmConversation documents for its worker TUniquePtr.
 class FInoChatterboxModels;
+class FInoChatterboxSynthesisWorker;
 class FInoChatterboxTokenizer;
 
 /**
@@ -262,9 +263,13 @@ private:
     // ------------------------------------------------------------------
     // Loaded state
     //
-    // Commit 1 (scaffolding): these members exist but never hold a real
-    // bundle — LoadModelsAsync is stubbed. Commit 2 wires up the
-    // files-already-on-disk path. Commit 4 adds the download flow.
+    // Destruction order matters — members are destroyed in reverse
+    // declaration order, so Worker (declared last) destructs FIRST
+    // when the subsystem is destroyed. That's required because Worker
+    // borrows references into Models / Tokenizer; it must join its
+    // thread before those refs are freed. UnloadModels makes this
+    // explicit too (Worker.Reset() before Models.Reset()), but the
+    // auto-destruction order is a safety net.
     // ------------------------------------------------------------------
 
     /** The 4 ORT sessions. Destroys in LIFO order when reset. */
@@ -289,4 +294,11 @@ private:
      *  who asked to unload actually ends up unloaded. Cleared on every
      *  hop-back completion. Irrelevant if no load is in flight. */
     bool bPendingUnload = false;
+
+    /** The dedicated worker thread that runs FInoChatterboxRunner on
+     *  queued synthesis requests. Created right after a successful
+     *  LoadModelsAsync, destroyed by UnloadModels BEFORE Models /
+     *  Tokenizer are reset (the worker borrows references to both).
+     *  Null when no models are loaded. */
+    TUniquePtr<FInoChatterboxSynthesisWorker> Worker;
 };

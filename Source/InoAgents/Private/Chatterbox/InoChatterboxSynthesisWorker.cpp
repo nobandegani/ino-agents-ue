@@ -1,0 +1,259 @@
+// Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
+
+#include "InoChatterboxSynthesisWorker.h"
+
+#include "Async/Async.h"
+#include "HAL/Event.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/RunnableThread.h"
+
+#include "InoAgentsLog.h"
+#include "InoChatterboxModels.h"
+#include "InoChatterboxRunner.h"
+#include "InoChatterboxTokenizer.h"
+
+namespace
+{
+    /**
+     * Dispatch a failure delegate for a single FPendingSynth on the
+     * game thread. Used during flush + shutdown to clear queued items
+     * without running synthesis on them.
+     *
+     * We copy the delegate + message by value into the AsyncTask
+     * lambda — the FPendingSynth itself may already be gone by the
+     * time the lambda runs.
+     */
+    void DispatchFailureOnGameThread(
+        const FOnInoChatterboxSynthesisComplete& OnComplete,
+        const FString& ErrMessage)
+    {
+        AsyncTask(ENamedThreads::GameThread,
+            [OnComplete, ErrMessage]()
+        {
+            FInoChatterboxSynthesisResult Empty;
+            OnComplete.ExecuteIfBound(false, Empty, ErrMessage);
+        });
+    }
+}
+
+FInoChatterboxSynthesisWorker::FInoChatterboxSynthesisWorker(
+    const FInoChatterboxModels&    InModels,
+    const FInoChatterboxTokenizer& InTokenizer)
+    : Models(InModels)
+    , Tokenizer(InTokenizer)
+{
+    // Auto-reset event: every Trigger wakes at most one Wait. Matches
+    // the single-consumer pattern of our Run() loop.
+    QueueEvent = FGenericPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
+
+    // Name is visible in profilers + crash dumps. BPri_Normal is fine —
+    // synthesis is not latency-critical relative to game-frame deadlines.
+    Thread.Reset(FRunnableThread::Create(
+        this,
+        TEXT("InoChatterboxSynthesisWorker"),
+        /*InStackSize=*/ 0,
+        TPri_Normal));
+
+    if (!Thread.IsValid())
+    {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("FInoChatterboxSynthesisWorker: FRunnableThread::Create returned null ")
+               TEXT("— subsequent synthesis will fail immediately"));
+    }
+}
+
+FInoChatterboxSynthesisWorker::~FInoChatterboxSynthesisWorker()
+{
+    check(IsInGameThread());
+
+    // 1. Tell the worker to bail ASAP.
+    bStopRequested.Store(true);
+    bCancelCurrent.Store(true);
+
+    // 2. Wake the thread if it's idle on QueueEvent->Wait.
+    if (QueueEvent)
+    {
+        QueueEvent->Trigger();
+    }
+
+    // 3. Join. Blocks until the thread's Run() returns (bounded to
+    //    the current AR iteration's duration, typically tens of ms).
+    if (Thread.IsValid())
+    {
+        Thread->WaitForCompletion();
+        Thread.Reset();
+    }
+
+    // 4. The thread is gone. Drain anything the worker didn't get to
+    //    and fire "shutting down" errors so Blueprint observers don't
+    //    see dangling OnComplete delegates.
+    FPendingSynth Item;
+    while (Queue.Dequeue(Item))
+    {
+        DispatchFailureOnGameThread(
+            Item.OnComplete,
+            TEXT("Chatterbox synthesis cancelled (worker shutting down)"));
+    }
+
+    // 5. Return the event to the pool.
+    if (QueueEvent)
+    {
+        FGenericPlatformProcess::ReturnSynchEventToPool(QueueEvent);
+        QueueEvent = nullptr;
+    }
+}
+
+void FInoChatterboxSynthesisWorker::Enqueue(FPendingSynth Item)
+{
+    check(IsInGameThread());
+
+    if (bStopRequested.Load())
+    {
+        // Worker is shutting down; do not enqueue, fire failure
+        // synchronously. This path is rare — it happens if a caller
+        // races Enqueue against UnloadModels on the same frame.
+        DispatchFailureOnGameThread(
+            Item.OnComplete,
+            TEXT("Chatterbox synthesis rejected (worker is shutting down)"));
+        return;
+    }
+
+    Queue.Enqueue(MoveTemp(Item));
+
+    if (QueueEvent)
+    {
+        QueueEvent->Trigger();
+    }
+}
+
+void FInoChatterboxSynthesisWorker::CancelAndFlush()
+{
+    check(IsInGameThread());
+
+    // Flip cancel so any in-flight SynthesizeText exits at its next
+    // AR iteration. The worker will clear bCancelCurrent at the top
+    // of the next ProcessSynth if any items follow.
+    bCancelCurrent.Store(true);
+
+    // Drain queued items and fire "cancelled" for each. Done on the
+    // game thread (we're on the game thread right now), so these
+    // delegates fire in the caller's current frame — matches Blueprint
+    // expectations for "I clicked cancel; the queue is empty now".
+    FPendingSynth Item;
+    while (Queue.Dequeue(Item))
+    {
+        // Synchronous fire — no AsyncTask needed, we're already on GT.
+        FInoChatterboxSynthesisResult Empty;
+        Item.OnComplete.ExecuteIfBound(
+            false, Empty, TEXT("Chatterbox synthesis cancelled"));
+    }
+
+    // Wake the worker in case it was idle — this lets it see
+    // bCancelCurrent quickly (though the runner's check is what
+    // actually causes the in-flight SynthesizeText to return).
+    if (QueueEvent)
+    {
+        QueueEvent->Trigger();
+    }
+}
+
+uint32 FInoChatterboxSynthesisWorker::Run()
+{
+    // Worker thread main loop. Waits for work on QueueEvent, drains
+    // the queue FIFO, processes each item to completion (potentially
+    // seconds), loops back to wait. Exits when bStopRequested is
+    // observed true.
+
+    while (!bStopRequested.Load())
+    {
+        // Idle wait. Auto-reset event → Trigger wakes exactly one Wait;
+        // subsequent Triggers are lost (which is fine — if there are
+        // multiple items queued we loop through them all before waiting
+        // again).
+        if (QueueEvent)
+        {
+            QueueEvent->Wait();
+        }
+
+        // Drain everything available. Check stop between items so a
+        // shutdown during a long queue doesn't have to wait for the
+        // whole queue.
+        while (!bStopRequested.Load())
+        {
+            FPendingSynth Item;
+            if (!Queue.Dequeue(Item))
+            {
+                break;   // queue empty, go back to wait
+            }
+            ProcessSynth(Item);
+        }
+    }
+
+    // On shutdown, the destructor drains any leftover items and fires
+    // their failure delegates — we don't need to do it here.
+    return 0;
+}
+
+void FInoChatterboxSynthesisWorker::Stop()
+{
+    // FRunnable::Stop is called from the game thread by UE's runnable
+    // machinery on thread teardown — we also call it from the
+    // destructor path manually. Safe to call multiple times.
+    bStopRequested.Store(true);
+    bCancelCurrent.Store(true);
+
+    if (QueueEvent)
+    {
+        QueueEvent->Trigger();
+    }
+}
+
+void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
+{
+    // Start with a clean cancel flag — a prior CancelAndFlush would
+    // have set it true, but the items following the flushed ones are
+    // supposed to run normally. (If the caller wants them also
+    // cancelled they'd have dropped them before they got queued.)
+    bCancelCurrent.Store(false);
+
+    const double TStart = FPlatformTime::Seconds();
+
+    FInoChatterboxRunner Runner(Models, Tokenizer);
+
+    FInoChatterboxRunner::FSynthesisOptions RunnerOpts;
+    RunnerOpts.MaxNewTokens      = Item.Options.MaxNewTokens;
+    RunnerOpts.RepetitionPenalty = Item.Options.RepetitionPenalty;
+
+    FInoChatterboxRunner::FSynthesisResult NativeResult;
+    FString NativeError;
+    const bool bOK = Runner.SynthesizeText(
+        Item.Text,
+        MakeArrayView(Item.ReferenceAudio),
+        RunnerOpts,
+        NativeResult,
+        &NativeError,
+        &bCancelCurrent);
+
+    // Build the Blueprint-visible result regardless of success — timings
+    // are still useful on failure (e.g. "we got 500 ms in before cancel").
+    FInoChatterboxSynthesisResult BpResult;
+    BpResult.AudioSamples       = MoveTemp(NativeResult.AudioSamples);
+    BpResult.SampleRate         = NativeResult.SampleRate;
+    BpResult.NumGeneratedTokens = NativeResult.NumGeneratedTokens;
+    BpResult.bHitStopToken      = NativeResult.bHitStopToken;
+    BpResult.TotalElapsedMs     = (float)((FPlatformTime::Seconds() - TStart) * 1000.0);
+    BpResult.EncoderMs          = (float)NativeResult.EncoderMs;
+    BpResult.EmbedTotalMs       = (float)NativeResult.EmbedTotalMs;
+    BpResult.LanguageModelMs    = (float)NativeResult.LanguageModelMs;
+    BpResult.DecoderMs          = (float)NativeResult.DecoderMs;
+
+    // Hop back to the game thread to fire OnComplete. Capture by value
+    // — OnComplete is a copy, BpResult moves into the lambda.
+    const FOnInoChatterboxSynthesisComplete OnCompleteCopy = Item.OnComplete;
+    AsyncTask(ENamedThreads::GameThread,
+        [OnCompleteCopy, bOK, BpResult = MoveTemp(BpResult),
+         NativeError = MoveTemp(NativeError)]() mutable
+    {
+        OnCompleteCopy.ExecuteIfBound(bOK, BpResult, NativeError);
+    });
+}

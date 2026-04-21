@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/Atomic.h"
 
 class FInoChatterboxModels;
 class FInoChatterboxTokenizer;
@@ -128,6 +129,20 @@ public:
      * @param OutResult        Populated with waveform + diagnostics.
      * @param OutError         On failure, filled with a human-readable
      *                         message. Optional.
+     * @param Cancel           Optional cooperative-cancel flag sampled
+     *                         once per AR iteration. If it flips to
+     *                         true mid-synth, the next iteration early-
+     *                         returns false with OutError="SynthesizeText:
+     *                         cancelled" — the decoder does NOT run, so
+     *                         OutResult.AudioSamples is left empty. The
+     *                         caller (typically UInoChatterboxTtsSubsystem)
+     *                         owns the atomic and keeps it alive for the
+     *                         call's duration; pass nullptr if
+     *                         cancellation is not wired up. Checked with
+     *                         relaxed memory order — the synth is not
+     *                         publishing data through this flag, it's
+     *                         just an eventually-consistent "stop please"
+     *                         signal.
      * @return                 True on success.
      *
      * Never call from the game thread; this is a synchronous blocking
@@ -138,7 +153,8 @@ public:
         TArrayView<const float>     ReferenceAudio,
         const FSynthesisOptions&    Options,
         FSynthesisResult&           OutResult,
-        FString*                    OutError = nullptr) const;
+        FString*                    OutError = nullptr,
+        const TAtomic<bool>*        Cancel   = nullptr) const;
 
 private:
     const FInoChatterboxModels&    Models;

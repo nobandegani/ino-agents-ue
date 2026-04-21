@@ -3,6 +3,7 @@
 #include "InoSmokeTestCommon.h"
 
 #include "InoAgentsLog.h"
+#include "Chatterbox/InoChatterboxTtsSubsystem.h"
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
@@ -53,6 +54,11 @@ UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
 UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
 {
     return FindGameInstanceSubsystem<UInoElevenLabsSubsystem>();
+}
+
+UInoChatterboxTtsSubsystem* FindChatterboxSubsystem()
+{
+    return FindGameInstanceSubsystem<UInoChatterboxTtsSubsystem>();
 }
 
 FString ResolveDefaultModelPath()

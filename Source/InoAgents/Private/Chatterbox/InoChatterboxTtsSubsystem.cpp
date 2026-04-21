@@ -8,7 +8,9 @@
 #include "Misc/Paths.h"
 
 #include "InoAgentsLog.h"
+#include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
+#include "InoChatterboxSynthesisWorker.h"
 #include "InoChatterboxTokenizer.h"
 
 // ============================================================================
@@ -48,6 +50,7 @@ void UInoChatterboxTtsSubsystem::Initialize(FSubsystemCollectionBase& Collection
     // Zero-init only — never load a model synchronously on startup.
     // A cold load is 1–5 seconds of ORT graph optimization and would
     // hitch PIE. LoadModelsAsync does the heavy lifting off-thread.
+    Worker.Reset();
     Models.Reset();
     Tokenizer.Reset();
     LoadedVariant  = EInoChatterboxVariant::Q4F16;
@@ -237,6 +240,13 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
             Subsys->Models        = MoveTemp(LocalModels);
             Subsys->LoadedVariant = VariantEnum;
 
+            // Spin up the synthesis worker now that its borrowed refs
+            // (Models + Tokenizer) are stable. The worker's destructor
+            // runs in UnloadModels BEFORE these refs are reset, so the
+            // invariant holds end-to-end.
+            Subsys->Worker = MakeUnique<FInoChatterboxSynthesisWorker>(
+                *Subsys->Models, *Subsys->Tokenizer);
+
             UE_LOG(LogInoAgents, Log,
                    TEXT("Chatterbox LoadModelsAsync: SUCCESS variant=%s in %.1f ms"),
                    *ChatterboxVariantToString(VariantEnum), ElapsedMs);
@@ -249,12 +259,11 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
 {
     check(IsInGameThread());
 
-    // Resetting the TUniquePtrs destroys the 4 ORT sessions (LIFO via
-    // FInoChatterboxModels's members) and frees the tokenizer's BPE
-    // tables. Cheap — no native teardown cost beyond heap frees.
-    //
-    // Commit 3 will add: cancel the in-flight synth worker before
-    // resetting, so a running AR loop can't deref the destroyed bundle.
+    // Teardown order matters: destroy the worker BEFORE the Models /
+    // Tokenizer it borrows references from. The worker's destructor
+    // joins the thread (which may still be running SynthesizeText),
+    // so by the time Worker.Reset() returns the worker thread is
+    // gone and nobody is holding references into Models/Tokenizer.
 
     if (bLoadInFlight)
     {
@@ -269,13 +278,19 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
                TEXT("result will be dropped when it completes"));
         bPendingUnload = true;
     }
-    else if (Models.IsValid() || Tokenizer.IsValid())
+    else if (Worker.IsValid() || Models.IsValid() || Tokenizer.IsValid())
     {
         UE_LOG(LogInoAgents, Log,
                TEXT("UInoChatterboxTtsSubsystem::UnloadModels — clearing variant=%s"),
                *ChatterboxVariantToString(LoadedVariant));
     }
 
+    // Worker first: its destructor blocks on thread join + drains the
+    // queue firing "shutting down" errors for any pending items. After
+    // this line, no worker thread code can touch Models / Tokenizer.
+    Worker.Reset();
+
+    // Now safe to free the borrowed references.
     Tokenizer.Reset();
     Models.Reset();
     LoadedVariant = EInoChatterboxVariant::Q4F16;
@@ -348,34 +363,130 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
     const FInoChatterboxSynthesisOptions& Options,
     const FOnInoChatterboxSynthesisComplete& OnComplete)
 {
-    // Commit 1 stub.
+    check(IsInGameThread());
+
+    // Helper: fire failure synchronously. Used for every pre-flight
+    // rejection so callers see a deterministic "same frame" failure
+    // before any worker-thread work happens.
+    auto FailNow = [&OnComplete](const FString& Msg)
+    {
+        UE_LOG(LogInoAgents, Warning, TEXT("Chatterbox SynthesizeAsync: %s"), *Msg);
+        FInoChatterboxSynthesisResult Empty;
+        OnComplete.ExecuteIfBound(false, Empty, Msg);
+    };
+
+    // -------- Pre-flight: validate inputs --------
+
+    if (!IsModelsLoaded() || !Worker.IsValid())
+    {
+        FailNow(TEXT("No Chatterbox models loaded — call LoadModelsAsync first"));
+        return;
+    }
+
+    if (Text.IsEmpty())
+    {
+        FailNow(TEXT("Text is empty"));
+        return;
+    }
+
+    // Phase E reserved field — refuse loudly so Blueprints wired for
+    // Phase E don't silently run without precomputed conditioning.
+    if (!Voice.PrecomputedConditioningPath.IsEmpty())
+    {
+        FailNow(TEXT("Voice.PrecomputedConditioningPath is reserved for Phase E ")
+                TEXT("and not yet implemented — leave it empty and supply ")
+                TEXT("WavFilePath or ReferenceSamples"));
+        return;
+    }
+
+    // -------- Resolve reference audio --------
     //
-    // Real flow (Commit 3): guard bSynthInFlight + IsModelsLoaded, load
-    // reference WAV off-thread (or use Voice.ReferenceSamples),
-    // enforce 24 kHz mono, construct FInoChatterboxRunner on a worker
-    // from the cached bundle+tokenizer, call SynthesizeText with a
-    // CancelFlag, marshal the FSynthesisResult into an
-    // FInoChatterboxSynthesisResult and fire OnComplete on the game
-    // thread.
-    UE_LOG(LogInoAgents, Warning,
-           TEXT("UInoChatterboxTtsSubsystem::SynthesizeAsync: not yet implemented ")
-           TEXT("(Commit 1 scaffolding). Text length=%d, MaxNewTokens=%d."),
+    // Three sources, priority order (matches FInoChatterboxVoice doc):
+    //   1. WavFilePath — read from disk here on the game thread. Read
+    //      is ~1–10 ms for a 5–10 s reference clip (UE's file IO, no
+    //      decompression beyond the int16/fp32 passthrough). Short
+    //      enough that doing it synchronously is preferable to fighting
+    //      the async machinery for a one-shot load at enqueue time.
+    //   2. ReferenceSamples — use as-is. Must already be 24 kHz mono fp32
+    //      (we can't cheaply verify the sample rate of raw samples).
+    //   3. Precomputed conditioning — Phase E, errored above.
+    //
+    // Strict 24 kHz policy for WavFilePath: reject mismatch with a clear
+    // message. Voice cloning quality is extremely sensitive to resample
+    // artifacts and we would rather the developer pre-convert offline
+    // than silently degrade.
+    TArray<float> ReferenceAudio;
+    if (!Voice.WavFilePath.IsEmpty())
+    {
+        int32 WavSampleRate = 0;
+        FString WavError;
+        if (!InoChatterbox::ReadMonoWavAsFloat32(
+                Voice.WavFilePath, ReferenceAudio, WavSampleRate, &WavError))
+        {
+            FailNow(FString::Printf(
+                TEXT("Failed to read reference WAV '%s': %s"),
+                *Voice.WavFilePath, *WavError));
+            return;
+        }
+        if (WavSampleRate != InoChatterbox::kSampleRate)
+        {
+            FailNow(FString::Printf(
+                TEXT("Reference WAV '%s' is %d Hz; Chatterbox Turbo requires 24000 Hz. ")
+                TEXT("Pre-convert your clip (e.g. Audacity → Tracks → Resample → 24000) ")
+                TEXT("rather than relying on silent in-engine resampling (voice cloning ")
+                TEXT("quality is extremely sensitive to resample artifacts)."),
+                *Voice.WavFilePath, WavSampleRate));
+            return;
+        }
+    }
+    else if (Voice.ReferenceSamples.Num() > 0)
+    {
+        // Trust the caller. Raw TArray<float> carries no sample-rate
+        // metadata, so we document the 24 kHz contract in the struct's
+        // header and rely on them honoring it.
+        ReferenceAudio = Voice.ReferenceSamples;
+    }
+    else
+    {
+        FailNow(TEXT("Voice has no reference audio — set WavFilePath or ReferenceSamples"));
+        return;
+    }
+
+    if (ReferenceAudio.Num() == 0)
+    {
+        FailNow(TEXT("Resolved reference audio is empty"));
+        return;
+    }
+
+    // -------- Enqueue --------
+    //
+    // FIFO across all SynthesizeAsync calls (same worker, same queue).
+    // A caller firing "sentence 1", "sentence 2", "sentence 3" in the
+    // same frame gets them played back in order without building its
+    // own queue on top.
+
+    FInoChatterboxSynthesisWorker::FPendingSynth Item;
+    Item.Text           = Text;
+    Item.ReferenceAudio = MoveTemp(ReferenceAudio);
+    Item.Options        = Options;
+    Item.OnComplete     = OnComplete;
+
+    Worker->Enqueue(MoveTemp(Item));
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox SynthesizeAsync: queued (text_len=%d, max_new_tokens=%d)"),
            Text.Len(), Options.MaxNewTokens);
-
-    // Suppress "unused" warnings for the Voice arg — the real code in
-    // Commit 3 will consume it.
-    (void)Voice;
-
-    FInoChatterboxSynthesisResult EmptyResult;
-    OnComplete.ExecuteIfBound(
-        false,
-        EmptyResult,
-        TEXT("SynthesizeAsync is a Commit 1 stub — real synthesis lands in Commit 3."));
 }
 
 void UInoChatterboxTtsSubsystem::CancelSynthesis()
 {
-    // Commit 1 stub — with no worker thread running yet, there's
-    // nothing to cancel. Commit 3 will set an atomic flag the AR loop
-    // samples per token.
+    check(IsInGameThread());
+
+    if (Worker.IsValid())
+    {
+        UE_LOG(LogInoAgents, Log, TEXT("Chatterbox CancelSynthesis"));
+        Worker->CancelAndFlush();
+    }
+    // No worker = nothing to cancel (either never loaded or already
+    // unloaded). Silent no-op — matches the doc on the header.
 }
