@@ -43,7 +43,9 @@
       "Bash(MSYS_NO_PATHCONV=1 /c/Windows/System32/cmd.exe /c 'dir \"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Source\\\\Runtime\\\\Core\\\\Public\\\\Misc\" /B 2>&1 | findstr /I sha')",
       "PowerShell(\"-- root check --\")",
       "PowerShell(\"-- plugin intermediate contents \\(first level\\) --\")",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
