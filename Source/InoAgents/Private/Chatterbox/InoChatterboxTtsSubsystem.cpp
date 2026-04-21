@@ -17,6 +17,16 @@
 #include "InoChatterboxSynthesisWorker.h"
 #include "InoChatterboxTokenizer.h"
 
+namespace
+{
+    /** Default reference-voice filename, relative to the variant dir.
+     *  Shared between BuildDownloadQueue (which adds it to the download
+     *  queue) and SynthesizeAsync (which falls back to it when the
+     *  caller provides no voice). Defined at file-top so both call
+     *  sites above and below see it. */
+    constexpr const TCHAR* kDefaultVoiceFilename = TEXT("default_voice.wav");
+}
+
 // ============================================================================
 // Out-of-line special members
 //
@@ -723,12 +733,6 @@ namespace
 
         return Queue;
     }
-
-    /** Default reference-voice filename, relative to the variant dir.
-     *  Shared between BuildDownloadQueue (which adds it to the download
-     *  queue) and SynthesizeAsync (which falls back to it when the
-     *  caller provides no voice). */
-    constexpr const TCHAR* kDefaultVoiceFilename = TEXT("default_voice.wav");
 }   // anonymous namespace
 
 void UInoChatterboxTtsSubsystem::StartDownload()
