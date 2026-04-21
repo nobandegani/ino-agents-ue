@@ -13,7 +13,7 @@ namespace
      * Build an FInoOnnxSessionOptions with Chatterbox-appropriate
      * defaults for the current platform.
      *
-     * Chatterbox's three runtime models are all large-ish autoregressive
+     * Chatterbox's four runtime models are all large-ish autoregressive
      * / convolutional pieces where graph optimization and fast CPU
      * kernels matter a lot. We always enable ALL graph optimizations.
      *
@@ -50,8 +50,8 @@ namespace
      * Create one session from a <component>_<variant>.onnx file under
      * BaseDir. Returns nullptr and writes to OutError on failure.
      *
-     * Component is the Chatterbox logical piece name: "language_model",
-     * "embed_tokens", or "conditional_decoder".
+     * Component is the Chatterbox logical piece name: "speech_encoder",
+     * "embed_tokens", "language_model", or "conditional_decoder".
      */
     TUniquePtr<FInoOnnxSession> LoadChatterboxSession(
         const FString& BaseDir,
@@ -136,16 +136,24 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     Bundle->Variant = Variant;
     Bundle->BaseDir = BaseDir;
 
-    // Load each of the three runtime sessions. Any failure short-circuits
-    // the whole bundle — a half-loaded set is never useful.
-    Bundle->LanguageModel = LoadChatterboxSession(BaseDir, Variant, TEXT("language_model"), OutError);
-    if (!Bundle->LanguageModel.IsValid())
+    // Load each of the four runtime sessions. Any failure short-circuits
+    // the whole bundle — a half-loaded set is never useful. Order matches
+    // the official reference script (speech_encoder first so voice
+    // conditioning is ready before the AR loop needs it).
+    Bundle->SpeechEncoder = LoadChatterboxSession(BaseDir, Variant, TEXT("speech_encoder"), OutError);
+    if (!Bundle->SpeechEncoder.IsValid())
     {
         return nullptr;
     }
 
     Bundle->EmbedTokens = LoadChatterboxSession(BaseDir, Variant, TEXT("embed_tokens"), OutError);
     if (!Bundle->EmbedTokens.IsValid())
+    {
+        return nullptr;
+    }
+
+    Bundle->LanguageModel = LoadChatterboxSession(BaseDir, Variant, TEXT("language_model"), OutError);
+    if (!Bundle->LanguageModel.IsValid())
     {
         return nullptr;
     }
@@ -157,7 +165,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: all three %s sessions loaded successfully."),
+           TEXT("Chatterbox: all four %s sessions loaded successfully."),
            *Variant);
 
     return Bundle;
@@ -165,7 +173,8 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
 
 void FInoChatterboxModels::LogMetadata() const
 {
-    if (!LanguageModel.IsValid() || !EmbedTokens.IsValid() || !ConditionalDecoder.IsValid())
+    if (!SpeechEncoder.IsValid() || !EmbedTokens.IsValid()
+        || !LanguageModel.IsValid() || !ConditionalDecoder.IsValid())
     {
         UE_LOG(LogInoAgents, Warning,
                TEXT("FInoChatterboxModels::LogMetadata: bundle is incomplete."));
@@ -177,12 +186,16 @@ void FInoChatterboxModels::LogMetadata() const
     UE_LOG(LogInoAgents, Log, TEXT("========================================"));
 
     UE_LOG(LogInoAgents, Log, TEXT(""));
-    UE_LOG(LogInoAgents, Log, TEXT("--- language_model ---"));
-    LanguageModel->LogMetadata();
+    UE_LOG(LogInoAgents, Log, TEXT("--- speech_encoder ---"));
+    SpeechEncoder->LogMetadata();
 
     UE_LOG(LogInoAgents, Log, TEXT(""));
     UE_LOG(LogInoAgents, Log, TEXT("--- embed_tokens ---"));
     EmbedTokens->LogMetadata();
+
+    UE_LOG(LogInoAgents, Log, TEXT(""));
+    UE_LOG(LogInoAgents, Log, TEXT("--- language_model ---"));
+    LanguageModel->LogMetadata();
 
     UE_LOG(LogInoAgents, Log, TEXT(""));
     UE_LOG(LogInoAgents, Log, TEXT("--- conditional_decoder ---"));

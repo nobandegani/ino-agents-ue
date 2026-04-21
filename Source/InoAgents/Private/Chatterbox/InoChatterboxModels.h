@@ -6,27 +6,28 @@
 #include "Onnx/InoOnnxSession.h"
 
 /**
- * FInoChatterboxModels — owns the three ORT sessions that make up
- * Chatterbox Turbo's runtime inference pipeline.
+ * FInoChatterboxModels — owns the four ORT sessions that make up
+ * Chatterbox Turbo's runtime inference pipeline, matching the official
+ * Resemble AI reference script at ResembleAI/chatterbox-turbo-ONNX.
  *
- * The Chatterbox Turbo ONNX bundle from ResembleAI/chatterbox-turbo-ONNX
- * splits the model into four components (see Plugins/InoAgents/Chatterbox/
- * README.md for the big picture). Three are runtime; the fourth
- * (speech_encoder) is authoring-only and doesn't ship in the game:
- *
- *   language_model        T3 autoregressive backbone. Takes token
- *                         embeddings + speaker conditioning, emits
- *                         speech-token logits one step at a time.
+ *   speech_encoder        Reference-audio -> (cond_emb, prompt_token,
+ *                         speaker_embeddings, speaker_features). Runs
+ *                         once per voice at load time; the four outputs
+ *                         are then reused for every utterance. Required
+ *                         at runtime for voice cloning.
  *   embed_tokens          Token-ID -> embedding lookup. Split out of
  *                         the LM so the embedding table can be memory-
  *                         mapped and quantized independently.
+ *   language_model        T3 autoregressive backbone. Takes token
+ *                         embeddings + speaker conditioning, emits
+ *                         speech-token logits one step at a time.
  *   conditional_decoder   S3Gen mel decoder + HiFi-GAN vocoder,
  *                         merged into a single ORT graph. Takes a
  *                         chunk of speech tokens + the speaker
  *                         embedding, emits PCM audio.
  *
  * This class is a minimal bundle that:
- *   - locates the three staged .onnx files for the requested variant
+ *   - locates the four staged .onnx files for the requested variant
  *   - constructs an FInoOnnxSession for each with Chatterbox-tuned
  *     provider + optimization settings
  *   - provides LogMetadata() so the first smoke test can dump actual
@@ -40,7 +41,7 @@
  *   - no Blueprint exposure (Phase D)
  *
  * Threading:
- *   LoadFromDir is synchronous and blocks until all three sessions
+ *   LoadFromDir is synchronous and blocks until all four sessions
  *   are created. Suitable for calling from a worker thread; do NOT
  *   call from the game thread (model load can take 1-5 seconds on
  *   first run due to ORT graph optimization). Phase D's subsystem
@@ -54,11 +55,12 @@ class FInoChatterboxModels
 {
 public:
     /**
-     * Load the three runtime sessions from a staged model directory.
+     * Load the four runtime sessions from a staged model directory.
      *
      * Expects the directory to contain (for variant X):
-     *   language_model_X.onnx        (+ .onnx_data for large variants)
+     *   speech_encoder_X.onnx        (+ .onnx_data for large variants)
      *   embed_tokens_X.onnx          (+ .onnx_data)
+     *   language_model_X.onnx        (+ .onnx_data)
      *   conditional_decoder_X.onnx   (+ .onnx_data)
      *
      * The .onnx_data companion is discovered automatically by ORT
@@ -89,8 +91,9 @@ public:
     // Returned pointers are valid until this FInoChatterboxModels is
     // destroyed. Consumers should NOT store them long-term.
 
-    FInoOnnxSession* GetLanguageModel() const       { return LanguageModel.Get(); }
+    FInoOnnxSession* GetSpeechEncoder() const       { return SpeechEncoder.Get(); }
     FInoOnnxSession* GetEmbedTokens() const         { return EmbedTokens.Get(); }
+    FInoOnnxSession* GetLanguageModel() const       { return LanguageModel.Get(); }
     FInoOnnxSession* GetConditionalDecoder() const  { return ConditionalDecoder.Get(); }
 
     /** Which quantization variant was loaded (e.g. "fp16" or "q4f16").
@@ -104,8 +107,9 @@ public:
 private:
     FInoChatterboxModels() = default;
 
-    TUniquePtr<FInoOnnxSession> LanguageModel;
+    TUniquePtr<FInoOnnxSession> SpeechEncoder;
     TUniquePtr<FInoOnnxSession> EmbedTokens;
+    TUniquePtr<FInoOnnxSession> LanguageModel;
     TUniquePtr<FInoOnnxSession> ConditionalDecoder;
 
     FString Variant;

@@ -359,7 +359,7 @@ The four `<name>` values:
 |---|---|---|
 | `speech_encoder` | Reference-audio → speaker conditioning tensors | Once per voice (can be cached / precomputed). |
 | `embed_tokens` | Text token ids → hidden embeddings | Once on the full prompt, then once per generated token. |
-| `language_model` | Llama-3-style 30-layer autoregressive sampler over speech tokens (KV-cached) | Once per generated speech token, up to `max_new_tokens`. |
+| `language_model` | Llama-3-style 24-layer autoregressive sampler over speech tokens (KV-cached) | Once per generated speech token, up to `max_new_tokens`. |
 | `conditional_decoder` | Speech tokens + speaker conditioning → 24 kHz waveform | Once at the end (single-step in Turbo — distilled from the original 10-step). |
 
 ### Pipeline constants (hardcoded by the model)
@@ -371,7 +371,7 @@ constexpr int64_t STOP_SPEECH_TOKEN     = 6562;
 constexpr int64_t SILENCE_TOKEN         = 4299;   // 3× appended before decoder to pad end
 constexpr int32   NUM_KV_HEADS          = 16;     // language_model
 constexpr int32   HEAD_DIM              = 64;     // language_model
-constexpr int32   NUM_HIDDEN_LAYERS     = 30;     // language_model (inferred from onnx-community fork; discover dynamically from session input names on the official graph)
+constexpr int32   NUM_HIDDEN_LAYERS     = 24;     // language_model (verified from live model's declared inputs; original non-Turbo Chatterbox has 30 — do not confuse)
 constexpr float   REPETITION_PENALTY    = 1.2f;   // default from the reference script
 constexpr int32   DEFAULT_MAX_NEW_TOKENS = 1024;  // reference script default
 ```

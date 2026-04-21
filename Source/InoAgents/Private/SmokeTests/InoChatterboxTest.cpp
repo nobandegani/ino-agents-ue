@@ -95,7 +95,7 @@ namespace
     /**
      * `Ino.Chatterbox.LoadModelsTest [variant]`
      *
-     * Loads the three staged ORT sessions for the given variant (default
+     * Loads the four staged ORT sessions for the given variant (default
      * "fp16") and logs their full I/O metadata. Use the output to:
      *   - Confirm setup-chatterbox.ps1 staged the correct files
      *   - Design the tokenizer token-space (output logit count)
@@ -112,7 +112,7 @@ namespace
 
     FAutoConsoleCommand GLoadModelsTestCmd(
         TEXT("Ino.Chatterbox.LoadModelsTest"),
-        TEXT("Load the three Chatterbox Turbo ORT sessions and dump their I/O metadata. ")
+        TEXT("Load the four Chatterbox Turbo ORT sessions and dump their I/O metadata. ")
         TEXT("Argument: variant name (fp16 default; fp32 | fp16 | q4 | q4f16 | quantized)."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunLoadModelsTest));
 
@@ -748,6 +748,51 @@ namespace
         return Names;
     }
 
+    /**
+     * Build initial zero-length past_key_values tensors for the language_model
+     * session, matching the dtype each input actually declares.
+     *
+     * This is the C++ port of the official reference loop at
+     * ResembleAI/chatterbox-turbo-ONNX README — the Python version uses:
+     *
+     *     past_key_values = {
+     *         i.name: np.zeros([batch, NUM_KV_HEADS, 0, HEAD_DIM],
+     *                          dtype=np.float16 if i.type == 'tensor(float16)'
+     *                                            else np.float32)
+     *         for i in language_model_session.get_inputs()
+     *         if "past_key_values" in i.name
+     *     }
+     *
+     * We must walk the session and discover each input's dtype rather than
+     * hardcode one: Chatterbox Turbo's quantized variants (q4, q4f16,
+     * fp16) mix float16 and float32 KV-cache inputs in the same graph,
+     * and the fp32 variant declares float32 for everything. Hardcoding
+     * fp16 breaks fp32 and corrupts q4/q4f16 at runtime.
+     *
+     * Returns tensors in the same order the LM session declares them,
+     * so the caller can append directly to LMInputs after the three
+     * main inputs (inputs_embeds, attention_mask, position_ids).
+     */
+    static TArray<FInoOnnxTensor> MakeZeroPastKeyValues(const FInoOnnxSession* LMSess)
+    {
+        TArray<FInoOnnxTensor> PastKV;
+        if (LMSess == nullptr) { return PastKV; }
+
+        const TArray<int64> ZeroKVShape = {
+            1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
+
+        const int32 NumInputs = LMSess->GetInputCount();
+        PastKV.Reserve(NumInputs);
+        for (int32 i = 0; i < NumInputs; ++i)
+        {
+            const FString Name = LMSess->GetInputName(i);
+            if (!Name.Contains(TEXT("past_key_values"))) { continue; }
+            const EInoOnnxDtype Dtype = LMSess->GetInputDtype(i);
+            PastKV.Add(FInoOnnxTensor::Create(Dtype, ZeroKVShape));
+        }
+        return PastKV;
+    }
+
     void RunARStepTest(const TArray<FString>& Args)
     {
         const FString Variant = Args.Num() > 0 ? Args[0] : FString(TEXT("fp16"));
@@ -937,27 +982,31 @@ namespace
             }
             LMInputs.Add(MoveTemp(PosIds));
 
-            // [3..50] past_key_values.L.key / .L.value — fp16 [1, 16, 0, 64]
+            // [3..50] past_key_values.L.key / .L.value — zero-length
+            //   [1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim].
             //
-            // Zero-sized past-sequence dim means "no cache yet" at step 0.
-            // Create() zero-initializes, matching Python's np.zeros(...,
-            // dtype=fp16). 24 layers × 2 (key, value) = 48 tensors, so
+            // Dtype is discovered per-input by MakeZeroPastKeyValues so
+            // the same code path works across fp32 / fp16 / q8 / q4 /
+            // q4f16 variants (quantized graphs mix float16 and float32
+            // KV inputs). 24 layers × 2 (key, value) = 48 tensors, so
             // total LM input count is 3 + 48 = 51.
-            const TArray<int64> KVShape = { 1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
-            for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
+            TArray<FInoOnnxTensor> PastKV = MakeZeroPastKeyValues(LMSess.Get());
+            if (PastKV.Num() != 2 * kChatterboxLMNumLayers)
             {
-                for (int32 KV = 0; KV < 2; ++KV)
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARStepTest: FAILED — discovered %d past_key_values inputs, expected %d"),
+                       PastKV.Num(), 2 * kChatterboxLMNumLayers);
+                return;
+            }
+            for (int32 i = 0; i < PastKV.Num(); ++i)
+            {
+                if (!PastKV[i].IsValid())
                 {
-                    FInoOnnxTensor T = FInoOnnxTensor::Create(EInoOnnxDtype::Float16, KVShape);
-                    if (!T.IsValid())
-                    {
-                        UE_LOG(LogInoAgents, Error,
-                               TEXT("Ino.Chatterbox.ARStepTest: FAILED to alloc past_key_values.%d.%s"),
-                               L, KV == 0 ? TEXT("key") : TEXT("value"));
-                        return;
-                    }
-                    LMInputs.Add(MoveTemp(T));
+                    UE_LOG(LogInoAgents, Error,
+                           TEXT("Ino.Chatterbox.ARStepTest: FAILED to alloc past_key_values slot %d"), i);
+                    return;
                 }
+                LMInputs.Add(MoveTemp(PastKV[i]));
             }
 
             check(LMInputs.Num() == Expected.Num());
@@ -1010,14 +1059,19 @@ namespace
                    SeqLen, kChatterboxLMSpeechVocabSize);
 
             // ---- 7) Validate first present KV tensor shape + dtype ----
+            // Dtype must match the corresponding past_key_values.0.key INPUT
+            // dtype that the session declared — quantized variants run
+            // float16 KV-cache while fp32 runs float32, so we can't hardcode.
             {
                 const FInoOnnxTensor& Present0Key = LMOutputs[1];
                 const TArray<int64>& PShape = Present0Key.GetShape();
+                const EInoOnnxDtype ExpectedPresentDtype =
+                    LMSess->GetInputDtype(3);  // past_key_values.0.key is at input index 3
                 if (PShape.Num() != 4 || PShape[0] != 1
                     || PShape[1] != kChatterboxLMNumKVHeads
                     || PShape[2] != SeqLen
                     || PShape[3] != kChatterboxLMHeadDim
-                    || Present0Key.GetDtype() != EInoOnnxDtype::Float16)
+                    || Present0Key.GetDtype() != ExpectedPresentDtype)
                 {
                     FString ShapeStr;
                     for (int32 i = 0; i < PShape.Num(); ++i)
@@ -1202,120 +1256,6 @@ namespace
         }
     }
 
-    /**
-     * Temperature + top-p (nucleus) sampling on a last-token logit slice.
-     *
-     * Greedy argmax — which our ARLoopTest/DecodeTest use — picks the
-     * single highest-logit token every step. That's correct but produces
-     * flat, robotic-sounding prosody because it throws away every other
-     * plausible continuation. Upstream Chatterbox PyTorch uses
-     * temperature=0.8 + top_p=0.9; onnx-community's Python README omits
-     * this for simplicity, but without it the output sounds "not
-     * natural" even when the tokens are bit-exact correct.
-     *
-     * Pipeline (logits -> sampled token):
-     *   1. Scale logits by 1/T (T=0.8 sharpens, T>1 flattens). T=1 is a
-     *      no-op; T<=0 degenerates to argmax (greedy).
-     *   2. Softmax with the standard max-subtract trick for stability.
-     *   3. Sort tokens by prob descending, take the smallest prefix
-     *      whose cumulative prob >= TopP. Everything outside this
-     *      "nucleus" is zeroed.
-     *   4. Renormalize the nucleus and draw a uniform sample.
-     *
-     * Scores is modified in place (the returned value is the sampled
-     * token id). Sort is O(V log V) over V=6563 — about 50-100 us per
-     * step, negligible next to the LM call.
-     */
-    static int64 SampleTemperatureTopP(
-        float* Scores,
-        int32 VocabSize,
-        float Temperature,
-        float TopP,
-        FRandomStream& Rng)
-    {
-        // T<=0 or numerically weird: fall back to greedy argmax.
-        if (!(Temperature > 0.0f) || !FMath::IsFinite(Temperature))
-        {
-            int32 Best = 0;
-            float BestV = Scores[0];
-            for (int32 i = 1; i < VocabSize; ++i)
-            {
-                if (Scores[i] > BestV) { BestV = Scores[i]; Best = i; }
-            }
-            return (int64)Best;
-        }
-
-        // 1) Temperature. Multiply-by-inverse avoids per-element divide.
-        if (Temperature != 1.0f)
-        {
-            const float InvT = 1.0f / Temperature;
-            for (int32 i = 0; i < VocabSize; ++i) { Scores[i] *= InvT; }
-        }
-
-        // 2) Softmax (stable).
-        float MaxL = Scores[0];
-        for (int32 i = 1; i < VocabSize; ++i)
-        {
-            if (Scores[i] > MaxL) { MaxL = Scores[i]; }
-        }
-        double SumExp = 0.0;
-        for (int32 i = 0; i < VocabSize; ++i)
-        {
-            Scores[i] = FMath::Exp(Scores[i] - MaxL);
-            SumExp += Scores[i];
-        }
-        if (!(SumExp > 0.0))
-        {
-            // Every logit was -inf somehow — fall back to uniform over
-            // a single token (position 0) rather than NaN-crash.
-            return 0;
-        }
-        const float InvSum = (float)(1.0 / SumExp);
-        for (int32 i = 0; i < VocabSize; ++i) { Scores[i] *= InvSum; }
-
-        // 3) Top-p. Sort an index array so we can keep Scores addressable
-        //    by original id while we walk the nucleus in prob-desc order.
-        TArray<int32> Idx;
-        Idx.SetNumUninitialized(VocabSize);
-        for (int32 i = 0; i < VocabSize; ++i) { Idx[i] = i; }
-        Idx.Sort([Scores](int32 A, int32 B)
-        {
-            return Scores[A] > Scores[B];
-        });
-
-        float CumSum  = 0.0f;
-        int32 NumKeep = 0;
-        const float TopPClamped = FMath::Clamp(TopP, 0.0f, 1.0f);
-        for (int32 i = 0; i < VocabSize; ++i)
-        {
-            CumSum += Scores[Idx[i]];
-            ++NumKeep;
-            if (CumSum >= TopPClamped) { break; }
-        }
-        if (NumKeep <= 0) { NumKeep = 1; }
-
-        // 4) Renormalize kept prefix and sample.
-        float KeptSum = 0.0f;
-        for (int32 i = 0; i < NumKeep; ++i) { KeptSum += Scores[Idx[i]]; }
-        if (!(KeptSum > 0.0f))
-        {
-            // All-zero kept slice — shouldn't happen after softmax, but
-            // guard anyway. Take the top-1.
-            return (int64)Idx[0];
-        }
-
-        const float R = Rng.FRand() * KeptSum;   // uniform in [0, KeptSum)
-        float C = 0.0f;
-        for (int32 i = 0; i < NumKeep; ++i)
-        {
-            C += Scores[Idx[i]];
-            if (R <= C) { return (int64)Idx[i]; }
-        }
-        // Floating-point edge case (R == KeptSum exactly) — fall through
-        // to the last kept token.
-        return (int64)Idx[NumKeep - 1];
-    }
-
     void RunARLoopTest(const TArray<FString>& Args)
     {
         // --- Parse args ---
@@ -1431,21 +1371,18 @@ namespace
             // by 1 to account for the newly-appended position in present_kv.
             int64 CurSeqLen = StartSeqLen;
 
-            // past_kv: 48 fp16 tensors [1, 16, 0, 64] at iter 0 (empty).
+            // past_kv: 48 zero-length tensors [1, 16, 0, 64] at iter 0.
             // Each iter N>=1, we move from present_kv outputs into here.
-            TArray<FInoOnnxTensor> PastKV;
-            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            // Dtype discovered per-input by MakeZeroPastKeyValues — the
+            // Turbo ONNX quantized variants mix float16 and float32 KV
+            // inputs, so a single hardcoded dtype breaks most variants.
+            TArray<FInoOnnxTensor> PastKV = MakeZeroPastKeyValues(LMSess.Get());
+            if (PastKV.Num() != 2 * kChatterboxLMNumLayers)
             {
-                const TArray<int64> ZeroKVShape = {
-                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
-                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
-                {
-                    for (int32 KV = 0; KV < 2; ++KV)
-                    {
-                        PastKV.Add(FInoOnnxTensor::Create(
-                            EInoOnnxDtype::Float16, ZeroKVShape));
-                    }
-                }
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.ARLoopTest: FAILED — discovered %d past_key_values inputs, expected %d"),
+                       PastKV.Num(), 2 * kChatterboxLMNumLayers);
+                return;
             }
 
             // Generated token stream. Always starts with START_SPEECH_TOKEN
@@ -1850,7 +1787,7 @@ namespace
                 return;
             }
 
-            // ---- Load all three sessions (we'll need them all) ----
+            // ---- Load the three sessions this test needs (embed + LM + decoder) ----
             const double EmbedLoadT0 = FPlatformTime::Seconds();
             TUniquePtr<FInoOnnxSession> EmbedSess =
                 FInoOnnxSession::Create(EmbedOnnxPath, Opts, &Err);
@@ -1930,19 +1867,13 @@ namespace
             const int64 StartSeqLen = TextIds.Num();
             int64 CurSeqLen = StartSeqLen;
 
-            TArray<FInoOnnxTensor> PastKV;
-            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            TArray<FInoOnnxTensor> PastKV = MakeZeroPastKeyValues(LMSess.Get());
+            if (PastKV.Num() != 2 * kChatterboxLMNumLayers)
             {
-                const TArray<int64> ZeroKVShape = {
-                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
-                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
-                {
-                    for (int32 KV = 0; KV < 2; ++KV)
-                    {
-                        PastKV.Add(FInoOnnxTensor::Create(
-                            EInoOnnxDtype::Float16, ZeroKVShape));
-                    }
-                }
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.DecodeTest: FAILED — discovered %d past_key_values inputs, expected %d"),
+                       PastKV.Num(), 2 * kChatterboxLMNumLayers);
+                return;
             }
 
             TArray<int64> GeneratedTokens;
@@ -2967,35 +2898,24 @@ namespace
             // speech token.
             int64 CurSeqLen = CondLen + TextLen;
 
-            TArray<FInoOnnxTensor> PastKV;
-            PastKV.Reserve(2 * kChatterboxLMNumLayers);
+            TArray<FInoOnnxTensor> PastKV = MakeZeroPastKeyValues(LMSess.Get());
+            if (PastKV.Num() != 2 * kChatterboxLMNumLayers)
             {
-                const TArray<int64> ZeroKVShape = {
-                    1, kChatterboxLMNumKVHeads, 0, kChatterboxLMHeadDim };
-                for (int32 L = 0; L < kChatterboxLMNumLayers; ++L)
-                {
-                    for (int32 KV = 0; KV < 2; ++KV)
-                    {
-                        PastKV.Add(FInoOnnxTensor::Create(
-                            EInoOnnxDtype::Float16, ZeroKVShape));
-                    }
-                }
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Ino.Chatterbox.SynthTest: FAILED — discovered %d past_key_values inputs, expected %d"),
+                       PastKV.Num(), 2 * kChatterboxLMNumLayers);
+                return;
             }
 
             TArray<int64> GeneratedTokens;
             GeneratedTokens.Reserve(MaxNewTokens + 2);
             GeneratedTokens.Add(kStartSpeechToken);
 
-            // Sampling parameters — empirically chosen to match upstream
-            // PyTorch Chatterbox defaults. Greedy argmax (what
-            // ARLoopTest/DecodeTest use) produces robotic-sounding flat
-            // prosody; temp=0.8 + top-p=0.9 gives natural cadence while
-            // staying semantically coherent. RNG is seeded from the
-            // current tick so each run varies slightly (like real
-            // speech) rather than reproducing bit-identical output.
-            const float kSampleTemperature = 0.8f;
-            const float kSampleTopP        = 0.9f;
-            FRandomStream Rng((uint32)FDateTime::Now().GetTicks());
+            // Sampling follows the official reference script verbatim:
+            // greedy argmax over the repetition-penalised last-position
+            // logits. No temperature, no top-p, no RNG — deterministic
+            // and spec-compliant with Resemble AI's published inference
+            // loop at ResembleAI/chatterbox-turbo-ONNX.
 
             bool  bHitStop    = false;
             int32 NumItersRun = 0;
@@ -3116,15 +3036,20 @@ namespace
                     Scores.GetData(), kChatterboxLMSpeechVocabSize,
                     GeneratedTokens, kRepetitionPenalty);
 
-                // Temperature + top-p sampling on the penalized logits.
-                // This is the key departure from ARLoopTest/DecodeTest,
-                // which use pure greedy argmax — greedy produces robotic
-                // cadence because it always picks the single highest-
-                // probability continuation. Chatterbox PyTorch's
-                // defaults (T=0.8, top-p=0.9) yield natural prosody.
-                const int64 NextToken = SampleTemperatureTopP(
-                    Scores.GetData(), kChatterboxLMSpeechVocabSize,
-                    kSampleTemperature, kSampleTopP, Rng);
+                // Greedy argmax on the repetition-penalised last-position
+                // logits. Matches the official reference script at
+                // ResembleAI/chatterbox-turbo-ONNX byte-for-byte:
+                //   next_token = np.argmax(next_token_logits, axis=-1, ...)
+                int64 NextToken = 0;
+                float BestScore = -FLT_MAX;
+                for (int32 i = 0; i < kChatterboxLMSpeechVocabSize; ++i)
+                {
+                    if (Scores[i] > BestScore)
+                    {
+                        BestScore = Scores[i];
+                        NextToken = i;
+                    }
+                }
 
                 GeneratedTokens.Add(NextToken);
                 NumItersRun = Iter + 1;
@@ -3160,11 +3085,17 @@ namespace
                    bHitStop ? TEXT("yes") : TEXT("no"));
 
             // ---- G) Build decoder inputs ----
-            // Python: speech_tokens = np.concatenate([prompt_token,
-            //                                        generate_tokens[:, 1:-1]])
-            // i.e. drop START (and the trailing element regardless of whether
-            // it was STOP or the last-sampled token on max-tokens exit),
-            // then prepend the encoder's audio_tokens.
+            // Python (from the official reference script):
+            //     speech_tokens  = generate_tokens[:, 1:-1]        # drop START, STOP
+            //     silence_tokens = np.full((batch, 3), SILENCE_TOKEN, int64)
+            //     speech_tokens  = np.concatenate(
+            //         [prompt_token, speech_tokens, silence_tokens], axis=1)
+            //
+            // We build GenSlice as generate_tokens[1:-1], append 3 silence
+            // tokens, then prepend prompt_token when we materialise the
+            // tensor below. Order matters: prompt_token FIRST, generated
+            // middle, silence LAST — otherwise the decoder produces a
+            // clipped-tail waveform.
             const int32 NumGen = GeneratedTokens.Num();
             if (NumGen < 2)
             {
@@ -3173,17 +3104,27 @@ namespace
                 return;
             }
 
-            // Slice generated[1:-1]
+            // Slice generated[1:-1]  (drop leading START and trailing
+            // STOP / last-sampled token).
             TArray<int64> GenSlice;
-            if (NumGen >= 3)
             {
-                GenSlice.Reserve(NumGen - 2);
+                const int32 InnerCount = FMath::Max(0, NumGen - 2);
+                GenSlice.Reserve(InnerCount + 3);  // +3 for silence tail
                 for (int32 i = 1; i < NumGen - 1; ++i)
                 {
                     GenSlice.Add(GeneratedTokens[i]);
                 }
             }
-            // else: nothing to decode beyond the prompt; odd but let it ride
+
+            // Tail-pad with three SILENCE tokens, matching the reference
+            // script. Inaudible in themselves (they drive the decoder to
+            // emit a short fade-to-silence at end-of-utterance) but
+            // materially affect the audio: without them the waveform
+            // terminates abruptly, producing a click / unfinished feel.
+            for (int32 i = 0; i < 3; ++i)
+            {
+                GenSlice.Add(kSilenceSpeechToken);
+            }
 
             // Prepend audio_tokens (int64 [1, P]) to GenSlice.
             // Final speech_tokens shape: [1, P + GenSlice.Num()]
@@ -3214,9 +3155,11 @@ namespace
                                     (SIZE_T)GenSlice.Num() * sizeof(int64));
                 }
             }
+            // GenSlice = generate_tokens[1:-1] (NumGen-2 items) + 3 silence.
+            const int32 GeneratedCount = FMath::Max(0, NumGen - 2);
             UE_LOG(LogInoAgents, Log,
-                   TEXT("Ino.Chatterbox.SynthTest: decoder speech_tokens = [%lld prompt + %d generated = %lld]"),
-                   PromptLen, GenSlice.Num(), TotalSpeechLen);
+                   TEXT("Ino.Chatterbox.SynthTest: decoder speech_tokens = [%lld prompt + %d generated + 3 silence = %lld]"),
+                   PromptLen, GeneratedCount, TotalSpeechLen);
 
             TArray<FInoOnnxTensor> DecInputs;
             DecInputs.Reserve(3);
