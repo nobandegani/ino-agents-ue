@@ -492,7 +492,7 @@ void UInoLiteRtLmConversation::RecordAssistantMessage(const FString& Text)
 // Sentence detection
 // ======================================================================
 
-FString UInoLiteRtLmConversation::StripTags(const FString& Raw)
+FString UInoLiteRtLmConversation::StripTags(const FString& Raw) const
 {
     // One-shot sibling of FilterCleanToken for OnSentence.CleanText. Operates
     // on a complete sentence (no chunk boundaries), so all state is local.

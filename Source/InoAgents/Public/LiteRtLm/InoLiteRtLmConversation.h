@@ -169,10 +169,12 @@ public:
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void SendMessageAsync(const FString& UserText);
 
-    /** Strip all [bracketed] tags from a string.
-     *  "[cheerfully] Hello!" → "Hello!" */
+    /** Strip delimiter-pair tags from a string, honouring TagStripFlags
+     *  (so "[cheerfully] Hello!" becomes "Hello!" when SquareBrackets is
+     *  enabled). Non-static because it reads the per-conversation
+     *  TagStripFlags — the Blueprint node takes a conversation target. */
     UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
-    static FString StripTags(const FString& Raw);
+    FString StripTags(const FString& Raw) const;
 
     // ------------------------------------------------------------------
     // History
