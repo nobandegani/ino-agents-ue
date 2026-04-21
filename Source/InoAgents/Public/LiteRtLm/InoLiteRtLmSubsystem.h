@@ -82,18 +82,30 @@ public:
      * Returns immediately. When loading finishes (success or failure),
      * OnLoaded fires on the game thread.
      *
+     * Flow:
+     *   1. Resolve the model on disk (LiteRtLmResolveModelPath).
+     *   2. If missing → download from the model entry's DownloadUrl into
+     *      PersistentDownloadDir.
+     *   3. If the entry carries an ExpectedSha256, SHA-256 the file on a
+     *      ThreadPool worker before loading. On mismatch:
+     *        - Cached file: delete and re-download, then verify again.
+     *        - Freshly-downloaded file: hard fail (OnLoaded false) — no
+     *          redownload loop.
+     *   4. Call litert_lm_engine_create on the ThreadPool worker and
+     *      marshal the result back to the game thread.
+     *
      * Error cases that fire OnLoaded with bSuccess=false:
      *   - Another load is already in flight
      *   - A model is already loaded (call UnloadModel first)
-     *   - Config is null
-     *   - The plugin cannot be located via IPluginManager
-     *   - The model file does not exist at the resolved path
+     *   - The model file does not exist and no DownloadUrl is configured
+     *   - SHA-256 verification failed and cannot be recovered (no URL, or
+     *     a fresh download also mismatched)
      *   - litert_lm_engine_settings_create returned NULL
-     *   - litert_lm_engine_create returned NULL (most expensive failure;
-     *     can happen for corrupt or unsupported models)
+     *   - litert_lm_engine_create returned NULL (corrupt / unsupported model)
      *
-     * MUST be called on the game thread. The actual engine construction
-     * runs on a ThreadPool worker; the OnLoaded callback marshals back.
+     * MUST be called on the game thread. The actual SHA-256 + engine
+     * construction run on ThreadPool workers; the OnLoaded callback
+     * marshals back to the game thread.
      */
     /**
      * Fires during model download with progress info. Only fires when
@@ -115,6 +127,37 @@ public:
      */
     UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
     bool IsModelLoaded() const;
+
+    /**
+     * True if the named model is present on disk and non-empty, i.e.
+     * LoadModelAsync would NOT need to download it before loading.
+     *
+     * Resolution order matches LoadModelAsync:
+     *   1. PersistentDownloadDir/InoAgents/Models/  (auto-download cache)
+     *   2. Plugins/InoAgents/Models/                (legacy dev drop)
+     *
+     * ModelNameOrFileName accepts either:
+     *   - The on-disk filename ("gemma-4-E2B-it.litertlm"), OR
+     *   - The DisplayName from Project Settings → Plugins → InoAgents →
+     *     LiteRT-LM → Models ("Gemma 4 E2B"). Case-insensitive.
+     *
+     * Checks performed:
+     *   - File exists at one of the two resolved locations.
+     *   - File size > 0 (guards against zero-byte stubs).
+     *
+     * Does NOT perform SHA-256 verification — intentionally. Hashing a
+     * multi-GB file costs seconds even on SSD and would be a terrible
+     * thing to do synchronously on the game thread. The SHA-256 check
+     * happens asynchronously inside LoadModelAsync when the entry has
+     * an ExpectedSha256 configured; this method is only a cheap "is it
+     * on disk" probe, useful for deciding whether to show a download
+     * progress UI before the user kicks off a load.
+     *
+     * Pure — safe to call from Blueprint constant-evaluated contexts,
+     * Tick, or any thread (file I/O is read-only stat).
+     */
+    UFUNCTION(BlueprintPure, Category="InoAgents|LiteRT-LM")
+    bool IsModelDownloaded(const FString& ModelNameOrFileName) const;
 
     /**
      * Destroy the loaded engine. Safe to call with no model loaded (no-op).
@@ -293,6 +336,30 @@ private:
     void FinishDownloadError(const FString& Error);
     void CleanupDownload();
     void ProceedWithLoad(const FString& ModelPath, const FOnInoLiteRtLmModelLoaded& OnLoaded);
+
+    /**
+     * Verify the file at ModelPath against the entry's ExpectedSha256 (if set),
+     * then either:
+     *   - Hand off to ProceedWithLoad on a match (or if verification is skipped
+     *     because the entry has no expected hash).
+     *   - On mismatch: delete the file and, if bAllowRedownloadOnMismatch is
+     *     true and the entry has a DownloadUrl, call StartDownload with the
+     *     same OnLoaded delegate. Otherwise fail via the OnLoaded delegate
+     *     without retrying (used from FinishDownloadSuccess to avoid infinite
+     *     retry loops on persistently-bad downloads).
+     *
+     * SHA-256 computation is dispatched to the ThreadPool. Result dispatch
+     * back to the game thread is done via AsyncTask(ENamedThreads::GameThread).
+     * A TWeakObjectPtr<UInoLiteRtLmSubsystem> guards against teardown
+     * mid-verification — if the subsystem is gone when the result arrives,
+     * the lambda no-ops.
+     *
+     * MUST be called on the game thread.
+     */
+    void VerifyAndLoad(const FString& ModelPath,
+                       const FInoLiteRtLmModelEntry* Entry,
+                       const FOnInoLiteRtLmModelLoaded& OnLoaded,
+                       bool bAllowRedownloadOnMismatch);
 
     // Weak ref to the most recently created conversation. Used to enforce
     // the single-conversation invariant and to tear the conversation down

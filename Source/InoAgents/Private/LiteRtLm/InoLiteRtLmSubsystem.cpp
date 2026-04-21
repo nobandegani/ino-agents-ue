@@ -7,6 +7,7 @@
 #include "InoAgentsSettings.h"
 #include "LiteRtLm/InoLiteRtLmToolBase.h"
 #include "LiteRtLm/InoLiteRtLmTypes.h"
+#include "LiteRtLm/InoSha256.h"
 #include "UI/Slate/InoChatBridge.h"
 #include "UI/Slate/SInoChatPanel.h"
 
@@ -133,10 +134,11 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
 
     if (!ModelPath.IsEmpty())
     {
-        // Found on disk — proceed to load.
+        // Found on disk — verify SHA-256 first (if the entry has one configured),
+        // then either proceed to load or delete+redownload on mismatch.
         bLoadInFlight = true;
         LoadedConfig  = ResolvedConfig;
-        ProceedWithLoad(ModelPath, OnLoaded);
+        VerifyAndLoad(ModelPath, Entry, OnLoaded, /*bAllowRedownloadOnMismatch=*/ true);
         return;
     }
 
@@ -292,6 +294,42 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
 bool UInoLiteRtLmSubsystem::IsModelLoaded() const
 {
     return Engine != nullptr;
+}
+
+bool UInoLiteRtLmSubsystem::IsModelDownloaded(const FString& ModelNameOrFileName) const
+{
+    if (ModelNameOrFileName.IsEmpty())
+    {
+        return false;
+    }
+
+    // Canonicalize DisplayName → filename the same way LoadModelAsync does.
+    // If settings aren't available (shouldn't happen at runtime, but guard
+    // anyway) or the name isn't registered, fall through with the raw input.
+    FString FileName = ModelNameOrFileName;
+    if (const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get())
+    {
+        if (const FInoLiteRtLmModelEntry* Entry = AgentSettings->FindModel(ModelNameOrFileName))
+        {
+            FileName = Entry->ModelFileName;
+        }
+    }
+
+    // LiteRtLmResolveModelPath returns empty iff the file is absent from
+    // both PersistentDownloadDir and the plugin's legacy Models/ dir. It
+    // already looks for the exact final filename, so any lingering
+    // `<name>.partial` from an interrupted download is implicitly ignored.
+    const FString ResolvedPath = LiteRtLmResolveModelPath(FileName);
+    if (ResolvedPath.IsEmpty())
+    {
+        return false;
+    }
+
+    // Defense in depth: make sure the file is non-empty. FileSize returns
+    // INDEX_NONE on error or for directories; only a strictly positive
+    // size counts as "downloaded".
+    const int64 Size = IFileManager::Get().FileSize(*ResolvedPath);
+    return Size > 0;
 }
 
 void UInoLiteRtLmSubsystem::UnloadModel()
@@ -656,7 +694,16 @@ void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
            TEXT("LoadModelAsync: model downloaded and saved to %s (%lld bytes)"),
            *PendingDownloadTargetPath, DownloadBytesWritten);
 
-    ProceedWithLoad(PendingDownloadTargetPath, PendingOnLoaded);
+    // Verify the freshly-downloaded file against the entry's ExpectedSha256
+    // before handing it to the native engine. bAllowRedownloadOnMismatch=false
+    // so that a corrupt upstream can't put us in an infinite redownload loop —
+    // if a just-downloaded file fails verification we treat it as a hard error.
+    const UInoAgentsSettings*     PostSettings = UInoAgentsSettings::Get();
+    const FInoLiteRtLmModelEntry* PostEntry    = PostSettings
+        ? PostSettings->FindModelByFileName(LoadedConfig.ModelFileName)
+        : nullptr;
+    VerifyAndLoad(PendingDownloadTargetPath, PostEntry, PendingOnLoaded,
+                  /*bAllowRedownloadOnMismatch=*/ false);
 }
 
 void UInoLiteRtLmSubsystem::FinishDownloadError(const FString& Error)
@@ -676,6 +723,140 @@ void UInoLiteRtLmSubsystem::CleanupDownload()
         delete DownloadFileHandle;
         DownloadFileHandle = nullptr;
     }
+}
+
+void UInoLiteRtLmSubsystem::VerifyAndLoad(
+    const FString&                   ModelPath,
+    const FInoLiteRtLmModelEntry*    Entry,
+    const FOnInoLiteRtLmModelLoaded& OnLoaded,
+    bool                             bAllowRedownloadOnMismatch)
+{
+    check(IsInGameThread());
+
+    // No registry entry at all, or entry has no expected hash → verification
+    // is effectively opt-in per model and this one is opted out. Proceed
+    // straight to load with the same behaviour the plugin had before SHA
+    // checks existed.
+    if (Entry == nullptr || Entry->ExpectedSha256.IsEmpty())
+    {
+        if (Entry != nullptr)
+        {
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("VerifyAndLoad: no ExpectedSha256 configured for '%s' — skipping verification"),
+                   *Entry->ModelFileName);
+        }
+        ProceedWithLoad(ModelPath, OnLoaded);
+        return;
+    }
+
+    // Capture everything we need by value so the ThreadPool lambda has no
+    // lifetime dependency on Entry (which points into a UPROPERTY TArray
+    // that could, in principle, be edited from the editor mid-verify).
+    const FString                       ExpectedHash  = Entry->ExpectedSha256.ToLower();
+    const FString                       RedownloadUrl = Entry->DownloadUrl;
+    const FString                       ModelFileName = Entry->ModelFileName;
+    const FString                       PathCopy      = ModelPath;
+    TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakThis(this);
+    const double                         TStart        = FPlatformTime::Seconds();
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("VerifyAndLoad: computing SHA-256 of %s (this may take several seconds for multi-GB files)"),
+           *PathCopy);
+
+    Async(EAsyncExecution::ThreadPool,
+        [PathCopy, ExpectedHash, RedownloadUrl, ModelFileName, WeakThis,
+         OnLoaded, bAllowRedownloadOnMismatch, TStart]()
+    {
+        // ============== WORKER THREAD ==============
+        const FString ActualHash = InoAgents::ComputeFileSha256(PathCopy).ToLower();
+        const double  Elapsed    = FPlatformTime::Seconds() - TStart;
+
+        AsyncTask(ENamedThreads::GameThread,
+            [PathCopy, ExpectedHash, ActualHash, RedownloadUrl, ModelFileName,
+             WeakThis, OnLoaded, bAllowRedownloadOnMismatch, Elapsed]()
+        {
+            // ============== GAME THREAD ==============
+            UInoLiteRtLmSubsystem* Self = WeakThis.Get();
+            if (Self == nullptr)
+            {
+                // Subsystem was torn down while the hash was running. The
+                // user can't see a result any more, so drop silently.
+                return;
+            }
+
+            if (!ActualHash.IsEmpty() && ActualHash == ExpectedHash)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("VerifyAndLoad: SHA-256 OK for %s (%.1f s)"),
+                       *ModelFileName, Elapsed);
+                Self->ProceedWithLoad(PathCopy, OnLoaded);
+                return;
+            }
+
+            // --- Mismatch / read failure handling ---
+
+            if (ActualHash.IsEmpty())
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("VerifyAndLoad: failed to compute SHA-256 of %s (file unreadable or gone); "
+                            "treating as verification failure"),
+                       *PathCopy);
+            }
+            else
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("VerifyAndLoad: SHA-256 mismatch for %s. Expected %s, got %s."),
+                       *ModelFileName, *ExpectedHash, *ActualHash);
+            }
+
+            // Delete the bad file so the next load attempt sees a clean slate
+            // and won't waste another multi-second hash on the same bytes.
+            if (!IFileManager::Get().Delete(*PathCopy, /*RequireExists=*/ false,
+                                            /*EvenReadOnly=*/ true))
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("VerifyAndLoad: also failed to delete %s — "
+                            "manual cleanup may be required"),
+                       *PathCopy);
+            }
+
+            if (!bAllowRedownloadOnMismatch)
+            {
+                // Post-download verification failure — do NOT loop.
+                Self->bLoadInFlight = false;
+                Self->LoadedConfig  = FInoLiteRtLmModelConfig();
+                const FString Err = FString::Printf(
+                    TEXT("Model '%s' failed SHA-256 verification immediately after download "
+                         "(expected %s, got %s). The download may be corrupt or the configured "
+                         "hash may be wrong."),
+                    *ModelFileName, *ExpectedHash,
+                    ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
+                UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+                OnLoaded.ExecuteIfBound(false, Err);
+                return;
+            }
+
+            // Cached file went bad — try a fresh download if we have a URL.
+            if (RedownloadUrl.IsEmpty())
+            {
+                Self->bLoadInFlight = false;
+                Self->LoadedConfig  = FInoLiteRtLmModelConfig();
+                const FString Err = FString::Printf(
+                    TEXT("Cached model '%s' failed SHA-256 verification and no DownloadUrl is "
+                         "configured — cannot recover. Expected %s, got %s."),
+                    *ModelFileName, *ExpectedHash,
+                    ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
+                UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+                OnLoaded.ExecuteIfBound(false, Err);
+                return;
+            }
+
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("VerifyAndLoad: re-downloading %s from %s"),
+                   *ModelFileName, *RedownloadUrl);
+            Self->StartDownload(RedownloadUrl, PathCopy, OnLoaded);
+        });
+    });
 }
 
 // ======================================================================

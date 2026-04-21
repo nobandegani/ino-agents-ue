@@ -192,6 +192,23 @@ struct FInoLiteRtLmModelEntry
      *  https://huggingface.co/<org>/<repo>/resolve/main/<file> */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
     FString DownloadUrl;
+
+    /** Optional lowercase 64-character SHA-256 hex digest of the model file.
+     *  Same format as `sha256sum` / Hugging Face LFS OIDs.
+     *
+     *  When set, UInoLiteRtLmSubsystem::LoadModelAsync verifies the on-disk
+     *  file against this digest before handing it to the native engine.
+     *  A mismatch for a locally-cached file triggers an automatic delete +
+     *  re-download; a mismatch immediately after a fresh download is a hard
+     *  failure (no infinite loop).
+     *
+     *  Leave empty to skip verification (back-compat with pre-SHA workflows).
+     *  Obtain the hash from the model's upstream host — for Hugging Face
+     *  LFS files the SHA-256 is the `oid` shown on the file's page or via
+     *  the API's `X-Linked-Etag` header. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+              meta = (DisplayName = "Expected SHA-256"))
+    FString ExpectedSha256;
 };
 
 /** Resolve the on-disk path for a model filename. Checks:
