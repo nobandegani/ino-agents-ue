@@ -157,9 +157,13 @@ struct FInoChatterboxSynthesisOptions
  *      resample artifacts; do it properly offline, or supply a
  *      correctly-formatted clip).
  *
- *   2. ReferenceSamples — raw 24 kHz mono float32 samples in [-1, +1].
+ *   2. ReferenceSamples — 24 kHz mono int16 PCM little-endian bytes.
  *      Used when the voice is already in memory (e.g. captured from
- *      the microphone in-engine). Ignored if WavFilePath is non-empty.
+ *      the microphone in-engine, received over the network, loaded
+ *      from a custom asset). Byte count must be a multiple of 2 —
+ *      each int16 sample is two bytes. The subsystem converts to
+ *      float32 internally before handing to the speech encoder.
+ *      Ignored if WavFilePath is non-empty.
  *
  *   3. PrecomputedConditioningPath — RESERVED for Phase E. A future
  *      authoring step will bake (cond_emb, prompt_token,
@@ -192,10 +196,12 @@ struct FInoChatterboxVoice
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
     FString WavFilePath;
 
-    /** Raw 24 kHz mono float32 samples, [-1, +1]. Ignored if
-     *  WavFilePath is non-empty. */
+    /** 24 kHz mono int16 PCM little-endian bytes. Byte count must be
+     *  a multiple of 2. The subsystem converts to float32 internally
+     *  before feeding speech_encoder. Ignored if WavFilePath is
+     *  non-empty. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
-    TArray<float> ReferenceSamples;
+    TArray<uint8> ReferenceSamples;
 
     /** RESERVED for Phase E (precomputed voice conditioning). Leave
      *  empty in Phase D — setting it errors the synthesis call. */
@@ -218,15 +224,32 @@ struct FInoChatterboxSynthesisResult
 {
     GENERATED_BODY()
 
-    /** Waveform samples, float32 at SampleRate Hz, mono.
-     *  Always non-empty on success. */
+    /** Generated audio: 24 kHz mono int16 PCM little-endian bytes.
+     *  Byte count is always a multiple of 2 (one int16 sample per
+     *  two bytes). Always non-empty on success.
+     *
+     *  This is the "lingua franca" format for UE audio: feed it
+     *  straight into USoundWaveProcedural::QueueAudio, into
+     *  RuntimeAudioImporter's UStreamingSoundWave::AppendAudioDataFromRAW
+     *  with ERuntimeRAWAudioFormat::Int16, save it verbatim as the
+     *  data chunk of a WAV file (24 kHz mono), or send it over the
+     *  network unmodified.
+     *
+     *  To get the sample count: AudioSamples.Num() / 2
+     *  To get seconds:          use DurationSeconds below. */
     UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
-    TArray<float> AudioSamples;
+    TArray<uint8> AudioSamples;
 
     /** Always 24000 for Chatterbox Turbo. Included so callers passing
      *  AudioSamples to an audio pipeline don't have to hardcode the rate. */
     UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
     int32 SampleRate = 24000;
+
+    /** Duration of AudioSamples in seconds, pre-computed by the
+     *  subsystem. Cheaper / more ergonomic than dividing
+     *  AudioSamples.Num()/2 by SampleRate in every Blueprint. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
+    float DurationSeconds = 0.0f;
 
     /** How many speech tokens the AR loop produced. Excludes the
      *  leading START and (if present) trailing STOP markers. */
@@ -336,9 +359,10 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoChatterboxModelsLoaded,
 /**
  * Fired once by UInoChatterboxTtsSubsystem::SynthesizeAsync per call.
  * On success, bSuccess is true, Result.AudioSamples is the 24 kHz mono
- * float32 waveform, and ErrorMessage is empty. On failure, bSuccess is
- * false, Result is default-initialized (AudioSamples empty), and
- * ErrorMessage describes what went wrong.
+ * int16 PCM LE byte buffer (see FInoChatterboxSynthesisResult), and
+ * ErrorMessage is empty. On failure, bSuccess is false, Result is
+ * default-initialized (AudioSamples empty), and ErrorMessage describes
+ * what went wrong.
  */
 DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoChatterboxSynthesisComplete,
     bool, bSuccess,

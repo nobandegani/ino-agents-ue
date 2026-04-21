@@ -134,43 +134,37 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
     {
         // -------- Waveform sanity scan --------
         //
-        // Policy matches the native-layer Ino.Chatterbox.SynthTest:
-        //   - NaN / Inf samples are a real failure (pipeline corruption).
-        //   - Out-of-range samples (|v| > 1.0) are NORMAL for Chatterbox's
-        //     decoder — its HiFi-GAN output routinely overshoots by 5-10%
-        //     on transients. WriteMonoInt16Wav clamps at write time so
-        //     the resulting WAV is still correct. We report the range
-        //     for diagnostic interest but do NOT fail on it.
-        const int32 N = Result.AudioSamples.Num();
-        int32  NumNaN      = 0;
-        int32  NumInf      = 0;
-        int32  NumOutRange = 0;
-        float  MinV        = FLT_MAX;
-        float  MaxV        = -FLT_MAX;
-        for (int32 i = 0; i < N; ++i)
-        {
-            const float V = Result.AudioSamples[i];
-            if (FMath::IsNaN(V))              { ++NumNaN; continue; }
-            if (!FMath::IsFinite(V))          { ++NumInf; continue; }
-            if (V < -1.0f || V > 1.0f)        { ++NumOutRange; }
-            if (V < MinV) { MinV = V; }
-            if (V > MaxV) { MaxV = V; }
-        }
+        // Result.AudioSamples is int16 PCM LE bytes now (Phase D
+        // byte-based API). Int16 can't store NaN/Inf, and its values
+        // are already bounded to [-32768, +32767], so the only checks
+        // worth running are "non-empty" and "byte count is even".
+        // Report min/max int16 values for diagnostic interest.
+        const int32 NumBytes   = Result.AudioSamples.Num();
+        const int32 NumSamples = NumBytes / 2;
+        const bool  bAligned   = (NumBytes & 1) == 0;
 
-        const float DurationSec =
-            (N > 0 && Result.SampleRate > 0)
-            ? (float)N / (float)Result.SampleRate
-            : 0.0f;
+        int16 MinS =  INT16_MAX;
+        int16 MaxS =  INT16_MIN;
+        if (bAligned && NumSamples > 0)
+        {
+            const int16* Src =
+                reinterpret_cast<const int16*>(Result.AudioSamples.GetData());
+            for (int32 i = 0; i < NumSamples; ++i)
+            {
+                if (Src[i] < MinS) MinS = Src[i];
+                if (Src[i] > MaxS) MaxS = Src[i];
+            }
+        }
 
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: SynthesizeAsync SUCCESS in %.1f ms. ")
-               TEXT("Samples=%d (%.2f s @ %d Hz), tokens=%d, stop=%s. ")
-               TEXT("NaN=%d Inf=%d OutOfRange=%d (expected; clamped on WAV write) ")
-               TEXT("Min=%.3f Max=%.3f."),
-               ElapsedMs, N, DurationSec, Result.SampleRate,
-               Result.NumGeneratedTokens,
+               TEXT("Bytes=%d (%d samples, %.2f s @ %d Hz), tokens=%d, stop=%s. ")
+               TEXT("aligned=%s int16 min=%d max=%d."),
+               ElapsedMs, NumBytes, NumSamples, Result.DurationSeconds,
+               Result.SampleRate, Result.NumGeneratedTokens,
                Result.bHitStopToken ? TEXT("yes") : TEXT("no"),
-               NumNaN, NumInf, NumOutRange, MinV, MaxV);
+               bAligned ? TEXT("yes") : TEXT("NO"),
+               (int32)MinS, (int32)MaxS);
 
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: per-stage: encoder=%.1f ms embed=%.1f ms LM=%.1f ms decoder=%.1f ms total=%.1f ms"),
@@ -178,17 +172,17 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
                Result.DecoderMs, Result.TotalElapsedMs);
 
         // -------- Save WAV --------
-        if (!OutputWavPath.IsEmpty() && N > 0)
+        // Audio is already int16 PCM bytes — use the byte-oriented WAV
+        // writer directly, no re-quantization.
+        if (!OutputWavPath.IsEmpty() && NumSamples > 0)
         {
-            // Ensure the parent directory exists (FFileHelper doesn't
-            // create directories).
             const FString OutputDir = FPaths::GetPath(OutputWavPath);
             if (!OutputDir.IsEmpty())
             {
                 IFileManager::Get().MakeDirectory(*OutputDir, /*Tree=*/ true);
             }
 
-            const bool bWrote = InoChatterbox::WriteMonoInt16Wav(
+            const bool bWrote = InoChatterbox::WriteInt16PcmBytesAsWav(
                 OutputWavPath,
                 MakeArrayView(Result.AudioSamples),
                 Result.SampleRate);
@@ -205,9 +199,10 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
             }
         }
 
-        // PASS criteria: non-empty waveform, no NaN, no Inf. Out-of-range
-        // is deliberately NOT a failure (see scan comment above).
-        const bool bWaveformOk = (N > 0) && (NumNaN == 0) && (NumInf == 0);
+        // PASS criteria: non-empty + byte-aligned. Out-of-range is
+        // impossible for int16; NaN/Inf are impossible for int16; so
+        // the only real failures are the ones above.
+        const bool bWaveformOk = (NumSamples > 0) && bAligned;
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: %s"),
                bWaveformOk ? TEXT("PASS") : TEXT("FAIL (waveform failed sanity checks)"));

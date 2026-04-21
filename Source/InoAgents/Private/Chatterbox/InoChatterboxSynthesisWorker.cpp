@@ -8,6 +8,7 @@
 #include "HAL/RunnableThread.h"
 
 #include "InoAgentsLog.h"
+#include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxRunner.h"
 #include "InoChatterboxTokenizer.h"
@@ -236,9 +237,19 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
 
     // Build the Blueprint-visible result regardless of success — timings
     // are still useful on failure (e.g. "we got 500 ms in before cancel").
+    //
+    // Quantize the runner's float32 samples into int16 PCM LE bytes
+    // for the Blueprint surface. Matches FInoChatterboxSynthesisResult::
+    // AudioSamples's documented format. A 1-2 s utterance quantizes in
+    // well under a millisecond on a worker thread.
     FInoChatterboxSynthesisResult BpResult;
-    BpResult.AudioSamples       = MoveTemp(NativeResult.AudioSamples);
+    InoChatterbox::Float32ToInt16PcmBytesMono(
+        MakeArrayView(NativeResult.AudioSamples), BpResult.AudioSamples);
     BpResult.SampleRate         = NativeResult.SampleRate;
+    BpResult.DurationSeconds    =
+        (NativeResult.SampleRate > 0)
+            ? (float)NativeResult.AudioSamples.Num() / (float)NativeResult.SampleRate
+            : 0.0f;
     BpResult.NumGeneratedTokens = NativeResult.NumGeneratedTokens;
     BpResult.bHitStopToken      = NativeResult.bHitStopToken;
     BpResult.TotalElapsedMs     = (float)((FPlatformTime::Seconds() - TStart) * 1000.0);

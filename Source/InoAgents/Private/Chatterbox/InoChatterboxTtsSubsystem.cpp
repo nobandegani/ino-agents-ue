@@ -508,10 +508,19 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
     }
     else if (Voice.ReferenceSamples.Num() > 0)
     {
-        // Trust the caller. Raw TArray<float> carries no sample-rate
-        // metadata, so we document the 24 kHz contract in the struct's
-        // header and rely on them honoring it.
-        ReferenceAudio = Voice.ReferenceSamples;
+        // Decode int16 PCM LE bytes → float32 samples for the speech
+        // encoder. Byte count must be a multiple of 2 (one int16
+        // sample per 2 bytes). Raw TArray<uint8> carries no sample-
+        // rate metadata, so we document the 24 kHz contract in the
+        // struct's header and rely on callers honoring it.
+        FString PcmError;
+        if (!InoChatterbox::Int16PcmBytesToFloat32Mono(
+                Voice.ReferenceSamples, ReferenceAudio, &PcmError))
+        {
+            FailNow(FString::Printf(
+                TEXT("Invalid ReferenceSamples bytes: %s"), *PcmError));
+            return;
+        }
     }
     else
     {

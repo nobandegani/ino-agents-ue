@@ -142,25 +142,25 @@ bool ReadMonoWavAsFloat32(
     return true;
 }
 
-bool WriteMonoInt16Wav(
+bool WriteInt16PcmBytesAsWav(
     const FString& Path,
-    TArrayView<const float> Samples,
+    TArrayView<const uint8> PcmBytes,
     int32 SampleRate)
 {
-    const int32 N = Samples.Num();
-    if (N <= 0)
+    const int32 NumBytes = PcmBytes.Num();
+    if (NumBytes <= 0 || (NumBytes & 1) != 0)
     {
-        return false;
+        return false;   // empty OR not int16-aligned
     }
 
     TArray<uint8> Buf;
-    Buf.Reserve(44 + N * 2);
+    Buf.Reserve(44 + NumBytes);
 
     auto AppendU16 = [&Buf](uint16 V) { Buf.Append((const uint8*)&V, 2); };
     auto AppendU32 = [&Buf](uint32 V) { Buf.Append((const uint8*)&V, 4); };
     auto AppendTag = [&Buf](const char* Tag) { Buf.Append((const uint8*)Tag, 4); };
 
-    const uint32 DataBytes = (uint32)N * 2;
+    const uint32 DataBytes = (uint32)NumBytes;
     const uint32 RiffSize  = 36 + DataBytes;   // total file size - 8
 
     AppendTag("RIFF");
@@ -179,16 +179,87 @@ bool WriteMonoInt16Wav(
     AppendTag("data");
     AppendU32(DataBytes);
 
-    const int32 SampleStart = Buf.Num();
-    Buf.SetNumUninitialized(SampleStart + (int32)DataBytes);
-    int16* Out = reinterpret_cast<int16*>(Buf.GetData() + SampleStart);
-    for (int32 i = 0; i < N; ++i)
-    {
-        const float Clamped = FMath::Clamp(Samples[i], -1.0f, 1.0f);
-        Out[i] = (int16)FMath::RoundToInt(Clamped * 32767.0f);
-    }
+    // Copy the PCM body in a single memcpy — no per-sample work.
+    const int32 BodyStart = Buf.Num();
+    Buf.SetNumUninitialized(BodyStart + NumBytes);
+    FMemory::Memcpy(Buf.GetData() + BodyStart, PcmBytes.GetData(), NumBytes);
 
     return FFileHelper::SaveArrayToFile(Buf, *Path);
+}
+
+bool WriteMonoInt16Wav(
+    const FString& Path,
+    TArrayView<const float> Samples,
+    int32 SampleRate)
+{
+    if (Samples.Num() <= 0)
+    {
+        return false;
+    }
+
+    // Quantize once via the shared helper, then delegate framing to
+    // the byte-oriented WAV writer. Two source-of-truth reduction:
+    // one quantization path, one WAV-header path.
+    TArray<uint8> PcmBytes;
+    Float32ToInt16PcmBytesMono(Samples, PcmBytes);
+    return WriteInt16PcmBytesAsWav(Path, PcmBytes, SampleRate);
+}
+
+bool Int16PcmBytesToFloat32Mono(
+    TArrayView<const uint8> PcmBytes,
+    TArray<float>& OutSamples,
+    FString* OutError)
+{
+    OutSamples.Reset();
+
+    const int32 NumBytes = PcmBytes.Num();
+    if ((NumBytes & 1) != 0)
+    {
+        if (OutError)
+        {
+            *OutError = FString::Printf(
+                TEXT("Int16PcmBytesToFloat32Mono: byte count %d is not a multiple of 2 ")
+                TEXT("(int16 PCM requires 2-byte-aligned data)"), NumBytes);
+        }
+        return false;
+    }
+    if (NumBytes == 0)
+    {
+        return true;   // legit empty buffer; caller will check Num()
+    }
+
+    const int32 NumSamples = NumBytes / 2;
+    OutSamples.SetNumUninitialized(NumSamples);
+
+    // x86_64 and ARM64 are both little-endian, matching WAV file data
+    // layout. A reinterpret_cast over the byte buffer is correct and
+    // requires no byte swap.
+    const int16* Src = reinterpret_cast<const int16*>(PcmBytes.GetData());
+    for (int32 i = 0; i < NumSamples; ++i)
+    {
+        OutSamples[i] = (float)Src[i] * (1.0f / 32768.0f);
+    }
+    return true;
+}
+
+void Float32ToInt16PcmBytesMono(
+    TArrayView<const float> Samples,
+    TArray<uint8>& OutBytes)
+{
+    const int32 NumSamples = Samples.Num();
+    OutBytes.SetNumUninitialized(NumSamples * 2);
+
+    if (NumSamples == 0)
+    {
+        return;
+    }
+
+    int16* Dst = reinterpret_cast<int16*>(OutBytes.GetData());
+    for (int32 i = 0; i < NumSamples; ++i)
+    {
+        const float Clamped = FMath::Clamp(Samples[i], -1.0f, 1.0f);
+        Dst[i] = (int16)FMath::RoundToInt(Clamped * 32767.0f);
+    }
 }
 
 } // namespace InoChatterbox
