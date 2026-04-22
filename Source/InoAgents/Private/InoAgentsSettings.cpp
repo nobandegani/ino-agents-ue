@@ -16,17 +16,37 @@ UInoAgentsSettings::UInoAgentsSettings()
         TEXT("https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm")
     });
 
-    // Default Chatterbox entry — pulls q4f16 (the plugin default) from
-    // the canonical Resemble AI HuggingFace repo. Users who want fp16
-    // for desktop quality can add a second entry under Project Settings
-    // pointing at the same repo with a different Variant.
+    // Default Chatterbox entries — same Resemble AI HF repo, different
+    // quantization variants. Users can add entries for q4 / fp32 /
+    // quantized in Project Settings the same way.
+    //
+    //   q4f16 — smallest (~510 MB total), fastest on mobile + AVX-512-FP16
+    //     CPUs, but DirectML has op-coverage issues with this tier on
+    //     dynamic-shape AR pipelines (MultiHeadAttention / Slice kernels
+    //     fail at Run time — see FInoChatterboxPerformanceOptions docs
+    //     on the per-session CPU overrides). CPU path on q4f16 is rock-
+    //     solid, and it's the default ship-everywhere variant.
+    //
+    //   fp16 — ~1.5 GB total, half-precision weights + activations.
+    //     Generally better-behaved on non-CPU ORT providers (DML, CUDA)
+    //     than q4f16 — fewer of the quantization-specific kernel
+    //     mismatches that bite q4f16. Worth trying when experimenting
+    //     with DirectML.
     {
-        FInoChatterboxModelEntry ChatterboxDefault;
-        ChatterboxDefault.DisplayName        = TEXT("Chatterbox Turbo q4f16");
-        ChatterboxDefault.Variant            = EInoChatterboxVariant::Q4F16;
-        ChatterboxDefault.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
-        ChatterboxDefault.Revision           = TEXT("main");
-        ChatterboxModels.Add(MoveTemp(ChatterboxDefault));
+        FInoChatterboxModelEntry Q4F16;
+        Q4F16.DisplayName        = TEXT("Chatterbox Turbo q4f16");
+        Q4F16.Variant            = EInoChatterboxVariant::Q4F16;
+        Q4F16.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        Q4F16.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(Q4F16));
+    }
+    {
+        FInoChatterboxModelEntry FP16;
+        FP16.DisplayName        = TEXT("Chatterbox Turbo fp16");
+        FP16.Variant            = EInoChatterboxVariant::FP16;
+        FP16.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        FP16.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(FP16));
     }
 }
 
