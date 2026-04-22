@@ -84,7 +84,9 @@
       "Read(//tmp/**)",
       "Bash(curl -sSL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.3/onnxruntime/core/providers/dml/DmlExecutionProvider/src/MLOperatorAuthorImpl.cpp\" -o \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/MLOperatorAuthorImpl.cpp\")",
       "Bash(python \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py\")",
-      "Bash(gh issue *)"
+      "Bash(gh issue *)",
+      "Bash(curl -sSL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.3/include/onnxruntime/core/providers/dml/dml_provider_factory.h\" -o \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/dml_provider_factory.h\")",
+      "Bash(curl -sSL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.3/onnxruntime/core/providers/dml/dml_provider_factory.cc\" -o \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/dml_provider_factory.cc\")"
     ]
   }
 }
