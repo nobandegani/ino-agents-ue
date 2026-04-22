@@ -49,7 +49,29 @@ namespace
         bool bForceCpu)
     {
         FInoOnnxSessionOptions Options;
+
+        // Graph optimization level. On Windows we run at ORT_ENABLE_ALL
+        // (level 3 — includes layout-transformation passes like the
+        // NhwcTransformer) because the MSVC-side ORT build registers
+        // CPU kernels for the 'com.ms.internal.nhwc' domain produced by
+        // that pass. On Android the 1.24.3 AAR does NOT register those
+        // kernels, so level-3 optimizations silently produce a graph
+        // that no provider can execute and session creation fails with
+        //     "Failed to find kernel for com.ms.internal.nhwc.AveragePool(19)"
+        // on the speech_encoder. Drop to ORT_ENABLE_EXTENDED (level 2)
+        // there — we keep every non-layout fusion (ConvAdd fusion,
+        // GELU fusion, constant folding, common-subexpression etc.)
+        // and lose only the NHWC rewrites, which on ARM+CPU wouldn't
+        // have helped anyway (CPU EP prefers NCHW on aarch64).
+        //
+        // This is orthogonal to bForceCpu — the NhwcTransformer pass
+        // fires at graph-build time based on optimization level, not
+        // based on which providers are registered.
+#if PLATFORM_ANDROID
+        Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::Extended;
+#else
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
+#endif
 
 #if PLATFORM_ANDROID
         // Android: XNNPACK (ARM-NEON-optimized CPU kernels) when allowed,
