@@ -35,8 +35,18 @@ namespace
      * to FInoOnnxSessionOptions. Values of 0 mean "ORT default" and
      * are left untouched.
      */
+    /**
+     * Build session options for one Chatterbox ORT session.
+     *
+     * bForceCpu=true routes this specific session to the CPU provider,
+     * overriding Performance.bPreferDirectMl. Used for sessions known
+     * to have DML compatibility issues (see the per-session flags on
+     * FInoChatterboxPerformanceOptions). When bForceCpu=false the
+     * session follows the default platform + Performance policy.
+     */
     FInoOnnxSessionOptions MakeChatterboxOptions(
-        const FInoChatterboxPerformanceOptions& Performance)
+        const FInoChatterboxPerformanceOptions& Performance,
+        bool bForceCpu)
     {
         FInoOnnxSessionOptions Options;
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
@@ -45,17 +55,20 @@ namespace
         // Android: XNNPACK (ARM-NEON-optimized CPU kernels, measurably
         // faster than the generic CPU provider on aarch64) + CPU as the
         // guaranteed fallback. DirectML is D3D12-only, no Android analog.
+        // bForceCpu is a no-op here — Android already skips DML entirely.
         // Future: WebGPU + NNAPI are in the AAR and could be opt-in.
         Options.ExecutionProviders = {
             EInoOnnxProvider::Xnnpack,
             EInoOnnxProvider::Cpu
         };
 #elif PLATFORM_WINDOWS
-        // Windows: DirectML (GPU / NPU via D3D12) if requested, else CPU.
-        // Fall-through to CPU is automatic — if DML registration fails
-        // (no D3D12 device, missing DirectML.dll, etc.) ORT silently
-        // uses CPU and the session still works.
-        if (Performance.bPreferDirectMl)
+        // Windows: DirectML (GPU / NPU via D3D12) if requested AND this
+        // session isn't explicitly forced to CPU, else CPU only.
+        //
+        // Fall-through to CPU within DML+CPU is also automatic — if DML
+        // registration fails at session creation (no D3D12 device, etc.)
+        // ORT silently uses CPU and the session still works.
+        if (Performance.bPreferDirectMl && !bForceCpu)
         {
             Options.ExecutionProviders = {
                 EInoOnnxProvider::DirectMl,
@@ -96,6 +109,7 @@ namespace
         const FString& Variant,
         const TCHAR* Component,
         const FInoChatterboxPerformanceOptions& Performance,
+        bool bForceCpu,
         FString* OutError)
     {
         const FString FileName = FString::Printf(TEXT("%s_%s.onnx"), Component, *Variant);
@@ -113,7 +127,7 @@ namespace
             return nullptr;
         }
 
-        const FInoOnnxSessionOptions Options = MakeChatterboxOptions(Performance);
+        const FInoOnnxSessionOptions Options = MakeChatterboxOptions(Performance, bForceCpu);
         const double TStart = FPlatformTime::Seconds();
 
         FString SessionError;
@@ -130,9 +144,24 @@ namespace
         }
 
         const double ElapsedMs = (FPlatformTime::Seconds() - TStart) * 1000.0;
+
+        // Log which provider strategy this session is using so the user
+        // can tell at a glance whether per-session CPU overrides landed
+        // the way they expected. "dml" means DML was requested (may still
+        // fall back per-op internally); "cpu" means forced CPU only.
+        const TCHAR* StrategyLabel = TEXT("cpu");
+#if PLATFORM_WINDOWS
+        if (Performance.bPreferDirectMl && !bForceCpu)
+        {
+            StrategyLabel = TEXT("dml");
+        }
+#elif PLATFORM_ANDROID
+        StrategyLabel = TEXT("xnnpack");
+#endif
+
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox: loaded %s (%s) in %.1f ms — %d inputs, %d outputs"),
-               Component, *Variant, ElapsedMs,
+               TEXT("Chatterbox: loaded %s (%s, strategy=%s) in %.1f ms — %d inputs, %d outputs"),
+               Component, *Variant, StrategyLabel, ElapsedMs,
                Session->GetInputCount(), Session->GetOutputCount());
 
         return Session;
@@ -169,13 +198,18 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s, dml=%s, adapter=%d)..."),
+           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s, dml=%s, adapter=%d, ")
+           TEXT("cpu-overrides: enc=%s embed=%s lm=%s dec=%s)..."),
            *BaseDir, *Variant,
            Performance.IntraOpThreadCount,
            Performance.InterOpThreadCount,
            Performance.bEnableOrtProfiling ? TEXT("yes") : TEXT("no"),
            Performance.bPreferDirectMl ? TEXT("yes") : TEXT("no"),
-           Performance.DirectMlAdapterIndex);
+           Performance.DirectMlAdapterIndex,
+           Performance.bSpeechEncoderOnCpu      ? TEXT("yes") : TEXT("no"),
+           Performance.bEmbedTokensOnCpu        ? TEXT("yes") : TEXT("no"),
+           Performance.bLanguageModelOnCpu      ? TEXT("yes") : TEXT("no"),
+           Performance.bConditionalDecoderOnCpu ? TEXT("yes") : TEXT("no"));
 
     TUniquePtr<FInoChatterboxModels> Bundle(new FInoChatterboxModels());
     Bundle->Variant = Variant;
@@ -185,25 +219,38 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     // the whole bundle — a half-loaded set is never useful. Order matches
     // the official reference script (speech_encoder first so voice
     // conditioning is ready before the AR loop needs it).
-    Bundle->SpeechEncoder = LoadChatterboxSession(BaseDir, Variant, TEXT("speech_encoder"), Performance, OutError);
+    //
+    // Per-session CPU overrides from Performance.b{Component}OnCpu flow
+    // through to LoadChatterboxSession's bForceCpu parameter. See the
+    // FInoChatterboxPerformanceOptions header for the "why this exists"
+    // context and the per-session DML compatibility notes.
+    Bundle->SpeechEncoder = LoadChatterboxSession(
+        BaseDir, Variant, TEXT("speech_encoder"), Performance,
+        Performance.bSpeechEncoderOnCpu, OutError);
     if (!Bundle->SpeechEncoder.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->EmbedTokens = LoadChatterboxSession(BaseDir, Variant, TEXT("embed_tokens"), Performance, OutError);
+    Bundle->EmbedTokens = LoadChatterboxSession(
+        BaseDir, Variant, TEXT("embed_tokens"), Performance,
+        Performance.bEmbedTokensOnCpu, OutError);
     if (!Bundle->EmbedTokens.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->LanguageModel = LoadChatterboxSession(BaseDir, Variant, TEXT("language_model"), Performance, OutError);
+    Bundle->LanguageModel = LoadChatterboxSession(
+        BaseDir, Variant, TEXT("language_model"), Performance,
+        Performance.bLanguageModelOnCpu, OutError);
     if (!Bundle->LanguageModel.IsValid())
     {
         return nullptr;
     }
 
-    Bundle->ConditionalDecoder = LoadChatterboxSession(BaseDir, Variant, TEXT("conditional_decoder"), Performance, OutError);
+    Bundle->ConditionalDecoder = LoadChatterboxSession(
+        BaseDir, Variant, TEXT("conditional_decoder"), Performance,
+        Performance.bConditionalDecoderOnCpu, OutError);
     if (!Bundle->ConditionalDecoder.IsValid())
     {
         return nullptr;
