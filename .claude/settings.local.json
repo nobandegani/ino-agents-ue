@@ -102,7 +102,9 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -File \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/scripts/clean.ps1\")",
       "Bash(powershell.exe -Command \"if \\(Get-Command dumpbin -ErrorAction SilentlyContinue\\) { dumpbin /exports 'E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\llama.dll' | Select-String -Pattern 'llama_' | Select-Object -First 10 } else { 'dumpbin not on PATH \\(needs VS dev cmd\\); using PowerShell fallback' ; \\(Get-Item 'E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\llama.dll'\\).VersionInfo | Format-List FileVersion, FileDescription, CompanyName, ProductName }\")",
       "Bash(curl -s -o /dev/null -w \"gguf.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/gguf.h\")",
-      "Bash(\"/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)"
+      "Bash(\"/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)",
+      "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\' -ErrorAction SilentlyContinue | Select-Object Name | Format-Table -AutoSize\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7' -Force | Format-Table Name, Mode\")"
     ]
   }
 }
