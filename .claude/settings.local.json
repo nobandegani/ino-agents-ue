@@ -97,7 +97,9 @@
       "Bash(curl -s -o /dev/null -w \"ggml-backend.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml-backend.h\")",
       "Bash(curl -s -o /dev/null -w \"ggml-cpu.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml-cpu.h\")",
       "Bash(mkdir -p /tmp/android-check)",
-      "Bash(tar -xzf \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)"
+      "Bash(tar -xzf \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)",
+      "Bash(tar -xzf \"/e/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/scripts/clean.ps1\")"
     ]
   }
 }
