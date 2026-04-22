@@ -2,6 +2,7 @@
 
 #include "InoChatterboxRunner.h"
 
+#include "InoChatterboxDecoderWorker.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxTokenizer.h"
 
@@ -461,6 +462,68 @@ bool FInoChatterboxRunner::SynthesizeText(
         }
     };
 
+    // ------------------------------------------------------------------
+    // Parallel decoder worker
+    //
+    // When streaming is enabled, spawn a background thread to run
+    // intermediate decodes. The AR loop only *publishes* (non-blocking)
+    // prefix-token requests; the worker thread runs the decoder + fires
+    // OnChunk. Because the LM and decoder are independent ORT sessions,
+    // they genuinely execute in parallel — the AR loop isn't stalled by
+    // decoder wallclock, and the total streaming synth time drops from
+    // roughly "LM + Σ(intermediate decode cost) + final decode" to
+    // roughly "max(LM, Σ decode) + final decode". For typical utterances
+    // (LM > total decode), streaming cost is effectively hidden behind
+    // the LM forward passes.
+    //
+    // Shared state between AR and decoder threads:
+    //   DecInputsStore[0]       — rewritten by RunDecoder, read by ORT
+    //   StreamAudioBuffer       — rewritten by RunDecoder
+    //   LastEmittedSampleCount  — advanced by EmitDeltaChunk
+    //   OutResult.DecoderMs     — += in RunDecoder
+    //
+    // None of these are concurrency-safe. The invariant we rely on:
+    //   - The decoder thread runs RunDecoder + EmitDeltaChunk for
+    //     intermediates ONLY.
+    //   - The AR thread runs RunDecoder + EmitDeltaChunk for the FINAL
+    //     decode ONLY, and calls DecoderWorker->WaitForIdle() first.
+    //   - Single-slot queue means at most one Task is in flight on the
+    //     worker thread at any moment (no inter-Task overlap).
+    // => No two writers ever touch the shared state simultaneously.
+    //
+    // Cancel semantics: the decoder worker checks Cancel inside its
+    // Task before calling EmitDeltaChunk, so a chunk that was decoded
+    // after the cancel flipped does NOT emit — honouring the "OnChunk
+    // is not invoked on cancel" contract (a chunk decoded before the
+    // cancel flipped emits normally; the AR loop observes cancel and
+    // Fail()s before the final decode).
+    // ------------------------------------------------------------------
+    TUniquePtr<FInoChatterboxDecoderWorker> DecoderWorker;
+    if (bStreamingEnabled)
+    {
+        DecoderWorker = MakeUnique<FInoChatterboxDecoderWorker>(
+            [&](const TArray<int64>& Tokens,
+                int32                NumGenTokensSnapshot,
+                FString&             OutErr) -> bool
+            {
+                if (!RunDecoder(Tokens))
+                {
+                    OutErr = InternalErr;
+                    return false;
+                }
+                // Drop the chunk silently if cancel flipped during the
+                // decode — the AR loop's next iteration check will
+                // observe cancel and Fail() the synth, and we don't
+                // want a stray OnChunk fire after that error callback.
+                if (Cancel && Cancel->Load(EMemoryOrder::Relaxed))
+                {
+                    return true;
+                }
+                EmitDeltaChunk(NumGenTokensSnapshot, /*bFinal=*/ false);
+                return true;
+            });
+    }
+
     for (int32 Iter = 0; Iter < ClampedMaxNewTokens; ++Iter)
     {
         // Cooperative cancel check — sampled at the top of every AR
@@ -611,14 +674,20 @@ bool FInoChatterboxRunner::SynthesizeText(
             break;
         }
 
-        // --- Streaming: fire an intermediate chunk every N tokens ---
+        // --- Streaming: publish an intermediate decode every N tokens ---
         //
-        // This runs the decoder on concat(prompt_token, generated[1:]) —
-        // no silence padding (silence is only appended on the final
-        // decode). The callback gets the delta from what was previously
-        // emitted. Skipped entirely when streaming is off, or when the
-        // just-appended token was STOP (the final decode covers that
-        // case right below).
+        // Non-blocking. The AR thread only builds concat(PromptTokens,
+        // generated[1:]) and hands it to the decoder worker; the
+        // worker's thread runs the ORT decoder Run and fires OnChunk.
+        // This lets the LM keep generating tokens while the decoder
+        // is busy — the two ORT sessions execute in parallel.
+        //
+        // Single-slot semantics: if the LM is fast enough to fire a
+        // second chunk boundary before the worker has picked up the
+        // first, the first is silently discarded (worker always takes
+        // the latest). Consumer sees fewer chunks than (total_tokens /
+        // StreamChunkTokens) would suggest in that pathological case,
+        // but the chunks they see are always current.
         if (bStreamingEnabled)
         {
             ++TokensSinceLastChunk;
@@ -641,17 +710,14 @@ bool FInoChatterboxRunner::SynthesizeText(
                     IntermediateSpan.Add(GeneratedTokens[i]);
                 }
 
-                if (!RunDecoder(IntermediateSpan))
-                {
-                    return Fail(FString::Printf(
-                        TEXT("iter %d: intermediate decoder Run failed: %s"),
-                        Iter, *InternalErr));
-                }
                 // Tokens generated so far, excluding the leading START.
                 // STOP is not in GeneratedTokens yet at this point (it
                 // would have broken out of the loop above).
                 const int32 TokensSoFar = GeneratedTokens.Num() - 1;
-                EmitDeltaChunk(TokensSoFar, /*bFinal=*/ false);
+
+                // Publish and continue — worker runs decoder + emits
+                // OnChunk on its own thread. No block here.
+                DecoderWorker->Publish(MoveTemp(IntermediateSpan), TokensSoFar);
             }
         }
 
@@ -667,6 +733,32 @@ bool FInoChatterboxRunner::SynthesizeText(
 
     OutResult.NumGeneratedTokens = GeneratedTokens.Num() - 1
         - (OutResult.bHitStopToken ? 1 : 0);  // exclude leading START and trailing STOP (if present)
+
+    // ------------------------------------------------------------------
+    // Drain the parallel decoder before the final decode
+    //
+    // The AR loop may have published one or more intermediate decode
+    // requests that the worker hasn't picked up / finished yet. We must
+    // wait for the worker to become idle before running the final
+    // decode on this thread, because the final decode writes into the
+    // same DecInputsStore[0] + StreamAudioBuffer that the worker's
+    // Task is writing to. WaitForIdle() is a mutex+event block —
+    // typically returns immediately or waits at most one decoder Run().
+    //
+    // After waiting, check for a latched Task error. Any intermediate
+    // decode that failed surfaces here so the caller sees the same
+    // failure signal they'd have gotten from the synchronous path.
+    // ------------------------------------------------------------------
+    if (DecoderWorker.IsValid())
+    {
+        DecoderWorker->WaitForIdle();
+        FString DecErr;
+        if (DecoderWorker->HasError(DecErr))
+        {
+            return Fail(FString::Printf(
+                TEXT("parallel decoder worker reported error: %s"), *DecErr));
+        }
+    }
 
     // ------------------------------------------------------------------
     // 4. Final decode: concat(prompt_token, generate[1:-1], silence×3)
