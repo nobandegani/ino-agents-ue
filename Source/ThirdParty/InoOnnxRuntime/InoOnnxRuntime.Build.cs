@@ -45,11 +45,22 @@ using UnrealBuildTool;
 ///   cleanly. We keep the implicit link via PublicAdditionalLibraries
 ///   there.
 ///
-/// This module does NOT ship the GPU execution providers (CUDA /
-/// TensorRT / DirectML). Reasons are documented in
-/// OnnxRuntime/scripts/setup-onnxruntime.ps1. DirectML (for D3D12
-/// GPU acceleration matching UE's renderer) is planned as a separate
-/// follow-up module that consumers can optionally depend on.
+/// DirectML Execution Provider (Windows only, D3D12-based GPU/NPU
+/// acceleration) is included. We switched from the CPU-only GitHub
+/// Releases ZIP to the Microsoft.ML.OnnxRuntime.DirectML NuGet build
+/// so the DML EP is compiled in. Two additional Windows runtime
+/// dependencies ship alongside InoOnnxRuntime.dll:
+///
+///   DirectML.dll                    (ORIGINAL NAME — see setup script
+///                                    for the static-import / rename
+///                                    explanation)
+///   onnxruntime_providers_shared.dll (ORIGINAL NAME — shared-EP
+///                                    infrastructure, LoadLibrary'd
+///                                    by ORT on demand)
+///
+/// CUDA / TensorRT / ROCm are intentionally NOT shipped — DirectML
+/// covers NVIDIA, AMD, Intel, and NPUs on a D3D12 path with one
+/// 20 MB redist, vs CUDA's 300+ MB NVIDIA-only mega-bundle.
 /// </summary>
 public class InoOnnxRuntime : ModuleRules
 {
@@ -70,11 +81,38 @@ public class InoOnnxRuntime : ModuleRules
 			// "InoOnnxRuntime.dll" — see InoOnnxModule.cpp.
 			//
 			// We still need RuntimeDependencies so UE's packaging step
-			// copies the DLL to the staged output alongside the game
-			// executable. Without it, the shipped build would ship
-			// without the ORT runtime and every session-creation call
-			// would fail.
-			RuntimeDependencies.Add("$(PluginDir)/Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll");
+			// copies the three DLLs to the staged output alongside the
+			// game executable. Without them, the shipped build would
+			// ship without the ORT runtime and every session-creation
+			// call would fail (or, worse for DirectML.dll, the main
+			// ORT DLL would fail to load because its static import
+			// chain is broken).
+			string Win64BinDir = "$(PluginDir)/Binaries/ThirdParty/InoOnnxRuntime/Win64";
+
+			// 1. The core ORT DLL (renamed for base-name isolation).
+			RuntimeDependencies.Add(Win64BinDir + "/InoOnnxRuntime.dll");
+
+			// 2. onnxruntime_providers_shared.dll (original name).
+			//    NOT a static import of InoOnnxRuntime.dll (verified via
+			//    dumpbin — only CRT, DirectML.dll, d3d12.dll, dxgi.dll
+			//    are statically imported). ORT LoadLibrary's this at
+			//    session-create time for certain shared providers. Ship
+			//    it so the EP registration path never hits a file-not-
+			//    found. No collision concern: ORT's internal LoadLibrary
+			//    finds it next to InoOnnxRuntime.dll via Windows' default
+			//    DLL search path and our already-loaded-cache claim.
+			RuntimeDependencies.Add(Win64BinDir + "/onnxruntime_providers_shared.dll");
+
+			// 3. DirectML.dll (ORIGINAL NAME — CANNOT be renamed).
+			//    STATIC import of InoOnnxRuntime.dll; Windows resolves
+			//    it at our LoadLibrary time, not runtime. UE's
+			//    GetDllHandle uses LOAD_WITH_ALTERED_SEARCH_PATH, which
+			//    puts the loaded DLL's own folder first for static
+			//    imports. Our DirectML.dll lives next to InoOnnxRuntime.dll
+			//    in Binaries/ThirdParty/InoOnnxRuntime/Win64/ and wins
+			//    over UE's bundled copies under Engine/Binaries/Win64/DML/
+			//    (which aren't on the default search path at all).
+			RuntimeDependencies.Add(Win64BinDir + "/DirectML.dll");
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{
