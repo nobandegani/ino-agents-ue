@@ -114,6 +114,17 @@ public class InoAgents : ModuleRules
 		{
 			PrivateDependencyModuleNames.Add("UnrealEd");
 		}
+
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			// DXGI system library for IDXGIFactory::EnumAdapters — used by
+			// the Ino.Onnx.ListDmlAdapters console command to enumerate D3D12
+			// adapters (which is the adapter order DirectML's
+			// OrtSessionOptionsAppendExecutionProvider_DML uses for its
+			// device_id parameter). System library, part of Windows SDK on
+			// every UE build host; no runtime redistribution needed.
+			PublicSystemLibraries.Add("dxgi.lib");
+		}
 		
 		
 		DynamicallyLoadedModuleNames.AddRange(
