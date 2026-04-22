@@ -13,9 +13,9 @@ The plugin is named for "agents" deliberately: the goal is not just text generat
 The plugin carries **two** on-device ML runtimes, each doing what it's best at:
 
 - **LiteRT-LM** — Google's TFLite-based LLM runtime. Handles Gemma 4 inference (chat, tool calling, streaming). Built from source via Bazel; statically-linked monolithic `LiteRtLm.dll` / `libLiteRtLm.so`. See the sections below.
-- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo is the first planned consumer), audio codec decoders, future vision / classifier / embedding models. Prebuilt binaries downloaded at setup time under a renamed filename to avoid UE's NNE bundling collisions. See "[ONNX Runtime (the second runtime)](#onnx-runtime-the-second-runtime)" below.
+- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo is the first shipping consumer — see below), audio codec decoders, future vision / classifier / embedding models. Prebuilt binaries downloaded at setup time under renamed filenames (`InoOnnxRuntime.dll` + `InoDml.dll` on Windows, `libInoOnnxRuntime.so` on Android) to avoid UE's NNE bundling collisions. See "[ONNX Runtime (the second runtime)](#onnx-runtime-the-second-runtime)" below.
 
-Why two runtimes instead of one: LiteRT-LM is purpose-built for on-device LLM inference (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX models. ONNX Runtime is the industry-standard general-purpose runtime and ships prebuilt binaries with sensible execution providers on every target platform. Each runtime is small enough (~14 MB Win64 LLM DLL, ~14 MB Win64 ORT DLL) that shipping both costs less than the engineering cost of trying to force one runtime to do both jobs.
+Why two runtimes instead of one: LiteRT-LM is purpose-built for on-device LLM inference (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX models. ONNX Runtime is the industry-standard general-purpose runtime and ships prebuilt binaries with sensible execution providers on every target platform. Each runtime is small enough (~14 MB Win64 LLM DLL, ~14 MB Win64 ORT DLL + ~20 MB DirectML if shipped) that carrying both costs less than the engineering cost of trying to force one runtime to do both jobs.
 
 ### LiteRT-LM
 
@@ -108,8 +108,19 @@ Plugins/InoAgents/
 ├── OnnxRuntime/                                   ← ONNX runtime — downloads prebuilts, stages
 │   ├── ONNXRUNTIME_VERSION                        ← pinned ORT version (e.g. "1.24.3")
 │   ├── scripts/
-│   │   └── setup-onnxruntime.ps1                  ← download + stage Win64 + Android AAR
+│   │   ├── setup-onnxruntime.ps1                  ← download + stage Win64 + Android AAR
+│   │   └── patch-ort-dml-import.py                ← rewrites InoOnnxRuntime.dll's
+│   │                                                 delay-import "DirectML.dll" → "InoDml.dll"
 │   ├── .cache/                                    ← downloaded ZIPs/AARs (gitignored)
+│   └── README.md
+│
+├── Chatterbox/                                    ← Chatterbox Turbo TTS — model staging
+│   ├── CHATTERBOX_VERSION                         ← HuggingFace repo revision pin
+│   ├── scripts/
+│   │   ├── setup-chatterbox.ps1                   ← downloads a variant (4 .onnx + companions
+│   │   │                                            + tokenizer.json + default voice)
+│   │   └── repro-dml-encoder.py                   ← minimal Python repro of the upstream DML
+│   │                                                 kernel bugs we work around per-session
 │   └── README.md
 │
 ├── Source/
@@ -117,28 +128,96 @@ Plugins/InoAgents/
 │   │   ├── InoAgents.Build.cs
 │   │   ├── Public/
 │   │   │   ├── InoAgents.h                        ← module interface (FInoAgentsModule)
-│   │   │   ├── LiteRtLm/                          ← Blueprint-facing LLM types (subsystem, tools, etc.)
-│   │   │   └── Onnx/                              ← generic ONNX session / tensor API
-│   │   │       ├── InoOnnxTypes.h                 ← Dtype / Provider / SessionOptions enums+struct
-│   │   │       ├── InoOnnxTensor.h                ← FInoOnnxTensor (move-only OrtValue wrapper)
-│   │   │       └── InoOnnxSession.h               ← FInoOnnxSession (Create, Run, RunAsync)
+│   │   │   ├── InoAgentsSettings.h                ← UInoAgentsSettings (UDeveloperSettings —
+│   │   │   │                                        ElevenLabs + LiteRT-LM + Chatterbox)
+│   │   │   ├── LiteRtLm/                          ← Blueprint-facing LLM types
+│   │   │   │   ├── InoLiteRtLmTypes.h             ← model config, message struct, delegates
+│   │   │   │   ├── InoLiteRtLmSubsystem.h         ← engine owner, tool registry, chat panel
+│   │   │   │   ├── InoLiteRtLmConversation.h      ← stateful chat, sentence/tag flag bitmasks
+│   │   │   │   ├── InoLiteRtLmToolBase.h          ← Blueprintable tool base class
+│   │   │   │   └── InoLiteRtLmAddNumbersTool.h    ← canonical tool sample
+│   │   │   ├── Onnx/                              ← generic ONNX session / tensor API
+│   │   │   │   ├── InoOnnxTypes.h                 ← Dtype / Provider / SessionOptions enums+struct
+│   │   │   │   ├── InoOnnxTensor.h                ← FInoOnnxTensor (move-only OrtValue wrapper)
+│   │   │   │   └── InoOnnxSession.h               ← FInoOnnxSession (Create, Run, RunAsync)
+│   │   │   ├── Chatterbox/                        ← Chatterbox TTS Blueprint surface
+│   │   │   │   ├── InoChatterboxTypes.h           ← variant enum, voice/options/result USTRUCTs,
+│   │   │   │   │                                    FInoChatterboxPerformanceOptions (DML overrides)
+│   │   │   │   ├── InoChatterboxTtsSubsystem.h    ← UInoChatterboxTtsSubsystem
+│   │   │   │   └── InoChatterboxStreamSynthesize.h ← async-action wrapper
+│   │   │   ├── ElevenLabs/                        ← Cloud TTS Blueprint surface
+│   │   │   │   ├── InoElevenLabsTypes.h           ← request struct, output-format enum, delegates
+│   │   │   │   ├── InoElevenLabsSubsystem.h       ← settings cache + live-action registry
+│   │   │   │   └── InoElevenLabsTextToDialogueStream.h ← async-action wrapper
+│   │   │   ├── Animation/
+│   │   │   │   └── InoAnimationBlueprintHelper.h  ← eye-look + procedural blink helpers
+│   │   │   ├── Audio/
+│   │   │   │   └── InoAudioFunctionLibrary.h      ← silence/dithered-silence/SaveWav helpers
+│   │   │   └── UI/Slate/                          ← in-PIE chat panel public API
+│   │   │       ├── SInoChatPanel.h                ← Slate widget
+│   │   │       └── InoChatBridge.h                ← UObject glue (UFUNCTION delegate handlers)
 │   │   └── Private/
 │   │       ├── InoAgents.cpp                      ← module lifecycle + DLL loading for both runtimes
 │   │       ├── InoAgentsLog.h                     ← shared LogInoAgents category
-│   │       ├── LiteRtLm/                          ← LLM-side impl (subsystem, conversation worker)
+│   │       ├── InoAgentsSettings.cpp
+│   │       ├── LiteRtLm/                          ← LLM-side impl
+│   │       │   ├── InoLiteRtLmSubsystem.cpp       ← engine owner + chunked download flow
+│   │       │   ├── InoLiteRtLmConversation.cpp    ← sentence/tag state machines
+│   │       │   ├── InoLiteRtLmConversationWorker.{h,cpp} ← FRunnable, tool agent loop
+│   │       │   ├── InoLiteRtLmTypes.cpp           ← model path resolution
+│   │       │   ├── InoLiteRtLmToolBase.cpp        ← schema builder
+│   │       │   ├── InoLiteRtLmAddNumbersTool.cpp
+│   │       │   ├── InoLiteRtLmStubs_NonWindows.cpp ← (compile-only) stubs for iOS/Linux/macOS
+│   │       │   └── InoSha256.{h,cpp}              ← model-file integrity check
 │   │       ├── Onnx/                              ← ORT-side impl
 │   │       │   ├── InoOnnxModule.{h,cpp}          ← Init/Shutdown/GetApi; dynamic DLL loading
 │   │       │   ├── InoOnnxInternal.{h,cpp}        ← CheckOrtStatus, dtype conv, env singleton
 │   │       │   ├── InoOnnxTensor.cpp
 │   │       │   └── InoOnnxSession.cpp
+│   │       ├── Chatterbox/                        ← Chatterbox TTS impl (see "Chatterbox" section)
+│   │       │   ├── InoChatterboxTtsSubsystem.cpp  ← Blueprint glue + multi-file download
+│   │       │   ├── InoChatterboxRunner.{h,cpp}    ← 4-session pipeline orchestrator
+│   │       │   ├── InoChatterboxModels.{h,cpp}    ← session bundle loader (per-session DML routing)
+│   │       │   ├── InoChatterboxTokenizer.{h,cpp} ← GPT-2 BPE + paralinguistic tags
+│   │       │   ├── InoChatterboxAudioIO.{h,cpp}   ← 24 kHz WAV reader
+│   │       │   ├── InoChatterboxSynthesisWorker.{h,cpp} ← FRunnable + FIFO queue
+│   │       │   ├── InoChatterboxDecoderWorker.{h,cpp}   ← parallel decoder for streaming
+│   │       │   ├── InoChatterboxTypes.cpp
+│   │       │   └── InoChatterboxStreamSynthesize.cpp
+│   │       ├── ElevenLabs/                        ← Cloud TTS impl
+│   │       │   ├── InoElevenLabsSubsystem.cpp
+│   │       │   └── InoElevenLabsTextToDialogueStream.cpp
+│   │       ├── Animation/InoAnimationBlueprintHelper.cpp
+│   │       ├── Audio/InoAudioFunctionLibrary.cpp
+│   │       ├── UI/Slate/                          ← chat panel widgets + theme
+│   │       │   ├── SInoChatPanel.cpp
+│   │       │   ├── InoChatBridge.cpp
+│   │       │   ├── InoChatStyle.{h,cpp}
+│   │       │   ├── SInoChatHeader.{h,cpp}
+│   │       │   ├── SInoChatInput.{h,cpp}
+│   │       │   ├── SInoMessageBubble.{h,cpp}
+│   │       │   ├── SInoStatusDot.{h,cpp}
+│   │       │   └── SInoToolPill.{h,cpp}
 │   │       └── SmokeTests/                        ← dev-time console commands
-│   │           ├── InoLoadEngineTest.cpp          ← Ino.LoadEngineTest (LLM)
-│   │           ├── InoGenerateTest.cpp            ← Ino.GenerateTest (LLM)
-│   │           ├── InoConversationTest.cpp        ← Ino.ConversationTest (LLM)
-│   │           ├── InoToolCallTest.cpp            ← Ino.ToolCallTest (LLM)
-│   │           ├── InoStreamTest.cpp              ← Ino.StreamTest (LLM)
-│   │           └── InoOnnxTest.cpp                ← Ino.Onnx.ProvidersTest,
-│   │                                                 Ino.Onnx.SessionFromFileTest
+│   │           ├── InoSmokeTestCommon.{h,cpp}     ← shared helpers (model paths, JSON, etc.)
+│   │           ├── InoLoadEngineTest.cpp          ← Ino.LoadEngineTest
+│   │           ├── InoGenerateTest.cpp            ← Ino.GenerateTest
+│   │           ├── InoConversationTest.cpp       ← Ino.ConversationTest
+│   │           ├── InoToolCallTest.cpp            ← Ino.ToolCallTest
+│   │           ├── InoStreamTest.cpp              ← Ino.StreamTest
+│   │           ├── InoLiteRtLmSubsystemLoadTest.{h,cpp}     ← Ino.LiteRtLm.SubsystemLoadTest
+│   │           ├── InoLiteRtLmConversationSendTest.{h,cpp}  ← Ino.LiteRtLm.ConversationSendTest
+│   │           ├── InoLiteRtLmConversationStreamTest.{h,cpp}← Ino.LiteRtLm.ConversationStreamTest
+│   │           ├── InoLiteRtLmConversationToolTest.{h,cpp}  ← Ino.LiteRtLm.ConversationToolTest
+│   │           ├── InoLiteRtLmConversationContextTest.{h,cpp} ← Ino.LiteRtLm.ConversationContextTest
+│   │           ├── InoLiteRtLmToolRegistryTest.cpp ← Ino.LiteRtLm.ToolRegistryTest
+│   │           ├── InoLiteRtLmShowChatPanelTest.cpp ← Ino.LiteRtLm.ShowChatPanel / HideChatPanel
+│   │           ├── InoOnnxTest.cpp                ← Ino.Onnx.ProvidersTest, .SessionFromFileTest
+│   │           ├── InoOnnxListDmlAdaptersTest.cpp ← Ino.Onnx.ListDmlAdaptersTest
+│   │           ├── InoChatterboxTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
+│   │           ├── InoChatterboxSubsystemTest.{h,cpp} ← Ino.Chatterbox.SubsystemSynthTest
+│   │           ├── InoChatterboxStreamSynthTest.{h,cpp} ← Ino.Chatterbox.StreamSynthTest
+│   │           └── InoElevenLabsDialogueStreamTest.{h,cpp} ← Ino.ElevenLabsDialogueStreamTest
 │   └── ThirdParty/
 │       ├── InoAgentsLibrary/                      ← LLM external module
 │       │   ├── Public/litert/lm/engine.h          ← staged C API header
@@ -168,7 +247,9 @@ Plugins/InoAgents/
     │       └── libLiteRtWebGpuAccelerator.so
     └── InoOnnxRuntime/                            ← ONNX runtime binaries
         ├── Win64/
-        │   └── InoOnnxRuntime.dll                 ← RENAMED from onnxruntime.dll (~14 MB)
+        │   ├── InoOnnxRuntime.dll                 ← RENAMED from onnxruntime.dll (~14 MB)
+        │   ├── InoDml.dll                         ← RENAMED from DirectML.dll (DML EP, ~20 MB)
+        │   └── onnxruntime_providers_shared.dll   ← original name (no collision risk)
         └── Android/arm64-v8a/
             └── libInoOnnxRuntime.so               ← RENAMED from libonnxruntime.so (~25 MB)
 ```
@@ -252,31 +333,36 @@ Bumping the pin: edit `ONNXRUNTIME_VERSION`, delete `Source/ThirdParty/InoOnnxRu
 
 ### Why we rename the DLL / .so (important — don't undo this)
 
-Both the Win64 DLL and the Android .so are **renamed** during staging:
+Both the Win64 ORT runtime and the Android .so are **renamed** during staging, and on Windows the DirectML EP gets the same treatment:
 
 - Windows: `onnxruntime.dll` → `InoOnnxRuntime.dll`
+- Windows: `DirectML.dll`    → `InoDml.dll`   (PE delay-import table patched to match)
 - Android: `libonnxruntime.so` → `libInoOnnxRuntime.so`
 
-This is not cosmetic. UE 5.7 ships **multiple** unrelated copies of ONNX Runtime via bundled plugins — at time of writing:
+`onnxruntime_providers_shared.dll` ships under its **original** name on Windows because no other plugin exports it.
+
+This is not cosmetic. UE 5.7 ships **multiple** unrelated copies of ONNX Runtime AND DirectML via bundled plugins — at time of writing:
 
 - `Engine/Plugins/NNE/NNERuntimeORT/Binaries/ThirdParty/Onnxruntime/Win64/onnxruntime.dll` (UE's NNE runtime, ORT 1.19.x)
 - `Engine/Plugins/Marketplace/RuntimeM558be8d6854bV8/.../Win64/onnxruntime.dll` and `.../Android/arm64-v8a/libonnxruntime.so` (a Marketplace plugin's ORT 1.19.2)
+- `Engine/Binaries/Win64/DML/x64/DirectML.dll` (UE's bundled DirectML, loaded early by NNE / RuntimeMetaHumanLipSync via `LoadLibraryA`)
 
-If we were to ship our ORT under its default name:
+If we were to ship our ORT and its DML EP under their default names:
 
-- **Windows** — LoadLibrary caches DLLs by **base name**, so when our `FPlatformProcess::GetDllHandle` ran with our full path, Windows would return whichever `onnxruntime.dll` was already loaded into the process (usually NNE's older one). Our `OrtApi::GetApi(ORT_API_VERSION=24)` would return nullptr because the cached DLL only implements API 19.
+- **Windows ORT** — LoadLibrary caches DLLs by **base name**, so when our `FPlatformProcess::GetDllHandle` ran with our full path, Windows would return whichever `onnxruntime.dll` was already loaded into the process (usually NNE's older one). Our `OrtApi::GetApi(ORT_API_VERSION=24)` would return nullptr because the cached DLL only implements API 19.
+- **Windows DirectML** — `InoOnnxRuntime.dll` has `DirectML.dll` as a **delay-load** dependency (confirmed via `pefile`'s `DIRECTORY_ENTRY_DELAY_IMPORT`). UE's NNE / lip-sync plugins LoadLibrary their copy of `DirectML.dll` from `Engine/Binaries/Win64/DML/x64/` early in editor startup, winning Windows' base-name cache. Our ORT's delay-load stub would then bind to UE's DirectML on first call, causing kernel-validation failures on fp16 attention and silent numerical corruption.
 - **Android** — clang's linker at libUnreal.so build time would resolve our code's `OrtGetApiBase` reference against whichever `libonnxruntime.so` appeared first on the link path (often the Marketplace plugin's 1.19.2), recording a versioned symbol reference `OrtGetApiBase@VERS_1.19.2`. At runtime the APK only contains our 1.24.3 `.so` (tagged `VERS_1.24.3`), so the dynamic linker aborts the process during libUnreal.so init — silently, before UE's logger is up, no `.log` file, no stack trace.
 
-Both were diagnosed during Phase 3 of the integration. The rename + switch to **dynamic loading via GetProcAddress / dlsym** eliminates every collision possibility. We isolate fully: `libUnreal.so` has **zero** Ort* symbol references, and ours is the only file the runtime binds to.
+The combined fix: rename the conflicting DLLs to names no other plugin knows, switch to **dynamic loading via GetProcAddress / dlsym** for the entry point, and patch `InoOnnxRuntime.dll`'s delay-import table to look for `InoDml.dll` instead of `DirectML.dll` (`OnnxRuntime/scripts/patch-ort-dml-import.py`, run automatically by `setup-onnxruntime.ps1`). With that done, `libUnreal.so` has **zero** Ort* symbol references and our `InoOnnxRuntime.dll`'s only delay-load DML target is the file we exclusively own.
 
 ### Dynamic loading, not static linking
 
 Direct consequence of the above: `InoOnnxRuntime.Build.cs` does NOT call `PublicAdditionalLibraries` or `PublicDelayLoadDLLs` on any platform. It only:
 
 - adds `Source/ThirdParty/InoOnnxRuntime/Public/` to `PublicSystemIncludePaths` (ORT headers used at compile time for the `OrtApi` / `OrtValue` / etc. struct definitions)
-- stages the runtime via `RuntimeDependencies` (Windows) and `AdditionalPropertiesForReceipt("AndroidPlugin", <UPL>)` (Android, with explicit `<copyFile>` into the APK's `lib/arm64-v8a/`)
+- stages the runtime via `RuntimeDependencies` (Windows: three DLLs — `InoOnnxRuntime.dll`, `onnxruntime_providers_shared.dll`, `InoDml.dll`) and `AdditionalPropertiesForReceipt("AndroidPlugin", <UPL>)` (Android, with explicit `<copyFile>` into the APK's `lib/arm64-v8a/`)
 
-At runtime, `FInoAgentsModule::StartupModule` calls `InoAgents::Onnx::Init()` which uses `FPlatformProcess::GetDllHandle` on the renamed file, then `FPlatformProcess::GetDllExport("OrtGetApiBase")` to resolve the single entry point. From that point on, everything routes through the `OrtApi*` vtable returned by `GetApiBase()->GetApi(ORT_API_VERSION)` — never through any static-linked symbol. The `OrtApi*` is cached in a file-static and exposed through `InoAgents::Onnx::GetApi()` for every consuming file in the plugin.
+At runtime, `FInoAgentsModule::StartupModule` calls `InoAgents::Onnx::Init()` which uses `FPlatformProcess::GetDllHandle` on the renamed file, then `FPlatformProcess::GetDllExport("OrtGetApiBase")` to resolve the single entry point. From that point on, everything routes through the `OrtApi*` vtable returned by `GetApiBase()->GetApi(ORT_API_VERSION)` — never through any static-linked symbol. The `OrtApi*` is cached in a file-static and exposed through `InoAgents::Onnx::GetApi()` for every consuming file in the plugin. `InoDml.dll` is loaded lazily by `InoOnnxRuntime.dll`'s patched delay-import table the first time the DirectML EP is registered.
 
 ### C++ API surface
 
@@ -306,28 +392,28 @@ Private helpers under `Source/InoAgents/Private/Onnx/`:
 
 ### Execution providers
 
-Phase 4 ships with:
+Currently shipping:
 
-- **Windows**: CPU, Azure (Azure is provider-unless-you-explicitly-register; we don't. It comes listed by `GetAvailableProviders` because ORT was compiled with it, but nothing in the plugin requests it.)
+- **Windows**: CPU, **DirectML** (D3D12-based GPU / NPU acceleration via `InoDml.dll` — see the rename / import-patch story above). Azure is also listed by `OrtApi::GetAvailableProviders` because the Microsoft prebuilt is compiled with it, but nothing in the plugin requests it.
 - **Android**: CPU, XNNPACK, NNAPI, WebGPU — all four available in the 1.24.3 Android AAR and usable by requesting them in `FInoOnnxSessionOptions::ExecutionProviders`.
 
-Not yet shipped:
+DirectML is selected via `EInoOnnxProvider::DirectMl` in the priority list, with `DirectMlAdapterIndex` controlling which D3D12 device to bind (0 = default adapter — usually the primary display GPU; higher indices target secondary dGPUs, eGPUs, or NPUs that enumerate later under Windows 11 24H2+ driver builds). DirectML is the only Windows accelerator we ship — CUDA / TensorRT / ROCm are intentionally not shipped; they require 150+ MB of vendor-specific runtime libs per game, and DirectML covers NVIDIA, AMD, Intel, and NPUs on a single D3D12 path.
 
-- **DirectML** — Windows GPU via D3D12, matches UE's renderer cleanly. Will add via a separate redistributable (Microsoft ships DirectML as a NuGet / standalone DLL); needs its own unique filename to avoid collisions just like the core ORT DLL.
-- **CUDA / TensorRT** — intentionally not shipping. Require 150+ MB of NVIDIA runtime libs alongside every game; DirectML covers the same ground via D3D12 for every GPU vendor.
+DirectML is a young EP and has known kernel-level bugs that show up on real models. The Chatterbox subsystem handles this with per-session opt-in flags, defaulting all sessions to CPU and letting callers flip individual sessions to GPU after verifying — see the "Chatterbox Turbo TTS" section below for the matrix of which Chatterbox sessions actually work on DirectML 1.24.3.
 
-Provider fallback: if a caller requests `[Xnnpack, Nnapi, Cpu]` on a platform where NNAPI isn't registered, that provider is skipped with a warning log and the session is built with the remaining providers. `FInoOnnxSession::GetActiveProviders()` reports what actually made it.
+Provider fallback: if a caller requests `[DirectMl, Cpu]` on a platform without a D3D12 device (or with a corrupt DML install), DirectML registration silently fails and the session is built with the remaining providers. The same applies to `[Xnnpack, Nnapi, Cpu]` on Android where NNAPI isn't registered. `FInoOnnxSession::GetActiveProviders()` reports what actually made it onto the session.
 
 ### Smoke tests
 
-Two console commands under `Source/InoAgents/Private/SmokeTests/InoOnnxTest.cpp`, auto-registered as `FAutoConsoleCommand` globals (same pattern as the LLM smoke tests):
+Three console commands under `Source/InoAgents/Private/SmokeTests/`, auto-registered as `FAutoConsoleCommand` globals (same pattern as the LLM smoke tests):
 
 | Command | Args | What it does |
 |---|---|---|
 | `Ino.Onnx.ProvidersTest` | none | Calls `OrtApi::GetAvailableProviders` via the cached API vtable and logs every entry. Doubles the module-startup check; useful after Live Coding or as a first diagnostic. |
 | `Ino.Onnx.SessionFromFileTest <abs-path-to-model.onnx>` | 1 | Loads the ONNX model, calls `FInoOnnxSession::LogMetadata()` (dumps I/O shapes + dtypes + active providers). If all inputs have concrete shapes, allocates zero-filled inputs and runs one forward pass; reports load time + run time + output shapes. Exercises the full Session + Tensor API end-to-end with no per-model code. |
+| `Ino.Onnx.ListDmlAdaptersTest` | none | Enumerates D3D12 adapters via `IDXGIFactory` and logs each one's description, vendor, and dedicated VRAM, alongside the `DirectMlAdapterIndex` value that selects it. Use this when a machine has multiple GPUs or an NPU and you need to pick the right index for `FInoChatterboxPerformanceOptions::DirectMlAdapterIndex` (or any other DML-using session). |
 
-## Chatterbox Turbo TTS (first planned ONNX consumer)
+## Chatterbox Turbo TTS (the first ONNX consumer — shipping)
 
 Chatterbox Turbo is the first real-world consumer of the ONNX Runtime layer. It's Resemble AI's 350M-parameter English TTS model with voice cloning, paralinguistic tags (`[laugh]`, `[cough]`, `[chuckle]`), and a distilled single-step decoder. Runs on top of the same `FInoOnnxSession` / `FInoOnnxTensor` primitives described above — no ONNX-layer changes required.
 
@@ -445,30 +531,92 @@ constexpr int32   DEFAULT_MAX_NEW_TOKENS = 1024;  // reference script default
 - **Bottleneck**: the `conditional_decoder`'s attention layers dominate wall time. Turbo's single-step decoder is already the big win — no further model-side optimization available to us.
 - **Streaming**: the reference loop is one-shot (full sentence synthesized before any audio is emitted). First-audio latency is roughly `max_new_tokens × per_token_ms + decoder_ms`. For conversational UX, plan to run the decoder incrementally on chunks of generated speech tokens so audio starts playing before the LM finishes — doable because Turbo's decoder is single-step and cheap per-chunk, but adds orchestration work.
 
-### Where the integration will land in the plugin
+### How it's wired up in the plugin
 
-Target layout (follows the pattern established by `InoAgentsLibrary` / `InoOnnxRuntime` / `Source/InoAgents/LiteRtLm`):
+Actual layout (follows the pattern established by `InoAgentsLibrary` / `InoOnnxRuntime` / `Source/InoAgents/LiteRtLm`):
 
 ```
 Plugins/InoAgents/
-├── ChatterboxModels/                              ← setup-time model downloader
-│   ├── CHATTERBOX_VERSION                         ← pins the HF revision hash
-│   ├── CHATTERBOX_DTYPE                           ← q4 on Android, fp16 on Win64 (developer-overridable)
-│   ├── scripts/download-chatterbox-turbo.ps1      ← pulls the 4 .onnx + _data files + tokenizer.json
-│   └── .cache/                                    ← gitignored; downloaded artifacts
+├── Chatterbox/                                    ← setup-time model downloader
+│   ├── CHATTERBOX_VERSION                         ← HuggingFace revision pin
+│   ├── scripts/setup-chatterbox.ps1               ← downloads + stages a variant
+│   └── README.md
 │
 └── Source/InoAgents/
     ├── Public/Chatterbox/
-    │   ├── InoChatterboxTypes.h                   ← config struct (voice path, max_new_tokens, etc.)
-    │   └── InoChatterboxSubsystem.h               ← UInoChatterboxTtsSubsystem (UGameInstanceSubsystem)
+    │   ├── InoChatterboxTypes.h                   ← variant enum, voice / options /
+    │   │                                            result USTRUCTs, FInoChatterboxModelEntry
+    │   │                                            (Project Settings registry), all delegates
+    │   ├── InoChatterboxTtsSubsystem.h            ← UInoChatterboxTtsSubsystem
+    │   └── InoChatterboxStreamSynthesize.h        ← Blueprint async-action wrapper
     └── Private/Chatterbox/
-        ├── InoBpeTokenizer.{h,cpp}                ← loads tokenizer.json, encodes FString → int64 tokens
-        ├── InoChatterboxPipeline.{h,cpp}          ← 4-session orchestrator, owns KV-cache state
-        ├── InoChatterboxSubsystem.cpp             ← Blueprint-facing glue, threads via AsyncTask
-        └── SmokeTests/InoChatterboxSynthTest.cpp  ← Ino.Chatterbox.SynthTest console command
+        ├── InoChatterboxRunner.{h,cpp}            ← 4-session orchestrator (encoder →
+        │                                            embed → AR loop → decoder),
+        │                                            owns per-call KV-cache state
+        ├── InoChatterboxModels.{h,cpp}            ← LoadFromDir: builds the 4 ORT
+        │                                            sessions with the per-session
+        │                                            CPU / DML overrides applied
+        ├── InoChatterboxTokenizer.{h,cpp}         ← GPT-2 BPE + paralinguistic-tag
+        │                                            handling, parsed from tokenizer.json
+        ├── InoChatterboxAudioIO.{h,cpp}           ← 24 kHz mono WAV reader (used to
+        │                                            resolve FInoChatterboxVoice::WavFilePath)
+        ├── InoChatterboxSynthesisWorker.{h,cpp}   ← FRunnable + FIFO queue
+        ├── InoChatterboxDecoderWorker.{h,cpp}     ← parallelises conditional_decoder
+        │                                            chunks during streaming so the AR
+        │                                            loop and decode overlap
+        ├── InoChatterboxStreamSynthesize.cpp
+        ├── InoChatterboxTtsSubsystem.cpp          ← Blueprint glue + multi-file
+        │                                            download flow (HEAD probe + GET +
+        │                                            .partial staging)
+        └── (smoke tests live under Private/SmokeTests/, see Smoke tests section)
 ```
 
 None of this touches `Source/InoAgents/Public/Onnx/` or its Private siblings — the TTS layer is strictly a consumer of `FInoOnnxSession`. If you need to add model-agnostic ONNX capabilities (e.g. new dtype support, new provider), do it there first before the Chatterbox layer.
+
+### Quantization variants the subsystem can load
+
+`EInoChatterboxVariant` covers the five dtypes published in the HF repo. Approximate on-disk size for the four runtime files (the four `<name>` columns above) plus weights companions:
+
+| Enum value | HF dtype string | On-disk | Notes |
+|---|---|---|---|
+| `Q4F16` (default) | `q4f16` | ~510 MB | 4-bit weights + fp16 activations. Smallest + fastest. |
+| `FP16` | `fp16` | ~1.5 GB | Half-precision throughout. Essentially identical quality to fp32 on Chatterbox. |
+| `Q4` | `q4` | ~640 MB | 4-bit weights, fp32 activations. Use on x86 without AVX-512 FP16. |
+| `FP32` | (no suffix) | ~3.2 GB | Reference-quality benchmark. Rarely worth shipping. |
+| `Quantized` | `quantized` | ~1.0 GB | INT8 throughout. Quality varies by sentence. |
+
+Only one variant is resident at a time — switching is `UnloadModels()` then a fresh `LoadModelsAsync(NewConfig)`. The on-disk staging path is `<PersistentDownloadDir>/InoAgents/Models/Chatterbox/<variant>/` (matching `setup-chatterbox.ps1`); each variant downloads independently and lives in its own subdirectory so previously-downloaded variants survive a switch.
+
+### Subsystem API surface
+
+`UInoChatterboxTtsSubsystem` mirrors `UInoLiteRtLmSubsystem`'s ergonomics — game-instance-scoped, async load with progress, async synth with cancellation. Public methods that matter:
+
+- `LoadModelsAsync(Config, OnLoaded)` — resolves missing files via the Project Settings entry (`UInoAgentsSettings::ChatterboxModels`), downloads them sequentially with `OnDownloadProgress` (HEAD-probe pass for aggregate total → GET pass with `.partial` staging + atomic rename → ThreadPool dispatch into `Models::LoadFromDir` + tokenizer parse), then fires `OnLoaded(true, "")` on the game thread. Optional `default_voice.wav` (~714 KB) is downloaded as a non-required file alongside the model, so the minimal "load + synth" flow can be a no-args `SynthesizeAsync` call (no reference voice required from the caller).
+- `SynthesizeAsync(Text, Voice, Options, OnComplete)` — one-shot synthesis. Worker dispatches the runner, runner produces the full 24 kHz mono int16 PCM LE waveform in `Result.AudioSamples`, marshals back to the game thread.
+- `SynthesizeStreamAsync(Text, Voice, Options, OnAudioChunk, OnComplete, StreamChunkTokens=20)` — same machinery, but the runner re-runs the conditional decoder every `StreamChunkTokens` AR-loop tokens and fires `OnAudioChunk` with each delta. Last chunk has `bIsFinal=true`, then `OnComplete` fires with the concatenated waveform. Set `StreamChunkTokens` to 0 to fall back to one-shot semantics.
+- `CancelSynthesis()` — cooperative abort. Currently-running AR iteration finishes (tens of ms), worker unwinds, every queued + in-flight item terminates with `OnComplete(false, ..., "Cancelled")`. Auto-fired by `UnloadModels` and PIE end.
+- `IsModelDownloaded(Variant)` — pure file-stat probe. Safe to poll from a UMG widget (no SHA check, no I/O beyond directory enumeration). Returns true when the four `.onnx` files + `tokenizer.json` exist non-empty in the variant's resolved directory; the `.onnx_data` companions and `config.json` / `generation_config.json` are not part of the required set.
+
+`FInoChatterboxVoice` resolution priority (per call): `WavFilePath` (24 kHz mono PCM int16 or float32 — no silent resampling) → `ReferenceSamples` (24 kHz mono int16 PCM LE bytes) → `PrecomputedConditioningPath` (RESERVED for Phase E; setting this in Phase D errors with a clear message) → `<variant_dir>/default_voice.wav` (auto-downloaded, MIT-licensed).
+
+### Per-session execution-provider overrides (DirectML caveats)
+
+Chatterbox's four ORT sessions don't all behave well on every accelerator. `FInoChatterboxPerformanceOptions` exposes a "force CPU" flag per session, **all defaulting to true**, plus a global `bPreferDirectMl` (Windows) and `DirectMlAdapterIndex`. The defaults are deliberately conservative — flip individual flags only after verifying on the target hardware.
+
+Empirical state with ORT 1.24.3:
+
+| Session | Windows / DirectML | Android / XNNPACK | Default |
+|---|---|---|---|
+| `speech_encoder` | ❌ `E_INVALIDARG` at `MultiHeadAttention` (`MLOperatorAuthorImpl.cpp:2508`) | ❌ XNNPACK NHWC transformer rewrites `AveragePool` into `com.ms.internal.nhwc` domain; AAR is missing the matching kernel | CPU |
+| `embed_tokens` | ❌ `E_INVALIDARG` at a `Slice` op on iter 1 of the AR loop | ⚠ unverified | CPU |
+| `language_model` | ❌ silent numerical corruption on fp16 (audible noise instead of speech); crash on q4f16 | ⚠ unverified | CPU |
+| `conditional_decoder` | ✅ correct | ⚠ unverified | CPU (safe), flip to GPU for ~15-20% speedup |
+
+Confirmed upstream-side via a minimal Python repro using stock `onnxruntime-directml 1.24.3` (`Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py`). Microsoft has moved DirectML to "sustained engineering"; do not expect these to be fixed soon. The verified-safe Windows opt-in for performance is `bConditionalDecoderOnCpu=false` + `bPreferDirectMl=true` + the other three flags left at their defaults — that's the configuration our smoke tests exercise when DirectML is requested.
+
+### Streaming via incremental decoder runs
+
+`FInoChatterboxRunner`'s streaming path keeps the language-model AR loop running on its own thread while a parallel `FInoChatterboxDecoderWorker` re-runs `conditional_decoder` on rolling chunks of generated speech tokens. The first chunk fires `OnAudioChunk` once `StreamChunkTokens` (default 20, ~0.6 s of audio) tokens are ready, dropping the typical first-audio latency from "max_new_tokens × per_token_ms + decoder_ms" to roughly "20 × per_token_ms + first decoder_ms" — under a second for short utterances on a modern desktop. The decoder worker exists because `conditional_decoder` is the most expensive single op in the pipeline; running it inline on the AR thread would stall token generation while audio rendered, defeating the latency win.
 
 ## Toolchain requirements (Windows host)
 
@@ -499,81 +647,146 @@ The preflight check for all of this lives in `LiteRtLm/scripts/setup.ps1` and sh
 
 ## UE-side integration architecture
 
-The UE-facing API lives under `Source/InoAgents/Public/LiteRtLm/` and `Private/LiteRtLm/`. Names are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin will host multiple backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit.
+The UE-facing API lives under `Source/InoAgents/Public/` (Blueprint-visible types) with mirroring private impl under `Source/InoAgents/Private/`. LLM-facing types are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin may host multiple LLM backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit. The same pattern applies to the other subsystems: `Chatterbox*` for the on-device TTS, `ElevenLabs*` for the cloud TTS, `*ChatPanel*` for the dev chat UI, etc.
+
+There is **no "agent component"** that bundles everything together. Earlier drafts of this file described a `UInoLiteRtLmAgentComponent` + `UInoAgentsStreamingAudioComponent` + `UInoLiteRtLmDialogueQueue` trio that wired LLM tokens directly into a TTS playback queue; that scaffolding was removed in favour of letting Blueprint / C++ callers wire the subsystems together themselves (the demo project's character actor is the integration point). What remains is a set of independently-useful subsystems and helpers, listed below.
 
 ```
-Blueprint ─┬─ UInoLiteRtLmAgentComponent  (USceneComponent, all-in-one)
-           │     THE primary entry point. Drop on actor, set ModelConfig +
-           │     VoiceId, call SendMessage. Internally owns + wires:
-           │       child UInoAgentsStreamingAudioComponent (3D audio)
-           │       UInoLiteRtLmDialogueQueue (ordered TTS)
-           │       UInoLiteRtLmConversation (LLM chat)
-           │     Delegates (pass-through): OnModelLoaded, OnToken,
-           │       OnSentence(RawText,CleanText), OnComplete, OnError,
-           │       OnAudioFinished, OnDownloadProgress
-           │     Config: ModelConfig (FInoLiteRtLmModelConfig struct),
-           │       VoiceId, TtsRequestTemplate, PauseDurationMs
-           │
-           ├─ UInoLiteRtLmSubsystem       (UGameInstanceSubsystem)
-           │     owns LiteRtLmEngine*, tool registry, ShowChatPanel/
-           │     HideChatPanel. LoadModelAsync auto-downloads models
-           │     from URLs configured in UInoAgentsSettings.
-           │     OnDownloadProgress fires during download.
-           │
-           ├─ UInoLiteRtLmConversation    (UObject, BlueprintType)
-           │     owns one native InoLiteRtLmConversation* plus a pinned
-           │     worker thread. Multicast delegates:
-           │       OnToken(Chunk)
-           │       OnSentence(RawText, CleanText)  — per newline
-           │       OnNewLine()                     — pause signal
-           │       OnComplete(FullText)
-           │       OnError(ErrorMessage)
-           │       OnToolCalled(Name, ArgsJson, ResultJson)
-           │
-           ├─ FInoLiteRtLmModelConfig     (USTRUCT, BlueprintType)
-           │     plain struct (NOT a UDataAsset). Fields:
-           │       ModelFileName — resolved via LiteRtLmResolveModelPath:
-           │         1. PersistentDownloadDir/InoAgents/Models/ (cached)
-           │         2. Plugins/InoAgents/Models/ (legacy dev)
-           │         3. auto-download from UInoAgentsSettings URL
-           │       Backend (Cpu / Gpu), MaxNumTokens, SystemMessage
-           │
-           ├─ UInoAgentsSettings       (UDeveloperSettings)
-           │     unified Project Settings page under Plugins → InoAgents.
-           │     Two sections:
-           │       ElevenLabs: ApiKey, BaseUrl, DefaultModelId, OutputFormat
-           │       LiteRT-LM → Models: array of {DisplayName, FileName, URL}
-           │
-           ├─ UInoLiteRtLmToolBase         (Blueprintable abstract UObject base class)
-           │
-           ├─ UInoAgentsStreamingAudioComponent  (UAudioComponent subclass)
-           │     plays PCM int16 / PCM float32 / MP3 bytes at runtime.
-           │     FeedAudioBytes + FinalizeStream + PlayAudio + StopAndReset.
-           │     Pre-buffer before Play (configurable PreBufferMs).
-           │     MP3 decoded via bundled minimp3 (CC0, single-header).
-           │
-           ├─ UInoLiteRtLmDialogueQueue    (UObject)
-           │     auto-binds to conversation OnSentence + OnNewLine.
-           │     Dispatches ElevenLabs TTS in parallel per-sentence,
-           │     plays audio back in strict order via the streaming
-           │     audio component. Pause slots between lines.
-           │
-           ├─ UInoElevenLabsSubsystem     (UGameInstanceSubsystem)
-           │     caches settings, anchors live HTTP actions, CancelAll
-           │     on PIE end.
-           │
-           └─ UInoElevenLabsTextToDialogueStream  (UBlueprintAsyncActionBase)
-                 latent Blueprint node for /v1/text-to-dialogue/stream.
-                 OnAudioChunk / OnComplete / OnError.
-                      │
-                      ▼
-          FInoLiteRtLmConversationWorker   (FRunnable, one per conversation)
-                 Owns the native InoLiteRtLmConversation and ConversationConfig.
-                 Multi-round agent loop: user msg → tool calls → tool
-                 results → final text. Marshals via AsyncTask(GameThread).
-                      │
-                      ▼
-                 LiteRtLm.dll  (pure C API — litert_lm_conversation_*)
+Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsystem)
+                 │     Owns LiteRtLmEngine*, tool registry, the in-PIE chat
+                 │     panel. LoadModelAsync auto-downloads + SHA-256-verifies
+                 │     models from URLs in UInoAgentsSettings; a chunked
+                 │     range-based download (500 MB chunks) keeps multi-GB
+                 │     downloads inside TArray<uint8>'s int32 size limit.
+                 │     Single-conversation invariant — see the header.
+                 │     OnDownloadProgress fires during download.
+                 │
+                 ├─ UInoLiteRtLmConversation         (UObject, BlueprintType)
+                 │     One stateful chat with the loaded engine. Owns one
+                 │     native LiteRtLmConversation* plus a pinned worker
+                 │     thread (FInoLiteRtLmConversationWorker). Multicast
+                 │     delegates fire on the game thread, in order:
+                 │       OnUserMessage(Text)              — synchronous echo
+                 │       OnToken(RawText, CleanText)      — per chunk
+                 │       OnSentence(RawText, CleanText)   — per split boundary
+                 │       OnSentenceBoundary()             — split signal (no payload)
+                 │       OnToolCalled(Name, ArgsJson, ResultJson) — diagnostic
+                 │       OnComplete(FullText)             — terminal (success)
+                 │       OnError(ErrorMessage)            — terminal (failure)
+                 │     Configurable bitmasks:
+                 │       SentenceSplitFlags — newline + which punctuation+space
+                 │                            triggers OnSentence (default: \n,
+                 │                            ". ", ", ", "? ", "! ")
+                 │       TagStripFlags      — which delimiter pairs get stripped
+                 │                            from CleanText (default: [...] {...})
+                 │     Per-turn context injection (NOT in chat history):
+                 │       SetSystemContext / SetUserContext (+ Add/Get/Clear)
+                 │       merged into the user message via [Context]/[/Context]
+                 │       tags by BuildMergedContext — see the v0.10.1 limitation
+                 │       around extra_context for why this isn't a template var.
+                 │     Lifecycle: Cancel (abort in-flight stream),
+                 │       IsStreamingInFlight, Shutdown (deterministic teardown,
+                 │       safe inside a delegate handler — unlike CollectGarbage),
+                 │       SubmitDeferredToolResult (header-only stub, see "Tool
+                 │       calling flow" below).
+                 │
+                 ├─ FInoLiteRtLmModelConfig         (USTRUCT, BlueprintType)
+                 │     Plain struct (NOT a UDataAsset). Fields:
+                 │       ModelFileName — resolved via LiteRtLmResolveModelPath:
+                 │         1. PersistentDownloadDir/InoAgents/Models/ (cached)
+                 │         2. Plugins/InoAgents/Models/ (legacy dev drop)
+                 │         3. auto-download from UInoAgentsSettings URL
+                 │       Backend (Cpu / Gpu), MaxNumTokens, SystemMessage
+                 │
+                 ├─ UInoLiteRtLmToolBase            (Blueprintable abstract UObject)
+                 │     Subclass, set ToolName/Description/Parameters, override
+                 │     Execute(ArgsJson)→ResultJson. Schema is built automatically
+                 │     from the properties via BuildSchemaJson.
+                 │     UInoLiteRtLmAddNumbersTool ships as the canonical example
+                 │     (used by Ino.LiteRtLm.ConversationToolTest).
+                 │
+                 ├─ UInoChatterboxTtsSubsystem      (UGameInstanceSubsystem)
+                 │     On-device TTS. Owns the 4 ORT sessions
+                 │     (speech_encoder / embed_tokens / language_model /
+                 │     conditional_decoder) plus the GPT-2 BPE tokenizer.
+                 │     LoadModelsAsync auto-downloads missing files (sequential
+                 │     HEAD-probe + GET, .partial staging, atomic rename) and
+                 │     fires OnDownloadProgress.
+                 │     SynthesizeAsync — one-shot, OnComplete with full waveform.
+                 │     SynthesizeStreamAsync — re-runs conditional_decoder every
+                 │     N AR tokens (default 20) and fires OnAudioChunk on the
+                 │     game thread for each delta, then OnComplete with the
+                 │     concatenated waveform.
+                 │     Output: 24 kHz mono int16 PCM little-endian bytes — feed
+                 │     directly into UStreamingSoundWave::AppendAudioDataFromRAW
+                 │     (RuntimeAudioImporter) or save via SaveInt16PcmAsWav.
+                 │     CancelSynthesis cooperatively aborts queued + in-flight.
+                 │
+                 ├─ UInoChatterboxStreamSynthesize  (UBlueprintAsyncActionBase)
+                 │     Latent Blueprint node ("Chatterbox Stream Synthesize")
+                 │     that wraps SynthesizeStreamAsync with three exec pins:
+                 │     OnAudioChunk / OnComplete / OnError.
+                 │
+                 ├─ UInoElevenLabsSubsystem         (UGameInstanceSubsystem)
+                 │     Caches settings (API key, base URL, default model id,
+                 │     default output format) at PIE start; anchors live HTTP
+                 │     actions via a UPROPERTY TSet so they survive GC; fires
+                 │     CancelAll() at Deinitialize so post-PIE responses can't
+                 │     dispatch into freed UObjects.
+                 │
+                 ├─ UInoElevenLabsTextToDialogueStream  (UBlueprintAsyncActionBase)
+                 │     Latent node for POST /v1/text-to-dialogue/stream.
+                 │     OnAudioChunk (delta bytes) / OnComplete (full bytes) /
+                 │     OnError. Multiple output formats via
+                 │     EInoElevenLabsOutputFormat (MP3 / PCM / u-law).
+                 │     Caller owns playback — there is no built-in audio
+                 │     component; feed the bytes into RuntimeAudioImporter
+                 │     or your own audio pipeline.
+                 │
+                 ├─ UInoAgentsSettings              (UDeveloperSettings)
+                 │     Project Settings → Plugins → InoAgents. Three sections:
+                 │       ElevenLabs : ApiKey, BaseUrl, DefaultModelId,
+                 │                    DefaultOutputFormat
+                 │       LiteRT-LM  : Models — array of {DisplayName, FileName,
+                 │                    DownloadUrl, ExpectedSha256}
+                 │       Chatterbox : ChatterboxModels — array of {DisplayName,
+                 │                    Variant, HuggingFaceRepoUrl, Revision}
+                 │
+                 ├─ Slate chat panel                 (dev / debug UI)
+                 │     SInoChatPanel + UInoChatBridge. Bridge holds a UPROPERTY
+                 │     ref to the conversation, owns the UFUNCTION handlers
+                 │     bound via AddDynamic, and forwards events into the panel
+                 │     via TWeakPtr. Subsystem methods ShowChatPanel /
+                 │     HideChatPanel + console commands
+                 │     Ino.LiteRtLm.ShowChatPanel / Ino.LiteRtLm.HideChatPanel
+                 │     drive it. Wraps the panel inside a viewport widget;
+                 │     PIE-end auto-hides via the PrePIEEnded hook.
+                 │
+                 ├─ UInoAnimationBlueprintHelper    (UBlueprintFunctionLibrary)
+                 │     Stateless animation helpers exposed for the demo
+                 │     character: CalculateEyeLookWeights (ARKit-style
+                 │     blendshape weights from a world-space look-at point,
+                 │     angle-space smoothing) and CalculateBlinkWeight
+                 │     (procedural blink state machine — random intervals,
+                 │     asymmetric close/open timing, occasional double blinks).
+                 │     Pass the previous frame's output back as PreviousState.
+                 │
+                 └─ UInoAudioFunctionLibrary        (UBlueprintFunctionLibrary)
+                     GenerateEmptyRawAudio (silent PCM in any
+                     ERuntimeRAWAudioFormat — note that unsigned PCM uses the
+                     midpoint as silence, not zero); GenerateDitheredSilence
+                     (low-amplitude white noise so neural lip-sync models stay
+                     in their training distribution during pauses, default
+                     ~-76 dBFS); SaveInt16PcmAsWav (write PCM bytes + RIFF
+                     header — useful for verifying Chatterbox output).
+                            │
+                            ▼
+                  FInoLiteRtLmConversationWorker (FRunnable, one per conversation)
+                            │   Owns the native LiteRtLmConversation + config.
+                            │   Multi-round agent loop. Marshals every delegate
+                            │   broadcast back to the game thread via AsyncTask.
+                            ▼
+                  LiteRtLm.dll  (pure C API — litert_lm_conversation_*)
 ```
 
 ### Threading model (non-negotiable)
@@ -634,7 +847,7 @@ Invoke from the editor's Output Log command input. UE API tests require **PIE** 
 
 All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2–15 s). They resolve the default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoSmokeTest::ResolveDefaultModelPath()` and call the LiteRT-LM C API directly — no UObjects, no subsystem, no conversations. Their purpose is to prove the native integration works independently of the UE API layer.
 
-### UE-facing API
+### UE-facing LiteRT-LM API
 
 | Command | What it proves | PIE? |
 |---|---|---|
@@ -644,6 +857,30 @@ All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2�
 | `Ino.LiteRtLm.ToolRegistryTest` | Registry-only check (no model load): constructs a `UInoLiteRtLmAddNumbersTool`, registers it, looks it up, serialises `BuildToolsJsonForConversation`, invokes `Execute_Execute` via the BlueprintNativeEvent wrapper, unregisters, and verifies `FindTool` returns null. Fastest tool smoke test; useful as a pre-flight before running the full agent loop. | **yes** |
 | `Ino.LiteRtLm.ConversationToolTest [prompt]` | **The headline test.** Registers a `UInoLiteRtLmAddNumbersTool`, creates a conversation with `tools_json` + constrained decoding, binds all four delegates (`OnToken` / `OnToolCalled` / `OnComplete` / `OnError`), sends "What is 27 plus 15?", watches the multi-round agent loop run, and logs PASS if `OnToolCalled` fired with `add_numbers` + result `"42"` AND `OnComplete`'s text contains `"42"` or `"forty-two"`. | **yes** |
 | `Ino.LiteRtLm.ConversationContextTest` | Exercises `SetSystemContext` / `SetUserContext` end-to-end: injects game state (location, time) and player state (name, class) into the conversation, sends a prompt requiring the context, and checks that the model's response references the injected values. Validates the context → user message prepend pipeline. | **yes** |
+| `Ino.LiteRtLm.ShowChatPanel [tools]` / `Ino.LiteRtLm.HideChatPanel` | Brings up / tears down the in-PIE Slate chat panel (`SInoChatPanel` + `UInoChatBridge`). Optional `tools` arg pre-registers `UInoLiteRtLmAddNumbersTool` so the panel can exercise the agent loop. Useful for interactive smoke testing — type messages, watch streaming tokens fill the bubble, see tool-call pills render. | **yes** |
+
+### Chatterbox (TTS) API
+
+All under `Source/InoAgents/Private/SmokeTests/InoChatterboxTest.cpp`, `InoChatterboxSubsystemTest.cpp`, and `InoChatterboxStreamSynthTest.cpp`. The granular tests stage on intermediate steps so a regression at any layer of the pipeline is bisectable without running a full synth.
+
+| Command | What it proves | PIE? |
+|---|---|---|
+| `Ino.Chatterbox.LoadModelsTest` | Loads the 4 ORT sessions + the GPT-2 tokenizer for a variant (no synthesis). Confirms session creation under whatever DML / CPU routing is in effect. | yes |
+| `Ino.Chatterbox.TokenizerTest` | BPE encode / decode round-trip over a corpus, including paralinguistic tags. | no |
+| `Ino.Chatterbox.EmbedTest` / `EmbedRawTest` | `embed_tokens` forward pass, with and without an explicit token ID array. | no |
+| `Ino.Chatterbox.ARStepTest` | Single forward pass through `language_model` against synthetic conditioning. | no |
+| `Ino.Chatterbox.ARLoopTest` | Full autoregressive loop with no voice — proves the KV-cache wiring + dtype discovery. | no |
+| `Ino.Chatterbox.EncoderTest` | `speech_encoder` against a staged 24 kHz WAV. | no |
+| `Ino.Chatterbox.DecodeTest` | AR loop + `conditional_decoder` with synthetic conditioning. | no |
+| `Ino.Chatterbox.SynthTest` | End-to-end one-shot via `FInoChatterboxRunner` (bypasses the subsystem). | no |
+| `Ino.Chatterbox.SubsystemSynthTest [variant] [max_new_tokens] [text...]` | End-to-end via `UInoChatterboxTtsSubsystem::SynthesizeAsync`. Exercises the public game-instance API end-to-end. | **yes** |
+| `Ino.Chatterbox.StreamSynthTest [variant] [chunk_tokens] [max_new_tokens] [text...]` | Streaming variant — logs each `OnAudioChunk` arrival with token count + delta byte size, verifies `bIsFinal=true` lands exactly once before `OnComplete`. | **yes** |
+
+### ElevenLabs (cloud TTS) API
+
+| Command | What it proves | PIE? |
+|---|---|---|
+| `Ino.ElevenLabsDialogueStreamTest` | Streams a short two-line dialogue through `UInoElevenLabsTextToDialogueStream`, logs total bytes received + chunk count + per-format header bytes. Requires `ElevenLabsApiKey` set in Project Settings. | **yes** |
 
 Every UE API observer UCLASS uses the same pattern: `NewObject` + `AddToRoot`, bind dynamic delegates via `AddDynamic`, run the workflow, and in `Finish()` call `Conversation->Shutdown()` for deterministic teardown before clearing UPROPERTY refs and `RemoveFromRoot`. Do NOT call `CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, true)` from inside a delegate handler — parallel GC workers race the in-flight delegate's write access and trip `FMRSWRecursiveAccessDetector`. `Shutdown()` is the safe alternative because it only resets the worker `TUniquePtr`; it never touches delegate state.
 
@@ -673,13 +910,13 @@ Smoke tests are compiled into every build configuration. For now they're gated b
 
 | Platform | Status | Setup script | Artifacts | Available providers |
 |---|---|---|---|---|
-| **Windows (Win64)** | ✅ full | `OnnxRuntime/scripts/setup-onnxruntime.ps1` | `InoOnnxRuntime.dll` (~14 MB, renamed) | CPU, Azure (DirectML on roadmap) |
+| **Windows (Win64)** | ✅ full | `OnnxRuntime/scripts/setup-onnxruntime.ps1` | `InoOnnxRuntime.dll` (~14 MB, renamed) + `InoDml.dll` (~20 MB, renamed) + `onnxruntime_providers_shared.dll` | CPU, **DirectML** (D3D12 — GPU + NPU) |
 | **Android (arm64-v8a)** | ✅ full | same script (downloads AAR) | `libInoOnnxRuntime.so` (~25 MB, renamed) | CPU, XNNPACK, NNAPI, WebGPU |
 | iOS | ⏳ not staged | — | — | — |
 | Linux | ⏳ not staged | — | — | — |
 | macOS | ⏳ not staged | — | — | — |
 
-The UE API (subsystem, conversation, tools, delegates) is **identical across platforms**. Only the platform branches in `InoAgentsLibrary.Build.cs` + `InoOnnxRuntime.Build.cs` differ. On unimplemented platforms, the plugin still links cleanly — calls to `LoadModelAsync` fail gracefully with a "Native engine failed" error via the `FOnInoLiteRtLmModelLoaded` delegate, ORT calls via `FInoOnnxSession::Create` return nullptr with a clear error, and every other feature (ElevenLabs TTS, streaming audio, chat panel) works normally.
+The UE API (subsystem, conversation, tools, delegates) is **identical across platforms**. Only the platform branches in `InoAgentsLibrary.Build.cs` + `InoOnnxRuntime.Build.cs` differ. On unimplemented platforms, the plugin still links cleanly — calls to `LoadModelAsync` fail gracefully with a "Native engine failed" error via the `FOnInoLiteRtLmModelLoaded` delegate, ORT calls via `FInoOnnxSession::Create` return nullptr with a clear error, and every other feature (ElevenLabs cloud TTS, Slate chat panel, animation/audio helpers) keeps working normally.
 
 ### Android specifics
 
@@ -695,7 +932,9 @@ Future platforms (iOS, Linux, macOS): upstream `.bazelrc` already has `--config=
 
 ## Windows gotchas
 
-- **Five runtime DLLs to ship alongside the executable.** All must end up in `Binaries/ThirdParty/InoAgentsLibrary/Win64/`:
+LiteRT-LM specifics:
+
+- **Five LiteRT-LM runtime DLLs to ship alongside the executable.** All must end up in `Binaries/ThirdParty/InoAgentsLibrary/Win64/`:
   - `LiteRtLm.dll` (~14 MB) — our Bazel-built wrapper, dynamically links against `libLiteRt.dll`
   - `libLiteRt.dll` (~11 MB) — LiteRT core runtime (Bazel-built; produced because we pass `--define=litert_link_capi_so=true`)
   - `libGemmaModelConstraintProvider.dll` (~13 MB) — upstream prebuilt constraint provider
@@ -708,6 +947,15 @@ Future platforms (iOS, Linux, macOS): upstream `.bazelrc` already has `--config=
 - **Delay-load the DLLs.** `InoAgentsLibrary.Build.cs` uses `PublicDelayLoadDLLs.Add(...)` for all five DLLs so the game / editor launches even if they're missing. `StartupModule` calls `FPlatformProcess::GetDllHandle` explicitly and surfaces a `UE_LOG` error on failure — no `FMessageDialog` fallback.
 - **MSVC runtime.** Build with `/MD` (dynamic CRT) to match UE. `/MT` would link successfully but produce two CRTs in the same process at runtime, causing silent heap corruption across allocator boundaries. Upstream `build:windows` already handles this correctly — no explicit override needed in our overlay.
 - **Force-reference the C API symbols.** See "Custom Bazel target → Why `LiteRtLm_exports.cc` exists". Without this, the DLL builds but exports no `litert_lm_*` functions because MSVC drops unreferenced `.obj` files from static libraries, and upstream disables `--whole-archive` on Windows.
+
+ONNX Runtime specifics:
+
+- **Three ORT DLLs to ship alongside the executable**, in `Binaries/ThirdParty/InoOnnxRuntime/Win64/`:
+  - `InoOnnxRuntime.dll` (~14 MB) — renamed from `onnxruntime.dll`. Avoids the base-name `LoadLibrary` cache collision with UE's bundled NNE / Marketplace ORT 1.19.x.
+  - `InoDml.dll` (~20 MB) — renamed from `DirectML.dll`. Our `InoOnnxRuntime.dll`'s delay-import table is patched to look for this name (via `OnnxRuntime/scripts/patch-ort-dml-import.py`, run automatically by `setup-onnxruntime.ps1`).
+  - `onnxruntime_providers_shared.dll` — kept under its original name. ORT `LoadLibrary`s it on demand for some shared providers; no other plugin exports the same name.
+- **Renames are not optional.** Removing either rename re-introduces the silent base-name cache collision (NNE-ORT 1.19.x or UE's `Engine/Binaries/Win64/DML/x64/DirectML.dll` wins, our `OrtApi::GetApi(24)` returns nullptr or our DML EP binds to a different DML version with kernel-validation failures and silent fp16 corruption). See "ONNX Runtime → Why we rename the DLL / .so" for the full diagnosis.
+- **Dynamic loading only.** `InoOnnxRuntime.Build.cs` does NOT use `PublicAdditionalLibraries` or `PublicDelayLoadDLLs` for either DLL — `libUnreal.so` / the editor binary has zero static references to ORT. `InoAgents::Onnx::Init()` does the `FPlatformProcess::GetDllHandle` + `GetProcAddress("OrtGetApiBase")` dance at module startup; `InoDml.dll` is loaded lazily by the patched delay-import table the first time DirectML EP is registered.
 
 ## Model file distribution
 
@@ -724,7 +972,7 @@ If neither location has the file, `UInoLiteRtLmSubsystem::LoadModelAsync` looks 
 
 ### Model config
 
-Models are configured via `FInoLiteRtLmModelConfig` — a **plain USTRUCT** (not a UDataAsset). Set `ModelFileName`, `Backend`, `MaxNumTokens`, `SystemMessage` directly on the agent component's details panel, or build one in Blueprint via a Make node and pass to `LoadModelAsync`.
+Models are configured via `FInoLiteRtLmModelConfig` — a **plain USTRUCT** (not a UDataAsset). Build one in Blueprint via a Make node (or in C++ as a struct literal), set `ModelFileName`, `Backend`, `MaxNumTokens`, `SystemMessage`, and pass it to `UInoLiteRtLmSubsystem::LoadModelAsync`.
 
 Phase 1 smoke tests under `InoAgents.*` still hardcode the model path via `InoSmokeTest::ResolveDefaultModelPath()` because they bypass the UE API and call the C functions directly.
 
@@ -795,5 +1043,7 @@ This file describes design decisions and architectural intent. Specifics drift o
 - **The public C API:** read `LiteRtLm/vendor/LiteRT-LM/c/engine.h` directly. If the symbol names or signatures differ from what this file describes, trust the header.
 - **The ONNX Runtime C API:** read `Source/ThirdParty/InoOnnxRuntime/Public/onnxruntime_c_api.h`. Struct field additions across ORT versions are common; the `OrtApi` vtable is versioned so older code still works, but new features require bumping `ORT_API_VERSION` checks in our code.
 - **Plugin scaffold state:** open `Source/ThirdParty/InoAgentsLibrary/InoAgentsLibrary.Build.cs` and `Source/ThirdParty/InoOnnxRuntime/InoOnnxRuntime.Build.cs`. If either references the pre-rename / pre-dynamic-loading pattern, a regression slipped through — both should look like "no `PublicAdditionalLibraries`, no `PublicDelayLoadDLLs`, dynamic load only".
-- **Renamed ORT DLL / .so still in place:** `Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll` and `.../Android/arm64-v8a/libInoOnnxRuntime.so`. Do NOT undo the rename — the "why" is in the "ONNX Runtime (the second runtime)" section above.
+- **Renamed ORT DLLs / .so still in place:** `Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll` + `InoDml.dll` + `onnxruntime_providers_shared.dll`, and `.../Android/arm64-v8a/libInoOnnxRuntime.so`. Do NOT undo the rename — the "why" is in the "ONNX Runtime (the second runtime)" section above.
+- **Conversation delegate signatures:** read `Source/InoAgents/Public/LiteRtLm/InoLiteRtLmConversation.h`. The list (OnUserMessage, OnToken, OnSentence, OnSentenceBoundary, OnComplete, OnError, OnToolCalled) and the per-event arg shapes are authoritative there — if they shift, this file's diagram in "UE-side integration architecture" goes out of date silently.
+- **Chatterbox per-session DML routing:** the matrix under "Per-session execution-provider overrides (DirectML caveats)" describes the empirical state of ORT 1.24.3 + DirectML. Re-verify after each ORT bump (`Ino.Chatterbox.SubsystemSynthTest` with the relevant `b*OnCpu` flag flipped is the fastest way to spot a regression or a fix).
 - **Tooling versions:** Gemma 4 variant specs and modality support may have evolved — confirm against https://ai.google.dev/gemma/docs/core.
