@@ -142,6 +142,38 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
     TArray<FName> GetAvailableVoiceNames() const;
 
+    /**
+     * Kick off an async synthesis. Returns immediately; OnComplete
+     * fires exactly once on the game thread when the synthesis
+     * resolves (success = full 24 kHz mono int16 PCM LE bytes;
+     * failure = bSuccess=false + ErrorMessage).
+     *
+     * v1 scope:
+     *   - PhonemesText MUST be pre-phonemized IPA (caller's responsibility
+     *     until v2 adds an ONNX G2P). Empty string fails at validation.
+     *   - VoiceName=NAME_None resolves to "Default".
+     *   - Multiple concurrent calls queue up on the worker (FIFO).
+     *   - Cancellation aborts the currently-synthesising call only;
+     *     queued-but-not-started calls are not cancelled.
+     *
+     * No-op with OnComplete(false, "Model not loaded.") if LoadModelAsync
+     * hasn't succeeded yet.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano")
+    void SynthesizeAsync(
+        const FString& PhonemesText,
+        FName VoiceName,
+        const FInoNeuTtsNanoSynthesisOptions& Options,
+        const FOnInoNeuTtsNanoSynthesisComplete& OnComplete);
+
+    /** Cooperatively abort the currently-synthesising request (if any).
+     *  The worker acknowledges at the next cancel-check point inside
+     *  its AR loop (every ~256 tokens, so typically sub-second) and
+     *  fires OnComplete(false, "Cancelled by caller."). Calls queued
+     *  behind the cancelled one continue normally. */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano")
+    void CancelSynthesis();
+
     /** Cooperatively abort an in-flight download. No-op if no download
      *  is running. Fires PendingOnLoaded with bSuccess=false,
      *  ErrorMessage="Cancelled by caller". */

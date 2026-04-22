@@ -308,6 +308,73 @@ TArray<FName> UInoNeuTtsNanoSubsystem::GetAvailableVoiceNames() const
     return VoiceRegistry->GetAvailableVoiceNames();
 }
 
+void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
+    const FString& PhonemesText,
+    FName VoiceName,
+    const FInoNeuTtsNanoSynthesisOptions& Options,
+    const FOnInoNeuTtsNanoSynthesisComplete& OnComplete)
+{
+    check(IsInGameThread());
+
+    // Validate state before enqueuing. Everything below returns
+    // OnComplete(false, "...") synchronously to keep the "exactly one
+    // OnComplete fire per call" invariant intact.
+    auto FailImmediately = [&](const TCHAR* Reason)
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("NeuTtsNano SynthesizeAsync early-failed: %s"), Reason);
+        OnComplete.ExecuteIfBound(false, TArray<uint8>(), 24000, FString(Reason));
+    };
+
+    if (!bModelLoaded)
+    {
+        FailImmediately(TEXT("Model not loaded. Call LoadModelAsync first "
+                             "and wait for its OnLoaded(true) callback."));
+        return;
+    }
+    if (!Worker.IsValid() || !Runner.IsValid() || !VoiceRegistry.IsValid())
+    {
+        FailImmediately(TEXT("Internal state incomplete (worker/runner/voice-registry missing)."));
+        return;
+    }
+    if (PhonemesText.IsEmpty())
+    {
+        FailImmediately(TEXT("PhonemesText is empty. v1 requires pre-phonemized IPA input."));
+        return;
+    }
+
+    // Package + enqueue — worker dequeues on its dedicated thread and
+    // fires OnComplete asynchronously via AsyncTask(GameThread).
+    FInoNeuTtsNanoPendingSynth Pending;
+    Pending.PhonemesText = PhonemesText;
+    Pending.VoiceName    = VoiceName.IsNone() ? FName(TEXT("Default")) : VoiceName;
+    Pending.Options      = Options;
+    Pending.OnComplete   = OnComplete;
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano SynthesizeAsync: queued (voice=%s, phonemes=%d chars, "
+                "max_new=%d, top_k=%d, temp=%.2f, seed=%d)"),
+           *Pending.VoiceName.ToString(),
+           Pending.PhonemesText.Len(),
+           Pending.Options.MaxNewTokens,
+           Pending.Options.TopK,
+           Pending.Options.Temperature,
+           Pending.Options.Seed);
+
+    Worker->Enqueue(MoveTemp(Pending));
+}
+
+void UInoNeuTtsNanoSubsystem::CancelSynthesis()
+{
+    check(IsInGameThread());
+    if (Worker.IsValid())
+    {
+        Worker->SignalCancel();
+        UE_LOG(LogInoAgents, Log,
+               TEXT("NeuTtsNano CancelSynthesis: signalled worker."));
+    }
+}
+
 bool UInoNeuTtsNanoSubsystem::IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Variant) const
 {
     const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();

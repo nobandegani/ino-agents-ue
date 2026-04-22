@@ -3,16 +3,33 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Queue.h"
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
 
 #include "UObject/WeakObjectPtr.h"
+
+#include "NeuTtsNano/InoNeuTtsNanoTypes.h"   // FInoNeuTtsNanoSynthesisOptions, FOn*
 
 // Forward-decls — the worker's .cpp pulls in the real types.
 class FInoNeuTtsNanoRunner;
 class FInoNeuTtsNanoVoiceRegistry;
 class UInoNeuTtsNanoSubsystem;
 class FEvent;
+
+/**
+ * One queued synthesis request. Plain-struct, passed by value through
+ * the Spsc queue. The dynamic delegate inside is a UObject-aware handle
+ * — it's safe to copy into a TQueue entry and later invoke from the
+ * game thread (via AsyncTask marshaling in the worker).
+ */
+struct FInoNeuTtsNanoPendingSynth
+{
+    FString PhonemesText;                              // pre-phonemized IPA
+    FName   VoiceName;
+    FInoNeuTtsNanoSynthesisOptions     Options;
+    FOnInoNeuTtsNanoSynthesisComplete  OnComplete;     // dynamic — invoke on GT
+};
 
 /**
  * Dedicated synthesis worker thread for UInoNeuTtsNanoSubsystem.
@@ -55,8 +72,13 @@ public:
 
     /** Cooperative cancel: the next cancel-check point inside the AR
      *  loop will abandon the current synthesis. Safe to call from any
-     *  thread. Milestone 4 wires this into the actual loop. */
+     *  thread. */
     void SignalCancel();
+
+    /** Game-thread entry point — copies the pending synth into the
+     *  queue and wakes the worker. Consumes one Spsc slot; serialised
+     *  in the subsystem (never called from multiple threads). */
+    void Enqueue(FInoNeuTtsNanoPendingSynth Pending);
 
 private:
     // Non-owning references. The subsystem guarantees these outlive
@@ -68,14 +90,24 @@ private:
 
     // Thread + queue-signalling event.
     FRunnableThread* Thread     = nullptr;
-    FEvent*          QueueEvent = nullptr;   // triggered by Enqueue (Milestone 4) + Stop()
+    FEvent*          QueueEvent = nullptr;   // triggered by Enqueue + Stop()
 
     // Lifecycle atomics.
     TAtomic<bool> bStopRequested{false};
     TAtomic<bool> bStreamCancelled{false};
 
-    // Milestone 4 will add:
-    //   TQueue<FPendingSynth, EQueueMode::Spsc> Queue;
-    //   void ProcessSynth(FPendingSynth&);
-    //   Dispatch* helpers for game-thread marshaling.
+    // Spsc producer: subsystem game-thread Enqueue. Consumer: Run().
+    TQueue<FInoNeuTtsNanoPendingSynth, EQueueMode::Spsc> Queue;
+
+    // Core synthesis pipeline — runs on the worker thread.
+    void ProcessSynth(FInoNeuTtsNanoPendingSynth& Pending);
+
+    // Game-thread marshal — dispatches OnComplete via AsyncTask so the
+    // dynamic delegate fires on the correct thread.
+    void DispatchCompleteOnGameThread(
+        FOnInoNeuTtsNanoSynthesisComplete OnComplete,
+        bool             bSuccess,
+        TArray<uint8>    PcmInt16LE,
+        int32            SampleRate,
+        FString          ErrorMessage);
 };
