@@ -5,12 +5,45 @@
 #include "InoAgentsLog.h"
 #include "InoAgentsSettings.h"
 
+// Private NeuTtsNano implementation headers. Fully visible here so the
+// forward-declared TUniquePtr<> members' deleter can instantiate
+// correctly (see "out-of-line special members" block below).
+#include "InoNeuTtsNanoRunner.h"
+#include "InoNeuTtsNanoSynthesisWorker.h"
+#include "InoNeuTtsNanoVoiceRegistry.h"
+
+#include "Async/Async.h"
 #include "HAL/PlatformFileManager.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+
+// ============================================================================
+// Out-of-line special members
+//
+// The subsystem owns TUniquePtr<FInoNeuTtsNanoRunner>,
+// TUniquePtr<FInoNeuTtsNanoSynthesisWorker>, and
+// TUniquePtr<FInoNeuTtsNanoVoiceRegistry>, all of which are
+// forward-declared in the public header. UHT's generated .gen.cpp would
+// otherwise emit the implicit default ctor + FVTableHelper ctor + dtor
+// inline and fail to compile (C4150 "cannot delete pointer to
+// incomplete type") because it doesn't include the private
+// NeuTtsNano/ headers. Defining them here, where the full types are
+// visible, resolves the TDefaultDelete instantiation cleanly.
+// Same trick UInoChatterboxTtsSubsystem + UInoLiteRtLmConversation use.
+// ============================================================================
+
+UInoNeuTtsNanoSubsystem::UInoNeuTtsNanoSubsystem() = default;
+
+UInoNeuTtsNanoSubsystem::UInoNeuTtsNanoSubsystem(FVTableHelper& Helper)
+    : Super(Helper)
+{
+}
+
+UInoNeuTtsNanoSubsystem::~UInoNeuTtsNanoSubsystem() = default;
 
 // ============================================================================
 // Internal helpers (anonymous namespace — .cpp-local)
@@ -79,8 +112,59 @@ void UInoNeuTtsNanoSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     bLoadInFlight = false;
     LoadedVariant = EInoNeuTtsNanoBackboneVariant::Q4;
 
+    // Create the voice registry and try to load the plugin's baked-in
+    // default voice. The committed JSON ships as a placeholder (empty
+    // ref_codes) until someone regenerates it via the Python encoder;
+    // we still register it so GetAvailableVoiceNames returns "Default"
+    // and the Milestone 4 synthesis worker can emit a clear
+    // "regenerate voice" error rather than a silent failure.
+    VoiceRegistry = MakeUnique<FInoNeuTtsNanoVoiceRegistry>();
+
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
+    if (Plugin.IsValid())
+    {
+        const FString VoicePath = FPaths::Combine(
+            Plugin->GetBaseDir(),
+            TEXT("NeuTtsNano/Resources/default_voice.nvoice.json"));
+
+        FString VoiceErr;
+        if (VoiceRegistry->RegisterFromJsonFile(VoicePath, FName(TEXT("Default")), VoiceErr))
+        {
+            const FInoNeuTtsNanoVoice* Default = VoiceRegistry->Find(FName(TEXT("Default")));
+            if (Default != nullptr && Default->IsPlaceholder())
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("NeuTTS Nano: default voice is a PLACEHOLDER (empty ref_codes). "
+                            "Synthesis will fail until regenerated. See "
+                            "Plugins/InoAgents/NeuTtsNano/README.md."));
+            }
+            else if (Default != nullptr)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("NeuTTS Nano: loaded default voice \"%s\" "
+                            "(%d ref codes, %d-char ref_text)."),
+                       *Default->DisplayName,
+                       Default->RefCodes.Num(),
+                       Default->RefText.Len());
+            }
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("NeuTTS Nano: failed to load default voice JSON: %s"), *VoiceErr);
+        }
+    }
+    else
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("NeuTTS Nano: IPluginManager::FindPlugin(\"InoAgents\") returned "
+                    "invalid — default voice not loaded."));
+    }
+
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoNeuTtsNanoSubsystem::Initialize — ready (no model loaded)"));
+           TEXT("UInoNeuTtsNanoSubsystem::Initialize — ready (no model loaded, "
+                "%d voice(s) registered)"),
+           VoiceRegistry->Num());
 }
 
 void UInoNeuTtsNanoSubsystem::Deinitialize()
@@ -94,6 +178,12 @@ void UInoNeuTtsNanoSubsystem::Deinitialize()
     }
 
     UnloadModel();
+
+    // Voice registry doesn't hold any native resources; free after
+    // the worker + runner so any Milestone 4 synthesis-in-flight that
+    // still holds a VoiceRegistry pointer is already joined.
+    VoiceRegistry.Reset();
+
     Super::Deinitialize();
 }
 
@@ -180,18 +270,41 @@ void UInoNeuTtsNanoSubsystem::UnloadModel()
 {
     check(IsInGameThread());
 
-    // If a download is in flight, finish it with a cancellation error
-    // first. This fires PendingOnLoaded with bSuccess=false and clears
-    // bLoadInFlight.
+    // 1. If a download is in flight, finish it with a cancellation
+    //    error first. This fires PendingOnLoaded with bSuccess=false
+    //    and clears bLoadInFlight.
     if (bLoadInFlight && DownloadQueue.Num() > 0)
     {
         FinishDownloadError(TEXT("Cancelled by UnloadModel."));
     }
 
-    // No model-loaded state yet in Milestone 2 — just reset the flag.
-    // Milestone 3 expands this to free llama_context / llama_model /
-    // FInoOnnxSession + join the synthesis worker.
+    // 2. Stop + join worker thread BEFORE freeing Runner, since the
+    //    worker holds borrowed pointers into Runner's native resources.
+    //    ~FInoNeuTtsNanoSynthesisWorker signals stop + WaitForCompletion
+    //    (see InoNeuTtsNanoSynthesisWorker.cpp dtor).
+    if (Worker.IsValid())
+    {
+        Worker->SignalCancel();  // abandon any in-flight synthesis
+        Worker.Reset();           // joins the thread
+    }
+
+    // 3. Free Runner — dtor releases codec session, llama_context,
+    //    and llama_model in reverse-construction order.
+    if (Runner.IsValid())
+    {
+        Runner.Reset();
+    }
+
     bModelLoaded = false;
+}
+
+TArray<FName> UInoNeuTtsNanoSubsystem::GetAvailableVoiceNames() const
+{
+    if (!VoiceRegistry.IsValid())
+    {
+        return TArray<FName>();
+    }
+    return VoiceRegistry->GetAvailableVoiceNames();
 }
 
 bool UInoNeuTtsNanoSubsystem::IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Variant) const
@@ -685,26 +798,113 @@ void UInoNeuTtsNanoSubsystem::CleanupDownload()
 }
 
 // ============================================================================
-// Model loader (Milestone 2 stub)
+// Model loader (Milestone 3 — real async ThreadPool dispatch)
 //
-// Milestone 3 replaces this with:
-//   1. ThreadPool dispatch
-//   2. llama_model_load_from_file (via InoAgents::LlamaCpp::GetApi()->...)
-//   3. llama_init_from_model + sampler chain
-//   4. FInoOnnxSession::Create for the codec decoder
-//   5. AsyncTask back to game thread with result
+// Dispatches the heavy work (llama_model_load_from_file + llama_init_from_model
+// + FInoOnnxSession::Create) to a ThreadPool thread so the game thread
+// doesn't hitch during the ~2-5 s load. AsyncTask marshals the result
+// back to the game thread where we stash the Runner into a TUniquePtr
+// and fire PendingOnLoaded.
+//
+// TWeakObjectPtr guards against the subsystem being destroyed while the
+// load is in flight — if that happens, the AsyncTask lambda sees
+// WeakSelf.Get() == nullptr and silently drops the Runner (its dtor
+// cleans up the native resources).
 // ============================================================================
 
 void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
 {
     check(IsInGameThread());
+
+    // Resolve file paths we'll hand to the ThreadPool task.
+    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const FInoNeuTtsNanoModelEntry* Entry =
+        Settings ? Settings->FindNeuTtsNanoModel(PendingConfig.Variant) : nullptr;
+    if (Entry == nullptr)
+    {
+        // Shouldn't happen — LoadModelAsync already verified this — but
+        // be defensive.
+        FString Err = FString::Printf(
+            TEXT("Settings entry disappeared during load for variant %s."),
+            *NeuTtsNanoVariantToString(PendingConfig.Variant));
+        UE_LOG(LogInoAgents, Error, TEXT("NeuTTS Nano load FAILED: %s"), *Err);
+
+        FOnInoNeuTtsNanoModelLoaded Cb = PendingOnLoaded;
+        PendingOnLoaded.Unbind();
+        bLoadInFlight = false;
+        Cb.ExecuteIfBound(false, Err);
+        return;
+    }
+
+    const FString Dir          = NeuTtsNanoResolveModelDir(PendingConfig.Variant);
+    const FString BackbonePath = FPaths::Combine(Dir, Entry->BackboneFileName);
+    const FString CodecPath    = FPaths::Combine(Dir, Entry->CodecFileName);
+    const FInoNeuTtsNanoModelConfig ConfigCopy = PendingConfig;
+
+    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSelf(this);
+
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTTS Nano DispatchLoadWorker (Milestone 2 stub) — marking loaded."));
+           TEXT("NeuTTS Nano DispatchLoadWorker: async load (backbone=%s, codec=%s, "
+                "n_gpu_layers=%d, n_ctx=%d)"),
+           *BackbonePath, *CodecPath,
+           ConfigCopy.NumGpuLayers, ConfigCopy.NumContextTokens);
 
-    bModelLoaded  = true;
-    bLoadInFlight = false;
+    const double LoadStartTime = FPlatformTime::Seconds();
 
-    FOnInoNeuTtsNanoModelLoaded Cb = PendingOnLoaded;
-    PendingOnLoaded.Unbind();
-    Cb.ExecuteIfBound(true, FString());
+    Async(EAsyncExecution::ThreadPool,
+        [WeakSelf, BackbonePath, CodecPath, ConfigCopy, LoadStartTime]() mutable
+        {
+            // -- ThreadPool thread --
+            FString LocalErr;
+            TUniquePtr<FInoNeuTtsNanoRunner> NewRunner =
+                FInoNeuTtsNanoRunner::Create(
+                    BackbonePath, CodecPath, ConfigCopy, LocalErr);
+
+            const double LoadElapsed = FPlatformTime::Seconds() - LoadStartTime;
+
+            // -- Back to the game thread to stash + dispatch --
+            AsyncTask(ENamedThreads::GameThread,
+                [WeakSelf, Runner = MoveTemp(NewRunner),
+                 LocalErr = MoveTemp(LocalErr), LoadElapsed]() mutable
+                {
+                    UInoNeuTtsNanoSubsystem* Self = WeakSelf.Get();
+                    if (Self == nullptr)
+                    {
+                        // Subsystem torn down while the load was in
+                        // flight. Runner's dtor will clean up cleanly
+                        // as the temporary goes out of scope.
+                        UE_LOG(LogInoAgents, Warning,
+                               TEXT("NeuTTS Nano load completed but subsystem is gone; "
+                                    "discarding Runner."));
+                        return;
+                    }
+
+                    FOnInoNeuTtsNanoModelLoaded Cb = Self->PendingOnLoaded;
+                    Self->PendingOnLoaded.Unbind();
+                    Self->bLoadInFlight = false;
+
+                    if (!Runner)
+                    {
+                        UE_LOG(LogInoAgents, Error,
+                               TEXT("NeuTTS Nano load FAILED after %.2f s: %s"),
+                               LoadElapsed, *LocalErr);
+                        Cb.ExecuteIfBound(false, LocalErr);
+                        return;
+                    }
+
+                    // Happy path — stash Runner, start worker skeleton,
+                    // flip loaded flag.
+                    Self->Runner       = MoveTemp(Runner);
+                    Self->Worker       = MakeUnique<FInoNeuTtsNanoSynthesisWorker>(
+                        WeakSelf,
+                        Self->Runner.Get(),
+                        Self->VoiceRegistry.Get());
+                    Self->bModelLoaded = true;
+
+                    UE_LOG(LogInoAgents, Log,
+                           TEXT("NeuTTS Nano load OK in %.2f s — Runner + Worker ready."),
+                           LoadElapsed);
+                    Cb.ExecuteIfBound(true, FString());
+                });
+        });
 }

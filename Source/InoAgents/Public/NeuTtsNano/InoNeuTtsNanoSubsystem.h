@@ -13,6 +13,18 @@
 
 class IFileHandle;
 
+// Forward-declared private types — actual definitions in
+// Private/NeuTtsNano/. The subsystem holds these via TUniquePtr, so
+// the special members (default ctor, FVTableHelper ctor, dtor) are
+// defined out-of-line in the .cpp where the private headers are fully
+// visible. Same trick UInoLiteRtLmConversation and
+// UInoChatterboxTtsSubsystem use for their forward-declared members —
+// avoids the classic C4150 "cannot delete pointer to incomplete type"
+// UHT .gen.cpp compile error.
+class FInoNeuTtsNanoRunner;
+class FInoNeuTtsNanoSynthesisWorker;
+class FInoNeuTtsNanoVoiceRegistry;
+
 /**
  * Game-instance-wide NeuTTS Nano on-device TTS runtime owner.
  *
@@ -64,6 +76,13 @@ class INOAGENTS_API UInoNeuTtsNanoSubsystem : public UGameInstanceSubsystem
     GENERATED_BODY()
 
 public:
+    // Out-of-line special members needed because TUniquePtr<Forward>
+    // members below would otherwise try to instantiate their default
+    // deleter against an incomplete type in the generated .gen.cpp.
+    UInoNeuTtsNanoSubsystem();
+    UInoNeuTtsNanoSubsystem(FVTableHelper& Helper);
+    virtual ~UInoNeuTtsNanoSubsystem();
+
     //~ UGameInstanceSubsystem
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
@@ -114,6 +133,14 @@ public:
      *  IsModelLoaded() returns true. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
     EInoNeuTtsNanoBackboneVariant GetLoadedVariant() const { return LoadedVariant; }
+
+    /** Names of voices registered with the subsystem. In v1 this
+     *  contains "Default" (baked-in from NeuTtsNano/Resources/
+     *  default_voice.nvoice.json) or is empty if the JSON failed to
+     *  load. A follow-up milestone will scan a user-provided voices/
+     *  directory for additional entries. */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
+    TArray<FName> GetAvailableVoiceNames() const;
 
     /** Cooperatively abort an in-flight download. No-op if no download
      *  is running. Fires PendingOnLoaded with bSuccess=false,
@@ -193,8 +220,23 @@ private:
     void FinishDownloadError(const FString& Err);
     void CleanupDownload();
 
-    /** Milestone 2 stub: just marks bModelLoaded=true and fires
-     *  PendingOnLoaded. Milestone 3 replaces this with the real async
-     *  llama_model_load_from_file + FInoOnnxSession::Create dispatch. */
+    /** Dispatches the real async model-load work to the ThreadPool:
+     *  llama_model_load_from_file + llama_init_from_model +
+     *  FInoOnnxSession::Create for the NeuCodec decoder. Runner is
+     *  stashed back onto the game thread via AsyncTask; PendingOnLoaded
+     *  fires exactly once with the final outcome. */
     void DispatchLoadWorker();
+
+    // ==================================================================
+    // Loaded-state owners (forward-declared; TUniquePtr deleters need
+    // full type visibility, so the Reset() call sites live in the .cpp).
+    // Reset in UnloadModel in reverse dependency order:
+    //   Worker (stops thread) → Runner (frees model/context/ORT session).
+    // VoiceRegistry is created at Initialize and lives until Deinitialize;
+    // it never holds native resources so teardown ordering doesn't matter.
+    // ==================================================================
+
+    TUniquePtr<FInoNeuTtsNanoRunner>           Runner;
+    TUniquePtr<FInoNeuTtsNanoSynthesisWorker>  Worker;
+    TUniquePtr<FInoNeuTtsNanoVoiceRegistry>    VoiceRegistry;
 };
