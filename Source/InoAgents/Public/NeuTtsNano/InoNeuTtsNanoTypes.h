@@ -129,6 +129,21 @@ struct INOAGENTS_API FInoNeuTtsNanoSynthesisOptions
               meta = (ClampMin = "1", ClampMax = "500"))
     int32 TopK = 50;
 
+    /** Nucleus (top-p) sampling cutoff. NeuTTS's GGUF path inherits
+     *  llama-cpp-python's default of 0.95 — a low-probability-tail cut
+     *  that keeps generation focused. Set to 1.0 to disable. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano",
+              meta = (ClampMin = "0.1", ClampMax = "1.0"))
+    float TopP = 0.95f;
+
+    /** Minimum-p sampling cutoff. NeuTTS's GGUF path inherits
+     *  llama-cpp-python's default of 0.05 — drops tokens whose
+     *  probability is below min_p × (prob of the most likely token).
+     *  Set to 0.0 to disable. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano",
+              meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float MinP = 0.05f;
+
     /** Softmax temperature. NeuTTS default = 1.0. Lower = more
      *  deterministic / flat prosody; higher = more variation. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano",
@@ -182,10 +197,15 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoNeuTtsNanoModelLoaded,
  * contract).
  */
 DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoSynthesisComplete,
-    bool,           bSuccess,
-    TArray<uint8>,  PcmInt16LE,
-    int32,          SampleRate,
-    FString,        ErrorMessage);
+    bool,                   bSuccess,
+    const TArray<uint8>&,   PcmInt16LE,
+    int32,                  SampleRate,
+    FString,                ErrorMessage);
+// Note: PcmInt16LE is `const TArray<uint8>&`, not TArray<uint8> by value.
+// UE's BP reflection can't pass TArray-by-value through a dynamic delegate —
+// it errors out with "No value will be returned by reference. Parameter
+// 'PcmInt16LE'" when you try to bind a CustomEvent. Matches the pattern
+// FOnInoChatterboxAudioChunk uses for the same AudioChunk byte buffer.
 
 /**
  * Multicast download-progress signal. Percent is 0..100 (clamped).

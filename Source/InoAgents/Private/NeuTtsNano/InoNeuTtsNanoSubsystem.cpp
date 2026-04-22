@@ -353,11 +353,13 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
 
     UE_LOG(LogInoAgents, Log,
            TEXT("NeuTtsNano SynthesizeAsync: queued (voice=%s, phonemes=%d chars, "
-                "max_new=%d, top_k=%d, temp=%.2f, seed=%d)"),
+                "max_new=%d, top_k=%d, top_p=%.2f, min_p=%.2f, temp=%.2f, seed=%d)"),
            *Pending.VoiceName.ToString(),
            Pending.PhonemesText.Len(),
            Pending.Options.MaxNewTokens,
            Pending.Options.TopK,
+           Pending.Options.TopP,
+           Pending.Options.MinP,
            Pending.Options.Temperature,
            Pending.Options.Seed);
 

@@ -206,6 +206,8 @@ namespace InoAgents::LlamaCpp
         struct llama_sampler*             (*llama_sampler_init_greedy)(void) = nullptr;
         struct llama_sampler*             (*llama_sampler_init_dist)(uint32_t seed) = nullptr;
         struct llama_sampler*             (*llama_sampler_init_top_k)(int32_t k) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_top_p)(float p, size_t min_keep) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_min_p)(float p, size_t min_keep) = nullptr;
         struct llama_sampler*             (*llama_sampler_init_temp)(float t) = nullptr;
         llama_token                       (*llama_sampler_sample)(
                                               struct llama_sampler* smpl,

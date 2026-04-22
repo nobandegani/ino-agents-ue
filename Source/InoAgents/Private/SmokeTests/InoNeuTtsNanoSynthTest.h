@@ -56,7 +56,7 @@ public:
     UFUNCTION()
     void HandleSynthComplete(
         bool bSuccess,
-        TArray<uint8> PcmInt16LE,
+        const TArray<uint8>& PcmInt16LE,
         int32 SampleRate,
         FString ErrorMessage);
 

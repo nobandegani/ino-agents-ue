@@ -115,6 +115,8 @@ namespace
         INO_REPORT_MEMBER(llama_sampler_init_greedy);
         INO_REPORT_MEMBER(llama_sampler_init_dist);
         INO_REPORT_MEMBER(llama_sampler_init_top_k);
+        INO_REPORT_MEMBER(llama_sampler_init_top_p);
+        INO_REPORT_MEMBER(llama_sampler_init_min_p);
         INO_REPORT_MEMBER(llama_sampler_init_temp);
         INO_REPORT_MEMBER(llama_sampler_sample);
         INO_REPORT_MEMBER(llama_sampler_accept);

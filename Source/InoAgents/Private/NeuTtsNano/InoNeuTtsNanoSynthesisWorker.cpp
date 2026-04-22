@@ -431,7 +431,22 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     }
 
     // -----------------------------------------------------------------
-    // 3. Build sampler chain (top-k → temp → dist)
+    // 3. Build sampler chain (top-k → top-p → min-p → temp → dist).
+    //
+    // Exact order matches llama-cpp-python's default pipeline that
+    // NeuTTS's Python _infer_ggml inherits from Llama.__call__ defaults:
+    //
+    //     top_k = 50        (NeuTTS explicit override)
+    //     top_p = 0.95      (llama-cpp-python default — implicit)
+    //     min_p = 0.05      (llama-cpp-python default — implicit)
+    //     temperature = 1.0 (NeuTTS explicit override)
+    //     dist (seed)       (sample)
+    //
+    // min_keep=1 on both top_p and min_p matches llama-cpp-python's
+    // Llama._create_completion path (it never leaves a top-p / min-p
+    // filter with zero candidates — the minimum-keep floor prevents
+    // degenerate sampling when probability mass is extremely
+    // concentrated).
     // -----------------------------------------------------------------
     struct llama_sampler* Sampler = nullptr;
     {
@@ -444,6 +459,10 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         }
         Api->llama_sampler_chain_add(Sampler,
             Api->llama_sampler_init_top_k(Pending.Options.TopK));
+        Api->llama_sampler_chain_add(Sampler,
+            Api->llama_sampler_init_top_p(Pending.Options.TopP, /*min_keep=*/ 1));
+        Api->llama_sampler_chain_add(Sampler,
+            Api->llama_sampler_init_min_p(Pending.Options.MinP, /*min_keep=*/ 1));
         Api->llama_sampler_chain_add(Sampler,
             Api->llama_sampler_init_temp(Pending.Options.Temperature));
 

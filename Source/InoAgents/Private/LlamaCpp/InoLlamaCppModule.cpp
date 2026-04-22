@@ -374,6 +374,8 @@ namespace
         INO_RESOLVE_LLAMA(llama_sampler_init_greedy);
         INO_RESOLVE_LLAMA(llama_sampler_init_dist);
         INO_RESOLVE_LLAMA(llama_sampler_init_top_k);
+        INO_RESOLVE_LLAMA(llama_sampler_init_top_p);
+        INO_RESOLVE_LLAMA(llama_sampler_init_min_p);
         INO_RESOLVE_LLAMA(llama_sampler_init_temp);
         INO_RESOLVE_LLAMA(llama_sampler_sample);
         INO_RESOLVE_LLAMA(llama_sampler_accept);
