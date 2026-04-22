@@ -128,7 +128,11 @@
       "Bash(where espeak-ng *)",
       "Bash(winget list *)",
       "Bash(winget install *)",
-      "Bash(\"C:/Program Files/eSpeak NG/espeak-ng.exe\" --version)"
+      "Bash(\"C:/Program Files/eSpeak NG/espeak-ng.exe\" --version)",
+      "Bash(mkdir -p /tmp/neutts-audit)",
+      "Bash(curl -sSL -o neutts.py \"https://raw.githubusercontent.com/neuphonic/neutts/main/neutts/neutts.py\")",
+      "Bash(python3 -c ' *)",
+      "Bash(git reset *)"
     ]
   }
 }
