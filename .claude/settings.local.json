@@ -104,7 +104,10 @@
       "Bash(curl -s -o /dev/null -w \"gguf.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/gguf.h\")",
       "Bash(\"/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)",
       "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\' -ErrorAction SilentlyContinue | Select-Object Name | Format-Table -AutoSize\")",
-      "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7' -Force | Format-Table Name, Mode\")"
+      "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7' -Force | Format-Table Name, Mode\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine' -Force | Format-Table Name, Mode\")",
+      "Bash(powershell.exe -Command \"Get-Item 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine' | Select-Object LinkType, Target\")",
+      "Bash(powershell.exe -Command 'Get-ChildItem '\\\\''C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Binaries'\\\\'' -Recurse -Filter '\\\\''UnrealBuildTool.*'\\\\'' 2>$null | Select-Object FullName | Format-Table -AutoSize')"
     ]
   }
 }
