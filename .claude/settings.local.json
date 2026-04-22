@@ -71,7 +71,11 @@
       "Bash(unzip -q -o directml.nupkg -d directml/)",
       "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/dml-research/directml/bin/x64-win/DirectML.dll)",
       "PowerShell(& \"E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\OnnxRuntime\\\\scripts\\\\setup-onnxruntime.ps1\")",
-      "Bash(python -c \"import onnx; print\\(onnx.__version__\\)\")"
+      "Bash(python -c \"import onnx; print\\(onnx.__version__\\)\")",
+      "Bash(python -c \"import pefile; print\\('pefile version:', pefile.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/test-input.dll)",
+      "Bash(python -c ' *)"
     ]
   }
 }
