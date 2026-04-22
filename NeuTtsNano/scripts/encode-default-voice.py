@@ -17,11 +17,31 @@ array + transcript are shipped as a small JSON asset the runtime reads.
 ------------------------------------------------------------------------
 Required pip deps (one-time):
 
-    pip install neucodec librosa soundfile torch
+    pip install neucodec librosa soundfile torch phonemizer
 
 (librosa's default audio backend is soundfile, which needs to be
 installed alongside it. torch CPU-only is fine; this script doesn't
 need CUDA.)
+
+Additionally, the phonemizer library needs espeak-ng installed as a
+separate system package (it's the backend phonemizer uses to produce
+IPA). On Windows:
+
+    winget install -e --id eSpeak-NG.eSpeak-NG
+
+On macOS/Linux:
+
+    brew install espeak-ng                      # macOS
+    sudo apt install espeak-ng                  # Debian/Ubuntu
+
+Why we phonemize here rather than at synth time:
+  NeuTTS Nano was trained on IPA phonemes (produced by espeak-ng),
+  not on raw English. The runtime UE plugin does not carry a
+  phonemizer in v1 (espeak-ng is GPLv3 — doesn't mix with commercial
+  games; an ONNX G2P model lands in a follow-up milestone). Running
+  the phonemizer once offline here and storing the result in the
+  voice JSON lets the plugin skip phonemization entirely until v2
+  arrives.
 
 ------------------------------------------------------------------------
 Typical usage (default output path is the plugin's baked-in voice):
@@ -90,6 +110,13 @@ def main() -> None:
         help="Display name baked into the JSON (shown in editor UI). "
              "Default: %(default)s.",
     )
+    parser.add_argument(
+        "--language", default="en-us",
+        help="espeak-ng language code for phonemizing --ref-text. "
+             "Default: %(default)s. Set to 'none' to skip phonemization "
+             "and store only ref_text (not recommended — the runtime "
+             "plugin needs ref_phones to build the chat prompt).",
+    )
     args = parser.parse_args()
 
     # Import heavy deps AFTER arg parsing so --help is snappy and so missing
@@ -101,6 +128,19 @@ def main() -> None:
     except ImportError as e:
         die(f"{e}\n\nInstall with:\n"
             f"    pip install neucodec librosa soundfile torch")
+
+    # Phonemizer import is optional only if --language=none.
+    phonemize_fn = None
+    if args.language.lower() != "none":
+        try:
+            from phonemizer import phonemize
+            phonemize_fn = phonemize
+        except ImportError as e:
+            die(f"{e}\n\nPhonemization is required unless --language=none. "
+                f"Install with:\n"
+                f"    pip install phonemizer\n\n"
+                f"phonemizer also needs espeak-ng installed as a system "
+                f"package — see the comment at the top of this script.")
 
     if not args.input_wav.is_file():
         die(f"--input-wav does not exist: {args.input_wav}")
@@ -138,11 +178,26 @@ def main() -> None:
     print(f"      Encoded to {len(ref_codes_list)} FSQ codes "
           f"(token rate: {len(ref_codes_list) / duration_s:.1f} Hz)")
 
+    # Phonemize the reference transcript (or skip if --language=none).
+    ref_phones = ""
+    if phonemize_fn is not None:
+        print(f"      Phonemizing ref_text via espeak-ng "
+              f"(language={args.language})...")
+        # Match NeuTTS's _to_phones: phonemize one string, split on
+        # whitespace, rejoin with a single space. This normalises
+        # espeak-ng's variable whitespace to exactly one space between
+        # phonemes — matches the spacing the model was trained with.
+        phones_raw = phonemize_fn([args.ref_text], language=args.language,
+                                   backend="espeak", strip=True)[0]
+        ref_phones = " ".join(phones_raw.split())
+        print(f"      ref_phones ({len(ref_phones)} chars): {ref_phones}")
+
     # Write JSON.
     output_data = {
         "display_name": args.display_name,
-        "ref_text": args.ref_text,
-        "ref_codes": ref_codes_list,
+        "ref_text":     args.ref_text,
+        "ref_phones":   ref_phones,
+        "ref_codes":    ref_codes_list,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:

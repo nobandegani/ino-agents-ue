@@ -142,10 +142,11 @@ void UInoNeuTtsNanoSubsystem::Initialize(FSubsystemCollectionBase& Collection)
             {
                 UE_LOG(LogInoAgents, Log,
                        TEXT("NeuTTS Nano: loaded default voice \"%s\" "
-                            "(%d ref codes, %d-char ref_text)."),
+                            "(%d ref codes, %d-char ref_text, %d-char ref_phones)."),
                        *Default->DisplayName,
                        Default->RefCodes.Num(),
-                       Default->RefText.Len());
+                       Default->RefText.Len(),
+                       Default->RefPhones.Len());
             }
         }
         else

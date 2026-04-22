@@ -5,9 +5,22 @@
 #include "CoreMinimal.h"
 
 /**
- * One loaded voice entry — reference-text transcript + the pre-encoded
- * FSQ speech-token sequence produced by NeuCodec's PyTorch encoder
- * (see Plugins/InoAgents/NeuTtsNano/scripts/encode-default-voice.py).
+ * One loaded voice entry — reference-text transcript (original +
+ * phonemized) + the pre-encoded FSQ speech-token sequence produced
+ * by NeuCodec's PyTorch encoder (see
+ * Plugins/InoAgents/NeuTtsNano/scripts/encode-default-voice.py).
+ *
+ * Schema (matches what encode-default-voice.py emits):
+ *   - DisplayName: human-readable name for UI / logs
+ *   - RefText:     raw transcript of the reference WAV (English, etc.)
+ *                  Preserved for diagnostic purposes only — the runtime
+ *                  prompt uses RefPhones, not RefText, because NeuTTS
+ *                  Nano was trained on IPA phonemes, not raw text.
+ *   - RefPhones:   IPA phonemization of RefText via espeak-ng
+ *                  (produced offline by the encoder script). This is
+ *                  what the Milestone 4 prompt builder concatenates
+ *                  with the caller's pre-phonemized target text.
+ *   - RefCodes:    FSQ speech-token ids from NeuCodec's encoder.
  *
  * Empty RefCodes indicates a placeholder voice — the committed
  * default_voice.nvoice.json ships empty until it's regenerated from
@@ -19,6 +32,7 @@ struct FInoNeuTtsNanoVoice
 {
     FString       DisplayName;
     FString       RefText;
+    FString       RefPhones;
     TArray<int32> RefCodes;
 
     bool IsPlaceholder() const { return RefCodes.Num() == 0; }
@@ -53,9 +67,14 @@ public:
      * JSON schema (matches what encode-default-voice.py emits):
      *   {
      *     "display_name": "Default",
-     *     "ref_text": "<verbatim transcript>",
-     *     "ref_codes": [int, int, ...]
+     *     "ref_text":     "<verbatim transcript in source language>",
+     *     "ref_phones":   "<IPA phonemization via espeak-ng>",
+     *     "ref_codes":    [int, int, ...]
      *   }
+     *
+     * ref_phones is the field the runtime prompt builder actually
+     * consumes. ref_text is kept for diagnostic / debugging purposes
+     * (showing the original transcript in logs).
      */
     bool RegisterFromJsonFile(const FString& JsonPath, FName RegisterAs, FString& OutError);
 

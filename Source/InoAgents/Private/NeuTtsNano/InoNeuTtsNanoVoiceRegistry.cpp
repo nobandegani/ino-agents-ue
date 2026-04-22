@@ -38,6 +38,7 @@ bool FInoNeuTtsNanoVoiceRegistry::RegisterFromJsonFile(
     FInoNeuTtsNanoVoice Voice;
     Root->TryGetStringField(TEXT("display_name"), Voice.DisplayName);
     Root->TryGetStringField(TEXT("ref_text"),     Voice.RefText);
+    Root->TryGetStringField(TEXT("ref_phones"),   Voice.RefPhones);
 
     const TArray<TSharedPtr<FJsonValue>>* CodesArray = nullptr;
     if (Root->TryGetArrayField(TEXT("ref_codes"), CodesArray) && CodesArray != nullptr)
