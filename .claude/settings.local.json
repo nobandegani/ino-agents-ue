@@ -107,7 +107,10 @@
       "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7' -Force | Format-Table Name, Mode\")",
       "Bash(powershell.exe -Command \"Get-ChildItem 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine' -Force | Format-Table Name, Mode\")",
       "Bash(powershell.exe -Command \"Get-Item 'C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine' | Select-Object LinkType, Target\")",
-      "Bash(powershell.exe -Command 'Get-ChildItem '\\\\''C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Binaries'\\\\'' -Recurse -Filter '\\\\''UnrealBuildTool.*'\\\\'' 2>$null | Select-Object FullName | Format-Table -AutoSize')"
+      "Bash(powershell.exe -Command 'Get-ChildItem '\\\\''C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Binaries'\\\\'' -Recurse -Filter '\\\\''UnrealBuildTool.*'\\\\'' 2>$null | Select-Object FullName | Format-Table -AutoSize')",
+      "Bash(powershell.exe -Command \"& { if \\(Test-Path 'HKLM:\\\\Software\\\\EpicGames\\\\Unreal Engine\\\\5.7'\\) { Get-ItemProperty 'HKLM:\\\\Software\\\\EpicGames\\\\Unreal Engine\\\\5.7' | Select-Object * -ExcludeProperty PS* } }\")",
+      "Bash(powershell.exe -Command \"\\(Get-ItemProperty 'HKLM:\\\\SOFTWARE\\\\EpicGames\\\\Unreal Engine\\\\Builds' -ErrorAction SilentlyContinue\\).PSObject.Properties | Where-Object Name -notlike 'PS*' | Select-Object Name, Value\")",
+      "Bash(\"/c/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)"
     ]
   }
 }
