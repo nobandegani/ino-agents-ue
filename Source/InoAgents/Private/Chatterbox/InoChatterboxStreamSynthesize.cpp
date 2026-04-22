@@ -92,8 +92,8 @@ void UInoChatterboxStreamSynthesize::Activate()
     //    OnError, so the BP flow unwinds cleanly without special-casing.
     Subsystem->SynthesizeStreamAsync(
         PendingText, PendingVoice, PendingOptions,
-        PendingStreamChunkTokens,
-        OnChunkBound, OnCompleteBound);
+        OnChunkBound, OnCompleteBound,
+        PendingStreamChunkTokens);
 }
 
 // ---------------------------------------------------------------------------

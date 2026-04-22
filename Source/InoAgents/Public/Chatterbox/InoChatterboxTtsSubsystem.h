@@ -315,15 +315,14 @@ public:
      * MUST be called on the game thread.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox",
-              meta = (AutoCreateRefTerm = "OnAudioChunk,OnComplete",
-                      AdvancedDisplay  = "StreamChunkTokens"))
+              meta = (AutoCreateRefTerm = "OnAudioChunk,OnComplete"))
     void SynthesizeStreamAsync(
         const FString& Text,
         const FInoChatterboxVoice& Voice,
         const FInoChatterboxSynthesisOptions& Options,
-        int32 StreamChunkTokens,
         const FOnInoChatterboxAudioChunk& OnAudioChunk,
-        const FOnInoChatterboxSynthesisComplete& OnComplete);
+        const FOnInoChatterboxSynthesisComplete& OnComplete,
+        int32 StreamChunkTokens = 20);
 
     /**
      * Cooperatively cancel any queued / in-flight synthesis. The

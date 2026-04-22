@@ -456,15 +456,15 @@ void UInoChatterboxTtsSubsystem::SynthesizeStreamAsync(
     const FString& Text,
     const FInoChatterboxVoice& Voice,
     const FInoChatterboxSynthesisOptions& Options,
-    int32 StreamChunkTokens,
     const FOnInoChatterboxAudioChunk& OnAudioChunk,
-    const FOnInoChatterboxSynthesisComplete& OnComplete)
+    const FOnInoChatterboxSynthesisComplete& OnComplete,
+    int32 StreamChunkTokens)
 {
     // Streaming path — forward verbatim. StreamChunkTokens is capped
-    // to [1, 1024] inside the runner (FSynthesisOptions::MaxNewTokens
-    // is the upper bound of a realistic utterance); if a caller passes
-    // something absurd the runner just falls back to "decode once per
-    // token" (useless but not unsafe).
+    // to [0, ...] here (FMath::Max below); zero is a legal value that
+    // collapses to the single-final-chunk non-streaming path inside
+    // EnqueueSynth. If OnAudioChunk isn't bound we also fall back to
+    // non-streaming regardless of StreamChunkTokens.
     EnqueueSynth(Text, Voice, Options,
                  FMath::Max(0, StreamChunkTokens),
                  OnAudioChunk, OnComplete);
