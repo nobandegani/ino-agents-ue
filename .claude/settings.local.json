@@ -75,7 +75,11 @@
       "Bash(python -c \"import pefile; print\\('pefile version:', pefile.__version__\\)\")",
       "Bash(pip install *)",
       "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/test-input.dll)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import onnxruntime; print\\('ort:', onnxruntime.__version__\\)\")",
+      "Bash(python -c \"import onnxruntime; print\\(onnxruntime.get_available_providers\\(\\)\\)\")",
+      "Bash(python -m pip install onnxruntime-directml==1.24.3 numpy)",
+      "Bash(python -c \"import onnxruntime as ort; print\\('ort:', ort.__version__\\); print\\('providers:', ort.get_available_providers\\(\\)\\)\")"
     ]
   }
 }
