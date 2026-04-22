@@ -2,71 +2,91 @@
 #
 # One-time setup (idempotent) for the ONNX Runtime half of the InoAgents plugin.
 #
-# Downloads the official Microsoft prebuilt ONNX Runtime binaries for Win64
-# and Android arm64-v8a, stages the headers + import lib under
+# Downloads Microsoft's prebuilt ONNX Runtime binaries for Win64 and Android
+# arm64-v8a, stages the headers + import lib under
 #   Plugins/InoAgents/Source/ThirdParty/InoOnnxRuntime/
 # and the runtime .dll / .so files under
 #   Plugins/InoAgents/Binaries/ThirdParty/InoOnnxRuntime/
 #
-# Pinned version lives in Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION.
-# Bump that file + re-run this script to update.
+# Pinned versions live in two files:
+#   Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION   (e.g. "1.24.3")
+#   Plugins/InoAgents/OnnxRuntime/DIRECTML_VERSION      (e.g. "1.15.4")
+# Bump either + re-run this script to update the corresponding binaries.
 #
-# Artifacts on disk after this runs (assuming version 1.24.3):
+# Windows sources:
+#   Microsoft.ML.OnnxRuntime.DirectML NuGet (DML-flavored ORT build)
+#     -> onnxruntime.dll                    (RENAMED to InoOnnxRuntime.dll)
+#     -> onnxruntime_providers_shared.dll   (original name — not statically
+#        imported by our ORT DLL, some shared-EP paths LoadLibrary it by
+#        basename; safer to ship than regret)
+#     -> headers under build/native/include/
+#   Microsoft.AI.DirectML NuGet (DirectML runtime)
+#     -> DirectML.dll                       (ORIGINAL NAME — see below)
+#
+# Why the DirectML NuGet pair and not the plain GitHub Releases ZIP:
+#   The GitHub-published `onnxruntime-win-x64-<ver>.zip` is CPU-only — the
+#   DirectML Execution Provider is NOT compiled in. To target D3D12 GPUs
+#   (any modern Windows GPU including NPUs on Win11 24H2+) we need the
+#   DML-flavored build, which Microsoft ships only via NuGet. DirectML.dll
+#   itself comes from a separate NuGet because the ORT NuGet doesn't
+#   bundle it — dependency relationship, not a bundling one.
+#
+# Why DirectML.dll keeps its original name (unlike onnxruntime.dll):
+#   dumpbin /imports on the DML-flavored onnxruntime.dll shows DirectML.dll
+#   as a STATIC import (not delay-load, not dynamic). Windows resolves it
+#   at LoadLibrary time, not runtime. Renaming it would make the ORT DLL
+#   fail to load entirely.
+#
+#   The "base-name cache collision" concern that drove the onnxruntime.dll
+#   rename DOES still exist for DirectML.dll (UE 5.7 bundles three copies
+#   under Engine/Binaries/Win64/DML/ and Engine/Source/ThirdParty/DirectML/),
+#   but NONE of those paths is on Windows' default DLL search path for a
+#   UE-packaged process. UE's LoadLibraryEx for our plugin DLLs uses
+#   LOAD_WITH_ALTERED_SEARCH_PATH, which means the LOADED DLL'S FOLDER
+#   is searched first for static imports. Our InoOnnxRuntime.dll lives at
+#   Binaries/ThirdParty/InoOnnxRuntime/Win64/ — so Windows finds our
+#   DirectML.dll right there before falling through to system paths.
+#
+#   Residual collision risk: if another plugin LoadLibrary's its own
+#   DirectML.dll before ours, Windows' base-name cache serves that one.
+#   Mitigation lives in InoOnnxModule::StartupModule, which preloads
+#   our DirectML.dll by full path so we win the cache race.
+#
+# Why no GPU mega-bundle / CUDA:
+#   Microsoft's GPU ORT build includes CUDA + TensorRT (~300 MB of NVIDIA
+#   runtime libs we don't want to ship with a UE game). DirectML covers
+#   the same ground for NVIDIA, AMD, Intel, and (on 24H2+) NPUs via one
+#   API — 20 MB of DLLs total. Clear winner for general-purpose Windows
+#   deployment.
+#
+# Android:
+#   Unchanged. The Android AAR ships one unified libonnxruntime.so per ABI
+#   with CPU + XNNPACK + NNAPI + WebGPU baked in. DirectML is Windows-only
+#   (D3D12-based) so nothing to do here. The .so keeps the libInoOnnxRuntime.so
+#   rename for the same link-time symbol-version-collision reason the old
+#   Windows rename dodged; see the original-file comments below preserved
+#   from Phase 4.
+#
+# Artifacts on disk after this runs (assuming ORT 1.24.3 + DML 1.15.4):
 #
 #   Source/ThirdParty/InoOnnxRuntime/
-#     Public/                        (C / C++ API headers — used at compile time)
+#     Public/                         (C / C++ API headers + dml_provider_factory.h)
 #
 #   Binaries/ThirdParty/InoOnnxRuntime/
 #     Win64/
-#       InoOnnxRuntime.dll           (~13 MB — RENAMED from onnxruntime.dll)
+#       InoOnnxRuntime.dll            (~13 MB — RENAMED from onnxruntime.dll)
+#       onnxruntime_providers_shared.dll   (~200 KB, original name)
+#       DirectML.dll                  (~18 MB, original name, from MS.AI.DirectML NuGet)
 #     Android/arm64-v8a/
-#       libonnxruntime.so            (~25 MB, CPU + XNNPACK)
-#
-# Windows rename rationale:
-#   UE 5.7 ships multiple conflicting copies of "onnxruntime.dll" through
-#   plugins like NNE (NNERuntimeORT) and some Marketplace runtime plugins.
-#   Windows' LoadLibrary uses BASE-NAME caching — if any of those copies
-#   gets loaded into the process before ours, our FPlatformProcess::GetDllHandle
-#   call with our FULL path silently returns the already-loaded handle
-#   (UE's older ORT, likely 1.19.x), and our OrtApi::GetApi(ORT_API_VERSION=24)
-#   call returns nullptr because that older DLL doesn't implement API 24.
-#
-#   We dodge the cache entirely by renaming our DLL to a name no other
-#   library uses. The InoOnnxModule startup code then uses GetProcAddress
-#   on "OrtGetApiBase" to fish out the one entry point we need, and all
-#   subsequent ORT calls go through the returned OrtApi vtable — no
-#   implicit link against an import library at all. Clean.
-#
-# Android does NOT need the rename: only one libonnxruntime.so lands in
-# the APK's lib/arm64-v8a/ (verified empirically), the linker loads our
-# version via libUnreal.so's DT_NEEDED chain, and no cache conflict is
-# possible inside an APK with a single copy.
-#
-# We do NOT stage onnxruntime.lib anywhere — dynamic loading means we
-# never link against it, so keeping it would just be dead weight.
-#
-# This script explicitly takes the CPU-only Windows build (not the GPU /
-# CUDA / TensorRT mega-bundle). Reasons:
-#   1. The GPU bundle is ~300 MB and mostly CUDA runtime DLLs we don't want
-#      to ship alongside a UE game.
-#   2. DirectML (the GPU provider that matches UE's D3D12 renderer) is
-#      a separate concern — we add it later via Microsoft's DirectML NuGet
-#      or the Direct-ML standalone package, not via the GPU mega-bundle.
-#   3. Starting CPU-only keeps Phase 1 lean. Chatterbox Turbo on a modern
-#      gaming CPU is ~1-2s first-chunk on CPU, fully usable for validating
-#      the integration end-to-end. GPU acceleration is a follow-up phase.
-#
-# Android's AAR ships one unified libonnxruntime.so per ABI with CPU +
-# XNNPACK baked in. That is the right provider set for ARM — XNNPACK is
-# measurably faster than CPU on aarch64 and more reliable than NNAPI
-# across vendors.
+#       libInoOnnxRuntime.so          (~25 MB, CPU + XNNPACK)
 
 $ErrorActionPreference = "Stop"
 
 $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OnnxRtDir    = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $PluginDir    = (Resolve-Path (Join-Path $OnnxRtDir "..")).Path
-$VersionFile  = Join-Path $OnnxRtDir "ONNXRUNTIME_VERSION"
+$VersionFile    = Join-Path $OnnxRtDir "ONNXRUNTIME_VERSION"
+$DmlVersionFile = Join-Path $OnnxRtDir "DIRECTML_VERSION"
 $CacheDir     = Join-Path $OnnxRtDir ".cache"
 
 # Staging destinations. Note there is no Win64 "lib" directory anymore —
@@ -78,7 +98,7 @@ $Win64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Win
 $Arm64BinStageDir = Join-Path $PluginDir "Binaries\ThirdParty\InoOnnxRuntime\Android\arm64-v8a"
 
 #---------------------------------------------------------------------
-# 1. Load pinned version
+# 1. Load pinned versions
 #---------------------------------------------------------------------
 if (-not (Test-Path $VersionFile)) {
     Write-Error "ONNXRUNTIME_VERSION file not found at $VersionFile"
@@ -88,9 +108,18 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     Write-Error "ONNXRUNTIME_VERSION must be a plain semver triple like '1.24.3'. Got: '$Version'"
 }
 
+if (-not (Test-Path $DmlVersionFile)) {
+    Write-Error "DIRECTML_VERSION file not found at $DmlVersionFile"
+}
+$DmlVersion = (Get-Content $DmlVersionFile -Raw).Trim()
+if ($DmlVersion -notmatch '^\d+\.\d+\.\d+$') {
+    Write-Error "DIRECTML_VERSION must be a plain semver triple like '1.15.4'. Got: '$DmlVersion'"
+}
+
 Write-Host ""
-Write-Host "=== ONNX Runtime setup ===" -ForegroundColor Cyan
-Write-Host "Version:       $Version (from ONNXRUNTIME_VERSION)"
+Write-Host "=== ONNX Runtime + DirectML setup ===" -ForegroundColor Cyan
+Write-Host "ORT version:       $Version (from ONNXRUNTIME_VERSION)"
+Write-Host "DirectML version:  $DmlVersion (from DIRECTML_VERSION)"
 Write-Host "Plugin dir:    $PluginDir"
 Write-Host "OnnxRuntime:   $OnnxRtDir"
 Write-Host "Cache dir:     $CacheDir"
@@ -99,43 +128,57 @@ Write-Host ""
 #---------------------------------------------------------------------
 # 2. Resolve download URLs + target cache paths
 #---------------------------------------------------------------------
-# Windows CPU-only build lives on GitHub Releases.
-$WinZipName = "onnxruntime-win-x64-$Version.zip"
-$WinZipUrl  = "https://github.com/microsoft/onnxruntime/releases/download/v$Version/$WinZipName"
-$WinZipPath = Join-Path $CacheDir $WinZipName
+# Windows: DML-flavored ORT NuGet. NuGet's flat HTTP API serves raw .nupkg
+# (which is just a ZIP) from v2/package/<id>/<version>. Saving with .nupkg
+# extension; Expand-Archive requires .zip — we copy-then-rename at extract
+# time.
+$OrtNupkgName = "Microsoft.ML.OnnxRuntime.DirectML.$Version.nupkg"
+$OrtNupkgUrl  = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$Version"
+$OrtNupkgPath = Join-Path $CacheDir $OrtNupkgName
 
-# Android AAR is published to Maven Central (not GitHub Releases).
+# Windows: DirectML.dll comes from a separate NuGet (Microsoft.AI.DirectML).
+# Version pinned independently because ORT NuGet only declares a minimum
+# compatible DirectML version — we want an explicit pin so a transitive
+# bump doesn't surprise us.
+$DmlNupkgName = "Microsoft.AI.DirectML.$DmlVersion.nupkg"
+$DmlNupkgUrl  = "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$DmlVersion"
+$DmlNupkgPath = Join-Path $CacheDir $DmlNupkgName
+
+# Android AAR is published to Maven Central (not GitHub Releases / NuGet).
 $AndroidAarName = "onnxruntime-android-$Version.aar"
 $AndroidAarUrl  = "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$Version/$AndroidAarName"
 $AndroidAarPath = Join-Path $CacheDir $AndroidAarName
 
 #---------------------------------------------------------------------
-# 3. Idempotency: if staged binaries already match this version, skip
+# 3. Idempotency: if staged binaries already match both versions, skip
 #---------------------------------------------------------------------
-# Write a small VERSION marker alongside staged files so we can detect
-# drift cheaply without having to inspect the binaries themselves.
-$StampFile = Join-Path $ThirdPartyDir ".ort_version"
+# Stamp format: "<ort_version>+<dml_version>". Single-line + marker so
+# either version bump triggers re-stage.
+$StampFile    = Join-Path $ThirdPartyDir ".ort_version"
+$ExpectedStamp = "$Version+$DmlVersion"
 
 if ((Test-Path $StampFile) -and `
     (Test-Path (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll")) -and `
+    (Test-Path (Join-Path $Win64BinStageDir "DirectML.dll")) -and `
     (Test-Path (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so"))) {
-    $StampVersion = (Get-Content $StampFile -Raw).Trim()
-    if ($StampVersion -eq $Version) {
+    $StampValue = (Get-Content $StampFile -Raw).Trim()
+    if ($StampValue -eq $ExpectedStamp) {
         Write-Host "--- Already up to date ---" -ForegroundColor Green
-        Write-Host "  ONNX Runtime $Version staged."
-        Write-Host "  Delete '$StampFile' or bump ONNXRUNTIME_VERSION to force re-stage."
+        Write-Host "  ORT $Version + DirectML $DmlVersion staged."
+        Write-Host "  Delete '$StampFile' or bump ONNXRUNTIME_VERSION / DIRECTML_VERSION to force re-stage."
         exit 0
     } else {
-        Write-Host "--- Version drift detected: staged=$StampVersion, pinned=$Version. Re-staging. ---" -ForegroundColor Yellow
+        Write-Host "--- Version drift detected: staged=$StampValue, pinned=$ExpectedStamp. Re-staging. ---" -ForegroundColor Yellow
     }
 }
 
 #---------------------------------------------------------------------
-# 4. Preflight: tools we need
+# 4. Preflight: create directories + helper function
 #---------------------------------------------------------------------
 # Invoke-WebRequest + Expand-Archive are built into PowerShell 5.1+, so no
-# external dependencies required for the Windows zip. The Android AAR is
-# a zip in disguise; Expand-Archive handles it after we rename to .zip.
+# external dependencies required. The NuGet packages and Android AAR are
+# all zips in disguise; Expand-Archive handles them once we have a .zip
+# extension on disk.
 
 foreach ($d in @($CacheDir, $PublicIncDir, $Win64BinStageDir, $Arm64BinStageDir)) {
     if (-not (Test-Path $d)) {
@@ -144,8 +187,8 @@ foreach ($d in @($CacheDir, $PublicIncDir, $Win64BinStageDir, $Arm64BinStageDir)
 }
 
 function Download-IfMissing {
-    param([string]$Url, [string]$Dest, [string]$Label)
-    if ((Test-Path $Dest) -and ((Get-Item $Dest).Length -gt 1MB)) {
+    param([string]$Url, [string]$Dest, [string]$Label, [int]$MinSizeMb = 1)
+    if ((Test-Path $Dest) -and ((Get-Item $Dest).Length -gt ($MinSizeMb * 1MB))) {
         Write-Host "  [CACHED] $Label ($(Split-Path $Dest -Leaf))"
         return
     }
@@ -158,76 +201,116 @@ function Download-IfMissing {
     Write-Host "             -> $Dest ($sizeMb MB)"
 }
 
+# Expand-Archive insists on a .zip extension. NuGet packages are ZIPs with
+# .nupkg — copy to .zip first, then extract.
+function Expand-Nupkg {
+    param([string]$NupkgPath, [string]$DestDir, [string]$Label)
+
+    if (Test-Path $DestDir) {
+        Remove-Item -Recurse -Force $DestDir
+    }
+    New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+
+    $AsZip = [System.IO.Path]::ChangeExtension($NupkgPath, ".zip")
+    Copy-Item -Path $NupkgPath -Destination $AsZip -Force
+    Expand-Archive -Path $AsZip -DestinationPath $DestDir -Force
+    Remove-Item -Path $AsZip -Force
+
+    Write-Host "  [EXTRACT] $Label -> $DestDir"
+}
+
 #---------------------------------------------------------------------
 # 5. Download
 #---------------------------------------------------------------------
 Write-Host "--- Downloading artifacts ---" -ForegroundColor Yellow
-Download-IfMissing -Url $WinZipUrl       -Dest $WinZipPath       -Label "Windows x64 ORT"
-Download-IfMissing -Url $AndroidAarUrl   -Dest $AndroidAarPath   -Label "Android AAR"
+Download-IfMissing -Url $OrtNupkgUrl     -Dest $OrtNupkgPath     -Label "ORT DirectML NuGet"     -MinSizeMb 10
+Download-IfMissing -Url $DmlNupkgUrl     -Dest $DmlNupkgPath     -Label "DirectML NuGet"         -MinSizeMb 100
+Download-IfMissing -Url $AndroidAarUrl   -Dest $AndroidAarPath   -Label "Android AAR"            -MinSizeMb 5
 Write-Host ""
 
 #---------------------------------------------------------------------
-# 6. Extract Windows build
+# 6. Extract + stage Windows ORT (DML-flavored NuGet)
 #---------------------------------------------------------------------
-Write-Host "--- Extracting Windows artifacts ---" -ForegroundColor Yellow
+Write-Host "--- Extracting + staging Windows ORT ---" -ForegroundColor Yellow
 
-$WinExtractDir = Join-Path $CacheDir "win-extract-$Version"
-if (Test-Path $WinExtractDir) {
-    Remove-Item -Recurse -Force $WinExtractDir
-}
-New-Item -ItemType Directory -Path $WinExtractDir -Force | Out-Null
+$OrtExtractDir = Join-Path $CacheDir "ort-dml-extract-$Version"
+Expand-Nupkg -NupkgPath $OrtNupkgPath -DestDir $OrtExtractDir -Label "ORT DML NuGet"
 
-# -Force overwrites any previous contents without prompting.
-Expand-Archive -Path $WinZipPath -DestinationPath $WinExtractDir -Force
+# NuGet layout:
+#   runtimes/win-x64/native/onnxruntime.dll
+#   runtimes/win-x64/native/onnxruntime_providers_shared.dll
+#   build/native/include/*.h   (onnxruntime_c_api.h + dml_provider_factory.h + ...)
+$OrtNativeDir = Join-Path $OrtExtractDir "runtimes\win-x64\native"
+$OrtIncludeDir = Join-Path $OrtExtractDir "build\native\include"
 
-# Inside the zip is a top-level folder like "onnxruntime-win-x64-1.24.3/"
-# that holds include/, lib/, and sometimes bin/. Resolve it dynamically so
-# version bumps don't break this script.
-$WinRoot = Get-ChildItem -Path $WinExtractDir -Directory | Select-Object -First 1
-if ($null -eq $WinRoot) {
-    Write-Error "Expected exactly one top-level folder inside $WinZipName but found none."
-}
-$WinInclude = Join-Path $WinRoot.FullName "include"
-$WinLib     = Join-Path $WinRoot.FullName "lib"
+if (-not (Test-Path $OrtNativeDir))  { Write-Error "Missing runtimes/win-x64/native/ in the ORT NuGet at $OrtExtractDir" }
+if (-not (Test-Path $OrtIncludeDir)) { Write-Error "Missing build/native/include/ in the ORT NuGet at $OrtExtractDir" }
 
-if (-not (Test-Path $WinInclude)) { Write-Error "Missing include/ under $($WinRoot.FullName)" }
-if (-not (Test-Path $WinLib))     { Write-Error "Missing lib/ under $($WinRoot.FullName)" }
-
-# Stage headers. Copy everything under include/ — ORT ships a modest set
-# of .h files, all of which are part of the public API surface.
+# Stage headers. Copy every .h from the NuGet's include/ — they're the
+# public API surface (onnxruntime_c_api.h, dml_provider_factory.h, plus
+# several smaller helper headers we may never reference but that the
+# main ones include).
 Write-Host "  [STAGE] Headers -> $PublicIncDir"
-Get-ChildItem -Path $WinInclude -File | ForEach-Object {
+Get-ChildItem -Path $OrtIncludeDir -File | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination (Join-Path $PublicIncDir $_.Name) -Force
 }
 
-# Stage runtime DLL — RENAMED from onnxruntime.dll to InoOnnxRuntime.dll to
+# Stage core ORT DLL — RENAMED from onnxruntime.dll to InoOnnxRuntime.dll to
 # avoid Windows LoadLibrary base-name caching colliding with UE's NNE and
-# other plugins that ship their own onnxruntime.dll. See the header comment
-# at the top of this file for the full rationale.
-#
-# We deliberately do NOT stage the import library (.lib) — the runtime
-# consumer code uses GetProcAddress to resolve "OrtGetApiBase" from the
-# renamed DLL and accesses everything else through the OrtApi vtable
-# that returns. No static linking against the library is involved.
-$WinDllFile = Join-Path $WinLib "onnxruntime.dll"
-if (-not (Test-Path $WinDllFile)) { Write-Error "onnxruntime.dll not found under $WinLib" }
+# other plugins that ship their own onnxruntime.dll.
+$OrtDllSrc = Join-Path $OrtNativeDir "onnxruntime.dll"
+if (-not (Test-Path $OrtDllSrc)) { Write-Error "onnxruntime.dll not found at $OrtDllSrc" }
+Copy-Item -Path $OrtDllSrc -Destination (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll") -Force
+Write-Host "  [STAGE] onnxruntime.dll -> InoOnnxRuntime.dll (renamed for base-name isolation)"
 
-Copy-Item -Path $WinDllFile -Destination (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll") -Force
-Write-Host "  [STAGE] onnxruntime.dll -> $Win64BinStageDir\InoOnnxRuntime.dll (renamed for base-name isolation)"
-
-# onnxruntime_providers_shared.dll is not staged in CPU-only mode. When a
-# future phase adds DirectML or another shared-EP provider, we'll stage it
-# under a unique name too (e.g. InoOnnxRuntime_providers_shared.dll) and
-# update InoOnnxModule.cpp to load it alongside the core DLL.
+# Stage shared providers DLL — ORIGINAL NAME. Not a static import of the
+# core ORT DLL (confirmed via dumpbin), so the base-name collision concern
+# doesn't apply here — any other plugin with the same-named DLL would be
+# loading its own copy into its own address space. Our ORT may LoadLibrary
+# it at session-create time for certain shared execution providers (the
+# "shared" half is what lets multiple sessions sharing one provider work).
+# Ship it under the original name so ORT's internal discovery finds it.
+$OrtSharedSrc = Join-Path $OrtNativeDir "onnxruntime_providers_shared.dll"
+if (-not (Test-Path $OrtSharedSrc)) { Write-Error "onnxruntime_providers_shared.dll not found at $OrtSharedSrc" }
+Copy-Item -Path $OrtSharedSrc -Destination (Join-Path $Win64BinStageDir "onnxruntime_providers_shared.dll") -Force
+Write-Host "  [STAGE] onnxruntime_providers_shared.dll -> $Win64BinStageDir (original name, non-statically-imported)"
 
 Write-Host ""
 
 #---------------------------------------------------------------------
-# 7. Extract Android AAR
+# 7. Extract + stage DirectML.dll (from Microsoft.AI.DirectML NuGet)
+#---------------------------------------------------------------------
+Write-Host "--- Extracting + staging DirectML runtime ---" -ForegroundColor Yellow
+
+$DmlExtractDir = Join-Path $CacheDir "directml-extract-$DmlVersion"
+Expand-Nupkg -NupkgPath $DmlNupkgPath -DestDir $DmlExtractDir -Label "DirectML NuGet"
+
+# Microsoft.AI.DirectML layout:
+#   bin/x64-win/DirectML.dll      (~18 MB — this is what we want)
+#   bin/x64-win/DirectML.Debug.dll (debug build, skip)
+#   bin/x64-win/DirectML.lib       (import library, skip — dynamic load only)
+#   bin/arm64-win/DirectML.dll     (skip — Windows on ARM64, not our target yet)
+#   bin/arm64ec-win/DirectML.dll   (skip — ARM64EC, not our target)
+#   bin/x86-win/DirectML.dll       (skip — 32-bit Windows, not supported by UE)
+#   bin/x64-xbox-scarlett-*/DirectML.dll (skip — Xbox GDK builds)
+#   include/DirectML.h + DirectMLConfig.h (optional; Windows SDK already has DirectML.h)
+$DmlDllSrc = Join-Path $DmlExtractDir "bin\x64-win\DirectML.dll"
+if (-not (Test-Path $DmlDllSrc)) { Write-Error "DirectML.dll not found at $DmlDllSrc" }
+
+# Stage DirectML.dll under its ORIGINAL name. See header comment for the
+# "static import, can't rename" rationale.
+Copy-Item -Path $DmlDllSrc -Destination (Join-Path $Win64BinStageDir "DirectML.dll") -Force
+$DmlDllSize = [math]::Round((Get-Item $DmlDllSrc).Length / 1MB, 1)
+Write-Host "  [STAGE] DirectML.dll ($DmlDllSize MB) -> $Win64BinStageDir (original name, static-import of InoOnnxRuntime.dll)"
+
+Write-Host ""
+
+#---------------------------------------------------------------------
+# 8. Extract Android AAR (unchanged from Phase 4)
 #---------------------------------------------------------------------
 # An .aar is a zip. PowerShell's Expand-Archive is strict about the
 # extension, so we copy to a .zip first, then extract.
-Write-Host "--- Extracting Android artifacts ---" -ForegroundColor Yellow
+Write-Host "--- Extracting + staging Android artifacts ---" -ForegroundColor Yellow
 
 $AarAsZip = Join-Path $CacheDir "onnxruntime-android-$Version.zip"
 Copy-Item -Path $AndroidAarPath -Destination $AarAsZip -Force
@@ -239,17 +322,10 @@ if (Test-Path $AndroidExtractDir) {
 New-Item -ItemType Directory -Path $AndroidExtractDir -Force | Out-Null
 
 Expand-Archive -Path $AarAsZip -DestinationPath $AndroidExtractDir -Force
+Remove-Item -Path $AarAsZip -Force
 
-# The AAR layout puts per-ABI .so files at jni/<abi>/libonnxruntime.so.
-# We RENAME to libInoOnnxRuntime.so when staging — same rationale as the
-# Windows rename (see top-of-file comment). Android link-time symbol
-# versioning via VERS_<ver> means that if a marketplace plugin also
-# ships a libonnxruntime.so at a different version, clang's linker may
-# resolve our OrtGetApiBase reference against THEIR symbol version,
-# and the runtime linker then can't satisfy that version tag from OUR
-# .so. By giving our .so a unique name and using dlopen + dlsym we
-# isolate our ORT fully — libUnreal.so never DT_NEEDEDs libInoOnnxRuntime.so
-# and no versioned-symbol cross-wiring can occur.
+# AAR layout: jni/<abi>/libonnxruntime.so. We RENAME to libInoOnnxRuntime.so
+# when staging — same rationale as the Windows onnxruntime.dll rename.
 $ArmSoSrc = Join-Path $AndroidExtractDir "jni\arm64-v8a\libonnxruntime.so"
 if (-not (Test-Path $ArmSoSrc)) {
     Write-Error "libonnxruntime.so not found at expected path inside AAR: $ArmSoSrc"
@@ -258,28 +334,21 @@ if (-not (Test-Path $ArmSoSrc)) {
 Copy-Item -Path $ArmSoSrc -Destination (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so") -Force
 Write-Host "  [STAGE] jni/arm64-v8a/libonnxruntime.so -> $Arm64BinStageDir\libInoOnnxRuntime.so (renamed for link-time version isolation)"
 
-# The Android AAR also contains the same headers as the Windows zip under
-# headers/. We already copied them from Windows — no need to re-copy. But
-# verify they match to catch packaging surprises.
-$AndroidHeaders = Join-Path $AndroidExtractDir "headers"
-if (Test-Path $AndroidHeaders) {
-    $AndroidHdrCount = (Get-ChildItem -Path $AndroidHeaders -File).Count
-    $WinHdrCount     = (Get-ChildItem -Path $PublicIncDir -File).Count
-    if ($AndroidHdrCount -ne $WinHdrCount) {
-        Write-Host "  [WARN] Android AAR has $AndroidHdrCount header files, Windows zip has $WinHdrCount. Using Windows headers." -ForegroundColor Yellow
-    }
-}
-
 Write-Host ""
 
 #---------------------------------------------------------------------
-# 8. Write version stamp
+# 9. Write version stamp
 #---------------------------------------------------------------------
-Set-Content -Path $StampFile -Value $Version -NoNewline -Encoding ASCII
+Set-Content -Path $StampFile -Value $ExpectedStamp -NoNewline -Encoding ASCII
 
-Write-Host "=== ONNX Runtime $Version staged successfully ===" -ForegroundColor Green
+Write-Host "=== ORT $Version + DirectML $DmlVersion staged successfully ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "Staged binaries:"
+Write-Host "  Windows ORT core:   $Win64BinStageDir\InoOnnxRuntime.dll"
+Write-Host "  Windows ORT shared: $Win64BinStageDir\onnxruntime_providers_shared.dll"
+Write-Host "  DirectML runtime:   $Win64BinStageDir\DirectML.dll"
+Write-Host "  Android ORT:        $Arm64BinStageDir\libInoOnnxRuntime.so"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Phase 2: add Source/ThirdParty/InoOnnxRuntime/InoOnnxRuntime.Build.cs"
-Write-Host "  2. Phase 2: add Source/ThirdParty/InoOnnxRuntime/InoOnnxRuntime_UPL_Android.xml"
-Write-Host "  3. Phase 3-4: wire StartupModule + FInoOnnxSession wrapper"
+Write-Host "  1. Verify Ino.Onnx.ProvidersTest inside PIE now lists DmlExecutionProvider."
+Write-Host "  2. Flip Chatterbox Performance.bPreferDirectMl on (default true after Phase D+)."
