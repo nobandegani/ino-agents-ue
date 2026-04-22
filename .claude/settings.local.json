@@ -99,7 +99,9 @@
       "Bash(mkdir -p /tmp/android-check)",
       "Bash(tar -xzf \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)",
       "Bash(tar -xzf \"/e/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/scripts/clean.ps1\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/scripts/clean.ps1\")",
+      "Bash(powershell.exe -Command \"if \\(Get-Command dumpbin -ErrorAction SilentlyContinue\\) { dumpbin /exports 'E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\llama.dll' | Select-String -Pattern 'llama_' | Select-Object -First 10 } else { 'dumpbin not on PATH \\(needs VS dev cmd\\); using PowerShell fallback' ; \\(Get-Item 'E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\llama.dll'\\).VersionInfo | Format-List FileVersion, FileDescription, CompanyName, ProductName }\")",
+      "Bash(curl -s -o /dev/null -w \"gguf.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/gguf.h\")"
     ]
   }
 }
