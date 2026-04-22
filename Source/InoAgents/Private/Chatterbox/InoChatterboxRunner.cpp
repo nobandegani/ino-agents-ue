@@ -421,6 +421,29 @@ bool FInoChatterboxRunner::SynthesizeText(
             return;
         }
         const int32 Total     = StreamAudioBuffer.Num();
+
+        // Guard: if this decoder call produced fewer samples than the
+        // last emit point, LastEmittedSampleCount would be > Total and
+        // we'd otherwise silently drop those trailing samples. In
+        // practice the FINAL decode adds silence×3 (~120 ms, >>2 samples)
+        // so it's always longer than any preceding intermediate —
+        // hitting this branch means either the decoder regressed on a
+        // longer input (bug in the model or the tokens we passed) or
+        // our LastEmittedSampleCount bookkeeping is off. Log once so
+        // the user notices; don't fail the synth.
+        if (LastEmittedSampleCount > Total)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("FInoChatterboxRunner: decoder %s output (%d samples) ")
+                   TEXT("is SHORTER than already-emitted prefix (%d samples). ")
+                   TEXT("%d samples from the stream won't reach the consumer. ")
+                   TEXT("Listening-check the waveform; if it's correct, this is ")
+                   TEXT("harmless decoder-length drift — if it's clipped, investigate."),
+                   bFinal ? TEXT("final") : TEXT("intermediate"),
+                   Total, LastEmittedSampleCount,
+                   LastEmittedSampleCount - Total);
+        }
+
         const int32 NewStart  = FMath::Clamp(LastEmittedSampleCount, 0, Total);
         const int32 NewLen    = Total - NewStart;
         // Guard: never emit an empty non-final chunk (pointless),

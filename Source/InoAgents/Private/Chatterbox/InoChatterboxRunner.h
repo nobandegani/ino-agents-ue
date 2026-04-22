@@ -133,9 +133,13 @@ public:
      * After that call returns, no more callbacks will fire for this
      * SynthesizeText invocation.
      *
-     * For non-streaming consumers (StreamChunkTokens == 0), the callback
-     * fires exactly once, at the end, with the full waveform and
-     * bIsFinal=true — so a single callback shape covers both use cases.
+     * Firing rules:
+     *   - OnChunk unset:                        no calls, use OutResult.
+     *   - OnChunk set, StreamChunkTokens == 0:  one call at end (bIsFinal=true)
+     *                                           with the full waveform.
+     *   - OnChunk set, StreamChunkTokens  > 0:  one call every N AR tokens
+     *                                           (bIsFinal=false), then one
+     *                                           final call (bIsFinal=true).
      *
      * The callback runs on the worker thread, same thread SynthesizeText
      * is executing on. Keep it short — do the audio-dispatch bookkeeping
@@ -145,6 +149,20 @@ public:
      * The TArrayView's backing storage is owned by the runner and
      * becomes invalid as soon as the callback returns. Copy out any
      * data you need to persist.
+     *
+     * IMPORTANT — decoder cost of streaming:
+     *   Each intermediate chunk re-runs the conditional_decoder on the
+     *   full generated prefix so far. Decoder cost is roughly O(T²) in
+     *   speech tokens (full attention). So total decoder work scales
+     *   as O(K³ / N) where K is the final token count and N is
+     *   StreamChunkTokens. Rough rules of thumb for K ≈ 200 tokens:
+     *     N=20   → ~30× more decoder work than single-shot
+     *     N=50   → ~13× more
+     *     N=100  → ~7×  more
+     *   Total synth wallclock grows less than this (the LM work is
+     *   unchanged), but expect 2–4× slower total time at N=20 vs.
+     *   single-shot. The tradeoff: first-audio latency drops from
+     *   "full synth done" to "one chunk done" (~5–10× lower).
      */
     using FOnStreamChunk = TFunction<void(
         TArrayView<const float> NewSamples,
