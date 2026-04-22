@@ -1,0 +1,6 @@
+{
+  "display_name": "Default (PLACEHOLDER — regenerate via scripts/encode-default-voice.py)",
+  "ref_text": "",
+  "ref_codes": [],
+  "_note": "This is a placeholder. Before synthesis will produce usable audio, run: python scripts/encode-default-voice.py --input-wav <path.wav> --ref-text \"<transcript>\". See NeuTtsNano/README.md."
+}
