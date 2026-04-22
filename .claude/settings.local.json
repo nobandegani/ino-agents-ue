@@ -90,7 +90,14 @@
       "Bash(python \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py\" \"E:/Projects/InoProject/Saved/PersistentDownloadDir/InoAgents/Models/Chatterbox/fp16/speech_encoder_fp16.onnx\")",
       "Bash(sed 's/.*TEXT\\(\"//')",
       "Bash(sed 's/\"\\).*//')",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File \"Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1\")",
+      "Bash(curl -s -o /dev/null -w \"llama.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/include/llama.h\")",
+      "Bash(curl -s -o /dev/null -w \"ggml.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml.h\")",
+      "Bash(curl -s -o /dev/null -w \"ggml-alloc.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml-alloc.h\")",
+      "Bash(curl -s -o /dev/null -w \"ggml-backend.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml-backend.h\")",
+      "Bash(curl -s -o /dev/null -w \"ggml-cpu.h: %{http_code}\\\\n\" \"https://raw.githubusercontent.com/ggml-org/llama.cpp/b8883/ggml/include/ggml-cpu.h\")",
+      "Bash(mkdir -p /tmp/android-check)",
+      "Bash(tar -xzf \"E:/Projects/InoProject/Plugins/InoAgents/LlamaCpp/.cache/llama-b8883-bin-android-arm64.tar.gz\" -C /tmp/android-check)"
     ]
   }
 }
