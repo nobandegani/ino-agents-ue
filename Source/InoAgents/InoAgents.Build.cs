@@ -37,6 +37,11 @@ public class InoAgents : ModuleRules
 				// #include "InoOnnxModule.h" without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "Onnx"),
 
+				// Private/LlamaCpp is added in Milestone C alongside
+				// InoLlamaCppModule.{h,cpp}. Leaving it off here until
+				// the directory exists avoids a UBT "referenced directory
+				// does not exist" warning at build time.
+
 				// Subdirectory of Private/ that holds the Chatterbox Turbo
 				// TTS pipeline (model bundle, tokenizer, runners, worker).
 				// Added so sibling .cpp files under Private/ (smoke tests,
@@ -78,6 +83,10 @@ public class InoAgents : ModuleRules
 				"InoOnnxRuntime",    // ONNX Runtime (Ort::Session / Env / Value) for generic
 				                     // ONNX inference. First consumer: Chatterbox Turbo TTS.
 				                     // Set up by Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1.
+				"InoLlamaCpp",       // llama.cpp runtime — GGUF-format LLM inference (Qwen,
+				                     // Phi, Llama, SmolLM, DeepSeek-R1-Distill, TinyLlama,
+				                     // and future GGUF-based TTS backbones like NeuTTS Nano).
+				                     // Set up by Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				                     // and building ElevenLabs request bodies.
 				"JsonUtilities",     // FJsonObjectWrapper — Blueprint-friendly JSON struct used by
