@@ -158,34 +158,36 @@ namespace
     }
 
     /**
-     * Pre-load a sibling DLL by full path so its base name is claimed in
-     * Windows' loaded-modules cache before anything else (UE's NNE plugin,
-     * a Marketplace plugin, etc.) gets a chance to.
+     * Pre-load a sibling DLL by full path so Windows' loaded-modules
+     * cache is populated with OUR copy for that base name.
      *
-     * Critical for DirectML.dll: our InoOnnxRuntime.dll STATICALLY imports
-     * DirectML.dll. Windows resolves static imports at LoadLibrary time
-     * via the "altered search path" (which does put our DLL's own folder
-     * first), so normally our DirectML.dll wins. But if some other plugin
-     * has already LoadLibrary'd a DirectML.dll from elsewhere (e.g. UE's
-     * own Engine/Source/ThirdParty/DirectML/bin/Win64/DirectML.dll if
-     * some codepath pins it), Windows' base-name cache serves THAT one
-     * instead — a different version than ORT 1.24.3's DML EP was built
-     * against.
+     * Historical context: DirectML.dll is a DELAY-LOAD dependency of
+     * our ORT (confirmed via pefile parse — DIRECTORY_ENTRY_DELAY_IMPORT,
+     * not static). Delay-loads resolve on the first call into the DLL,
+     * not at ORT-load time, but they still go through Windows'
+     * base-name DLL cache. UE 5.7's NNE plugin / RuntimeMetaHumanLipSync
+     * / etc. LoadLibrary their own DirectML.dll early in editor startup,
+     * winning that cache race — so ORT's first delay-load call of a
+     * DirectML function would end up binding to THEIR version, causing
+     * the MultiHeadAttention / Slice E_INVALIDARG and fp16 silent-noise
+     * symptoms we hit in testing.
      *
-     * The defensive fix is to pre-load OUR DirectML.dll FIRST, by full
-     * path. Windows caches the module by base name, so when our
-     * InoOnnxRuntime.dll later loads and asks for "DirectML.dll", the
-     * cache returns our already-loaded copy regardless of search path.
+     * The current architecture RENAMES DirectML.dll to InoDml.dll and
+     * patches our ORT DLL's delay-import table (patch-ort-dml-import.py)
+     * to match — so no other plugin looks for "InoDml.dll" and no cache
+     * collision is possible. This preload is now belt-and-braces: it
+     * ensures our InoDml.dll is in the cache under a known full path
+     * before ORT's delay-load stub fires.
      *
      * Also pre-loads onnxruntime_providers_shared.dll for the same
-     * defensive reason, though it's not a static import (ORT LoadLibrary's
-     * it lazily for certain shared EPs).
+     * defensive reason — ORT LoadLibrary's it lazily for certain
+     * shared EPs.
      *
-     * Failures are logged but non-fatal — if DirectML.dll genuinely isn't
-     * staged (shouldn't happen post-setup-script) we log clearly and let
-     * the subsequent InoOnnxRuntime.dll load fail naturally with a load
-     * error. Preloading a missing optional file just downgrades DML
-     * availability; the CPU fallback still works.
+     * Failures are logged but non-fatal — if a preload DLL genuinely
+     * isn't staged (shouldn't happen post-setup-script) we log clearly
+     * and let the subsequent InoOnnxRuntime.dll load fail naturally
+     * with a load error. Preloading a missing optional file just
+     * downgrades DML availability; the CPU fallback still works.
      */
     void PreloadWin64Deps()
     {
@@ -193,17 +195,19 @@ namespace
         if (BinDir.IsEmpty())
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoAgents: cannot resolve plugin bin dir; DirectML.dll preload skipped"));
+                   TEXT("InoAgents: cannot resolve plugin bin dir; InoDml.dll preload skipped"));
             return;
         }
 
         // Preload order doesn't matter for the two sibling DLLs — neither
         // imports the other. What matters is that both are loaded by full
         // path BEFORE InoOnnxRuntime.dll, so their base-name cache entries
-        // are ours.
+        // are ours. "InoDml.dll" is OUR rename of DirectML.dll — see the
+        // patch-ort-dml-import.py script for the import-table rewrite
+        // that ties this together.
         struct FPreload { const TCHAR* Name; bool bRequired; };
         const FPreload Preloads[] = {
-            { TEXT("DirectML.dll"),                    true  },
+            { TEXT("InoDml.dll"),                      true  },
             { TEXT("onnxruntime_providers_shared.dll"), false },
         };
 
@@ -235,10 +239,11 @@ namespace
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("InoAgents: REQUIRED preload failed: %s (path=%s). ")
-                       TEXT("DirectML support will not work. Run ")
+                       TEXT("DirectML support will not work — our ORT's static import ")
+                       TEXT("of %s will fail at InoOnnxRuntime.dll load time. Run ")
                        TEXT("Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
                        TEXT("to stage the binary."),
-                       P.Name, *FullPath);
+                       P.Name, *FullPath, P.Name);
             }
             else
             {

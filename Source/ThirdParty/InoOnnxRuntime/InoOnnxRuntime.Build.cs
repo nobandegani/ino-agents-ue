@@ -46,14 +46,15 @@ using UnrealBuildTool;
 ///   there.
 ///
 /// DirectML Execution Provider (Windows only, D3D12-based GPU/NPU
-/// acceleration) is included. We switched from the CPU-only GitHub
-/// Releases ZIP to the Microsoft.ML.OnnxRuntime.DirectML NuGet build
-/// so the DML EP is compiled in. Two additional Windows runtime
-/// dependencies ship alongside InoOnnxRuntime.dll:
+/// acceleration) is included. We use the Microsoft.ML.OnnxRuntime.DirectML
+/// NuGet build so the DML EP is compiled in. Two additional Windows
+/// runtime dependencies ship alongside InoOnnxRuntime.dll:
 ///
-///   DirectML.dll                    (ORIGINAL NAME — see setup script
-///                                    for the static-import / rename
-///                                    explanation)
+///   InoDml.dll                      (RENAMED from DirectML.dll — our
+///                                    ORT's PE import table is patched
+///                                    to match; see setup-onnxruntime.ps1
+///                                    and patch-ort-dml-import.py for the
+///                                    full rationale)
 ///   onnxruntime_providers_shared.dll (ORIGINAL NAME — shared-EP
 ///                                    infrastructure, LoadLibrary'd
 ///                                    by ORT on demand)
@@ -103,16 +104,27 @@ public class InoOnnxRuntime : ModuleRules
 			//    DLL search path and our already-loaded-cache claim.
 			RuntimeDependencies.Add(Win64BinDir + "/onnxruntime_providers_shared.dll");
 
-			// 3. DirectML.dll (ORIGINAL NAME — CANNOT be renamed).
-			//    STATIC import of InoOnnxRuntime.dll; Windows resolves
-			//    it at our LoadLibrary time, not runtime. UE's
-			//    GetDllHandle uses LOAD_WITH_ALTERED_SEARCH_PATH, which
-			//    puts the loaded DLL's own folder first for static
-			//    imports. Our DirectML.dll lives next to InoOnnxRuntime.dll
-			//    in Binaries/ThirdParty/InoOnnxRuntime/Win64/ and wins
-			//    over UE's bundled copies under Engine/Binaries/Win64/DML/
-			//    (which aren't on the default search path at all).
-			RuntimeDependencies.Add(Win64BinDir + "/DirectML.dll");
+			// 3. InoDml.dll (RENAMED from DirectML.dll + our ORT's
+			//    delay-import table patched to match).
+			//
+			//    Historical context: DirectML.dll is a DELAY-LOAD
+			//    dependency of InoOnnxRuntime.dll (confirmed via
+			//    pefile — DIRECTORY_ENTRY_DELAY_IMPORT). UE 5.7 ships
+			//    its own DirectML.dll under Engine/Binaries/Win64/DML/x64/
+			//    and UE's NNE / RuntimeMetaHumanLipSync plugins
+			//    LoadLibrary that copy early in editor startup —
+			//    winning Windows' base-name cache before our module
+			//    runs. Our ORT's delay-load stub would then bind to
+			//    UE's different-version DirectML on first call,
+			//    causing kernel validation failures on fp16 attention
+			//    and silent numerical corruption.
+			//
+			//    Fix: rename DirectML.dll -> InoDml.dll on disk and
+			//    patch our InoOnnxRuntime.dll's delay-import table
+			//    to match (via patch-ort-dml-import.py in the setup
+			//    script). No plugin looks for "InoDml.dll" so base-
+			//    name cache collisions become structurally impossible.
+			RuntimeDependencies.Add(Win64BinDir + "/InoDml.dll");
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Android)
 		{

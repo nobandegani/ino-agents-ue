@@ -31,26 +31,38 @@
 #   itself comes from a separate NuGet because the ORT NuGet doesn't
 #   bundle it — dependency relationship, not a bundling one.
 #
-# Why DirectML.dll keeps its original name (unlike onnxruntime.dll):
-#   dumpbin /imports on the DML-flavored onnxruntime.dll shows DirectML.dll
-#   as a STATIC import (not delay-load, not dynamic). Windows resolves it
-#   at LoadLibrary time, not runtime. Renaming it would make the ORT DLL
-#   fail to load entirely.
+# Why we also rename DirectML.dll -> InoDml.dll:
+#   Empirically confirmed via our own diagnostic logging that UE 5.7's
+#   bundled plugins (RuntimeMetaHumanLipSync, NNE plugin family) LoadLibrary
+#   their own DirectML.dll early in editor startup — BEFORE our module's
+#   StartupModule runs. Windows' base-name cache serves THAT copy when our
+#   InoOnnxRuntime.dll later resolves its static DirectML.dll import. The
+#   UE-bundled DirectML is a different build than what our ORT 1.24.3 was
+#   compiled against (confirmed by a 10KB file-size difference), and the
+#   version skew causes kernel-validation failures (MultiHeadAttention /
+#   Slice E_INVALIDARG) and silent numerical corruption on the fp16 LM.
 #
-#   The "base-name cache collision" concern that drove the onnxruntime.dll
-#   rename DOES still exist for DirectML.dll (UE 5.7 bundles three copies
-#   under Engine/Binaries/Win64/DML/ and Engine/Source/ThirdParty/DirectML/),
-#   but NONE of those paths is on Windows' default DLL search path for a
-#   UE-packaged process. UE's LoadLibraryEx for our plugin DLLs uses
-#   LOAD_WITH_ALTERED_SEARCH_PATH, which means the LOADED DLL'S FOLDER
-#   is searched first for static imports. Our InoOnnxRuntime.dll lives at
-#   Binaries/ThirdParty/InoOnnxRuntime/Win64/ — so Windows finds our
-#   DirectML.dll right there before falling through to system paths.
+#   A full-path preload doesn't fix it — Windows' cache is keyed by base
+#   name, so once UE's DirectML.dll is loaded, every subsequent resolution
+#   of "DirectML.dll" returns that handle regardless of the path we pass.
 #
-#   Residual collision risk: if another plugin LoadLibrary's its own
-#   DirectML.dll before ours, Windows' base-name cache serves that one.
-#   Mitigation lives in InoOnnxModule::StartupModule, which preloads
-#   our DirectML.dll by full path so we win the cache race.
+#   The fix: rename the base name. DirectML.dll is a STATIC import in our
+#   onnxruntime.dll's PE import table, so we can't just rename the file on
+#   disk — the import entry still says "DirectML.dll". We patch the import
+#   table with patch-ort-dml-import.py (pefile-based in-place byte edit)
+#   so our ORT's import says "InoDml.dll", then rename the DLL file to
+#   match. No other plugin looks for "InoDml.dll" → no cache collision,
+#   full version isolation.
+#
+#   Side-effect: Microsoft's Authenticode signature on InoOnnxRuntime.dll
+#   is invalidated by the byte edit. For a shipped game this is a
+#   non-issue (UE game DLLs aren't expected to carry MS signatures).
+#   Enterprise AV on a dev machine may occasionally flag "MS-signed DLL
+#   with broken signature" — documented as a known caveat.
+#
+# Python + pefile dependency:
+#   The patch script needs Python 3 on PATH and `pip install pefile`.
+#   Run once before first setup; stays installed for subsequent runs.
 #
 # Why no GPU mega-bundle / CUDA:
 #   Microsoft's GPU ORT build includes CUDA + TensorRT (~300 MB of NVIDIA
@@ -159,7 +171,7 @@ $ExpectedStamp = "$Version+$DmlVersion"
 
 if ((Test-Path $StampFile) -and `
     (Test-Path (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll")) -and `
-    (Test-Path (Join-Path $Win64BinStageDir "DirectML.dll")) -and `
+    (Test-Path (Join-Path $Win64BinStageDir "InoDml.dll")) -and `
     (Test-Path (Join-Path $Arm64BinStageDir "libInoOnnxRuntime.so"))) {
     $StampValue = (Get-Content $StampFile -Raw).Trim()
     if ($StampValue -eq $ExpectedStamp) {
@@ -255,13 +267,37 @@ Get-ChildItem -Path $OrtIncludeDir -File | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination (Join-Path $PublicIncDir $_.Name) -Force
 }
 
-# Stage core ORT DLL — RENAMED from onnxruntime.dll to InoOnnxRuntime.dll to
-# avoid Windows LoadLibrary base-name caching colliding with UE's NNE and
-# other plugins that ship their own onnxruntime.dll.
+# Stage core ORT DLL — RENAMED from onnxruntime.dll to InoOnnxRuntime.dll,
+# AND patched in the PE import table to reference "InoDml.dll" instead
+# of "DirectML.dll".
+#
+# The rename alone fixes the cache collision between our ORT and UE's
+# bundled ORT (different versions of the same onnxruntime.dll base name).
+# The import-table patch fixes the collision with UE's bundled DirectML.dll
+# at Engine/Binaries/Win64/DML/x64/ — UE's NNE plugin / RuntimeMetaHumanLipSync
+# / etc. LoadLibrary DirectML.dll early in editor startup, so when our
+# ORT DLL later tries to resolve its static DirectML.dll import, Windows'
+# base-name cache serves UE's copy (different version than our ORT was
+# built against). Symptoms of that version skew: MultiHeadAttention /
+# Slice kernel validation failures (E_INVALIDARG) and fp16 silent
+# numerical corruption in the Chatterbox LM.
+#
+# After patching, our ORT DLL imports "InoDml.dll" — a base name no other
+# plugin uses, so base-name cache collisions become structurally impossible.
 $OrtDllSrc = Join-Path $OrtNativeDir "onnxruntime.dll"
 if (-not (Test-Path $OrtDllSrc)) { Write-Error "onnxruntime.dll not found at $OrtDllSrc" }
-Copy-Item -Path $OrtDllSrc -Destination (Join-Path $Win64BinStageDir "InoOnnxRuntime.dll") -Force
-Write-Host "  [STAGE] onnxruntime.dll -> InoOnnxRuntime.dll (renamed for base-name isolation)"
+
+$PatchScript = Join-Path $ScriptDir "patch-ort-dml-import.py"
+if (-not (Test-Path $PatchScript)) { Write-Error "patch-ort-dml-import.py not found at $PatchScript" }
+
+$PatchedOrtPath = Join-Path $Win64BinStageDir "InoOnnxRuntime.dll"
+
+Write-Host "  [PATCH] InoOnnxRuntime.dll import table: DirectML.dll -> InoDml.dll"
+& python $PatchScript $OrtDllSrc $PatchedOrtPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "patch-ort-dml-import.py failed (exit code $LASTEXITCODE). Ensure Python 3 is on PATH and 'pip install pefile' was run."
+}
+Write-Host "  [STAGE] onnxruntime.dll -> InoOnnxRuntime.dll (renamed + import-table patched)"
 
 # Stage shared providers DLL — ORIGINAL NAME. Not a static import of the
 # core ORT DLL (confirmed via dumpbin), so the base-name collision concern
@@ -297,11 +333,28 @@ Expand-Nupkg -NupkgPath $DmlNupkgPath -DestDir $DmlExtractDir -Label "DirectML N
 $DmlDllSrc = Join-Path $DmlExtractDir "bin\x64-win\DirectML.dll"
 if (-not (Test-Path $DmlDllSrc)) { Write-Error "DirectML.dll not found at $DmlDllSrc" }
 
-# Stage DirectML.dll under its ORIGINAL name. See header comment for the
-# "static import, can't rename" rationale.
-Copy-Item -Path $DmlDllSrc -Destination (Join-Path $Win64BinStageDir "DirectML.dll") -Force
+# Stage DirectML.dll as "InoDml.dll" — renamed to match the import-table
+# patch we apply to InoOnnxRuntime.dll above. UE 5.7's NNE plugin and
+# marketplace plugins (RuntimeMetaHumanLipSync, etc.) LoadLibrary their
+# own DirectML.dll early during editor startup — our copy would lose
+# the base-name cache race and our ORT would end up statically bound to
+# their DirectML version (often a different 1.15.x build than what our
+# ORT 1.24.3 was compiled against). The rename makes the whole thing
+# structurally impossible: no plugin looks for "InoDml.dll", so no
+# collision can happen.
+#
+# Also delete any stale "DirectML.dll" in the staging dir from previous
+# setup runs — this is a one-way migration, we never use the original
+# name again.
+Copy-Item -Path $DmlDllSrc -Destination (Join-Path $Win64BinStageDir "InoDml.dll") -Force
 $DmlDllSize = [math]::Round((Get-Item $DmlDllSrc).Length / 1MB, 1)
-Write-Host "  [STAGE] DirectML.dll ($DmlDllSize MB) -> $Win64BinStageDir (original name, static-import of InoOnnxRuntime.dll)"
+Write-Host "  [STAGE] DirectML.dll ($DmlDllSize MB) -> InoDml.dll (renamed for base-name isolation)"
+
+$StaleDml = Join-Path $Win64BinStageDir "DirectML.dll"
+if (Test-Path $StaleDml) {
+    Remove-Item -Path $StaleDml -Force
+    Write-Host "  [CLEANUP] removed stale $StaleDml from previous pre-rename setup run"
+}
 
 Write-Host ""
 
@@ -344,9 +397,9 @@ Set-Content -Path $StampFile -Value $ExpectedStamp -NoNewline -Encoding ASCII
 Write-Host "=== ORT $Version + DirectML $DmlVersion staged successfully ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Staged binaries:"
-Write-Host "  Windows ORT core:   $Win64BinStageDir\InoOnnxRuntime.dll"
+Write-Host "  Windows ORT core:   $Win64BinStageDir\InoOnnxRuntime.dll  (renamed + import-patched)"
 Write-Host "  Windows ORT shared: $Win64BinStageDir\onnxruntime_providers_shared.dll"
-Write-Host "  DirectML runtime:   $Win64BinStageDir\DirectML.dll"
+Write-Host "  DirectML runtime:   $Win64BinStageDir\InoDml.dll          (renamed)"
 Write-Host "  Android ORT:        $Arm64BinStageDir\libInoOnnxRuntime.so"
 Write-Host ""
 Write-Host "Next steps:"
