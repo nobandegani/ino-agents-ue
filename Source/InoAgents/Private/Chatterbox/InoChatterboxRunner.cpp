@@ -173,7 +173,9 @@ bool FInoChatterboxRunner::SynthesizeText(
     const FSynthesisOptions&    Options,
     FSynthesisResult&           OutResult,
     FString*                    OutError,
-    const TAtomic<bool>*        Cancel) const
+    const TAtomic<bool>*        Cancel,
+    int32                       StreamChunkTokens,
+    const FOnStreamChunk&       OnChunk) const
 {
     auto Fail = [&](const FString& Msg) -> bool
     {
@@ -259,6 +261,17 @@ bool FInoChatterboxRunner::SynthesizeText(
     const int64 CondLen   = CondEmb.GetShape()[1];
     const int64 PromptLen = PromptTokens.GetShape()[1];
 
+    // Pin the prompt_token data pointer once; the intermediate-chunk
+    // path below copies it into a per-chunk IntermediateSpan without
+    // mutating the underlying tensor, and the final decode copies from
+    // the same pointer into the final concat buffer. Must be fetched
+    // before the streaming loop can reference it.
+    const int64* PromptData = PromptTokens.GetData<int64>();
+    if (PromptData == nullptr)
+    {
+        return Fail(TEXT("prompt_token GetData<int64> returned null"));
+    }
+
     // ------------------------------------------------------------------
     // 3. AR loop
     //
@@ -285,6 +298,145 @@ bool FInoChatterboxRunner::SynthesizeText(
     TArray<int64> GeneratedTokens;
     GeneratedTokens.Reserve(ClampedMaxNewTokens + 2);
     GeneratedTokens.Add(kStartSpeechToken);
+
+    // ------------------------------------------------------------------
+    // Streaming setup
+    //
+    // When StreamChunkTokens > 0 AND OnChunk is set, we run the
+    // conditional_decoder periodically during the AR loop (every N new
+    // tokens) on the prefix of what's been generated so far, and fire
+    // OnChunk with only the NEW samples (delta from the prior decode).
+    //
+    // The decoder takes three inputs: speech_tokens, speaker_embeddings,
+    // speaker_features. The latter two are invariant across calls so we
+    // MoveTemp them into slots [1] and [2] of DecInputsStore ONCE, and
+    // the speech_tokens slot [0] gets replaced per call. This avoids
+    // losing the tensors after the first Run (TArray<FInoOnnxTensor> is
+    // move-only) and keeps the decoder setup cost amortized.
+    //
+    // Regardless of streaming mode, a FINAL decoder call always runs
+    // after the AR loop on concat(prompt, generated[1:-1], silence×3).
+    // Its delta (vs. the last streamed chunk, or vs. 0 if no streaming)
+    // fires OnChunk with bIsFinal=true — that's the one callback every
+    // OnChunk-bound consumer is guaranteed to see. Cancellation skips
+    // the final call (OnChunk is NOT invoked on cancel).
+    // ------------------------------------------------------------------
+    const bool bStreamingEnabled =
+        OnChunk && StreamChunkTokens > 0;
+
+    TArray<FInoOnnxTensor> DecInputsStore;
+    DecInputsStore.AddDefaulted(3);
+    DecInputsStore[1] = MoveTemp(SpeakerEmbeddings);
+    DecInputsStore[2] = MoveTemp(SpeakerFeatures);
+
+    // Float32 waveform buffer carried across all decoder calls. Grows
+    // each chunk; the suffix beyond LastEmittedSampleCount is what the
+    // next OnChunk ships.
+    TArray<float> StreamAudioBuffer;
+    int32         LastEmittedSampleCount = 0;
+
+    // Tokens added since the last intermediate-chunk emit. Resets to 0
+    // after each emit. Only meaningful if bStreamingEnabled.
+    int32 TokensSinceLastChunk = 0;
+
+    // Reusable helper: run the conditional_decoder on the given
+    // speech-token span (already prefixed with PromptTokens by the
+    // caller when building the span), store the resulting waveform into
+    // StreamAudioBuffer (replacing previous contents), and return true
+    // on success. Decoder timing accumulates into OutResult.DecoderMs.
+    auto RunDecoder = [&](const TArray<int64>& FullSpeechSpan) -> bool
+    {
+        const int64 TotalLen = (int64)FullSpeechSpan.Num();
+        FInoOnnxTensor SpeechTokens = FInoOnnxTensor::Create(
+            EInoOnnxDtype::Int64, { 1, TotalLen });
+        if (!SpeechTokens.IsValid())
+        {
+            InternalErr = FString::Printf(
+                TEXT("failed to alloc speech_tokens [%lld]"), TotalLen);
+            return false;
+        }
+        if (int64* ST = SpeechTokens.GetMutableData<int64>())
+        {
+            FMemory::Memcpy(
+                ST, FullSpeechSpan.GetData(),
+                (SIZE_T)TotalLen * sizeof(int64));
+        }
+
+        DecInputsStore[0] = MoveTemp(SpeechTokens);
+
+        const double DT0 = FPlatformTime::Seconds();
+        TArray<FInoOnnxTensor> DecOutputs;
+        if (!DecoderSess->Run(DecInputsStore, DecOutputs, &InternalErr))
+        {
+            return false;
+        }
+        OutResult.DecoderMs += (FPlatformTime::Seconds() - DT0) * 1000.0;
+
+        if (DecOutputs.Num() != 1 || !DecOutputs[0].IsValid())
+        {
+            InternalErr = TEXT("conditional_decoder produced no output");
+            return false;
+        }
+        const FInoOnnxTensor& Wav = DecOutputs[0];
+        const TArray<int64>& WavShape = Wav.GetShape();
+        if (WavShape.Num() != 2 || WavShape[0] != 1
+            || Wav.GetDtype() != EInoOnnxDtype::Float32)
+        {
+            InternalErr = TEXT("conditional_decoder output has unexpected shape or dtype");
+            return false;
+        }
+        const int64 SampleCount = WavShape[1];
+        const float* WavData    = Wav.GetData<float>();
+        if (WavData == nullptr)
+        {
+            InternalErr = TEXT("conditional_decoder output GetData<float> returned null");
+            return false;
+        }
+
+        StreamAudioBuffer.SetNumUninitialized((int32)SampleCount);
+        FMemory::Memcpy(
+            StreamAudioBuffer.GetData(), WavData,
+            (SIZE_T)SampleCount * sizeof(float));
+        return true;
+    };
+
+    // Reusable helper: given the latest StreamAudioBuffer, emit samples
+    // from LastEmittedSampleCount..end via OnChunk. Advances
+    // LastEmittedSampleCount. Caller controls bIsFinal.
+    //
+    // A subtle property worth preserving: each decoder call on a longer
+    // prefix may produce slightly different earlier samples than the
+    // prior call (full-attention decoder, not strictly position-
+    // deterministic). We bet on near-equality (Chatterbox's flow-matching
+    // decoder is well-behaved here in practice) and emit only the tail —
+    // the alternative of shipping the full buffer each time would force
+    // every consumer to diff/dedup, worse ergonomics. Callers noticing
+    // artefacts at chunk boundaries can raise StreamChunkTokens to make
+    // chunks rarer-and-larger. Zero = disable streaming entirely and
+    // get a perfectly clean single-shot decode.
+    auto EmitDeltaChunk = [&](int32 NumGenTokens, bool bFinal)
+    {
+        if (!OnChunk)
+        {
+            return;
+        }
+        const int32 Total     = StreamAudioBuffer.Num();
+        const int32 NewStart  = FMath::Clamp(LastEmittedSampleCount, 0, Total);
+        const int32 NewLen    = Total - NewStart;
+        // Guard: never emit an empty non-final chunk (pointless),
+        // but ALWAYS emit the final callback even if zero-length so
+        // consumers have a deterministic "done" signal.
+        if (NewLen > 0 || bFinal)
+        {
+            OnChunk(
+                MakeArrayView(
+                    StreamAudioBuffer.GetData() + NewStart,
+                    FMath::Max(0, NewLen)),
+                NumGenTokens,
+                bFinal);
+            LastEmittedSampleCount = Total;
+        }
+    };
 
     for (int32 Iter = 0; Iter < ClampedMaxNewTokens; ++Iter)
     {
@@ -436,6 +588,50 @@ bool FInoChatterboxRunner::SynthesizeText(
             break;
         }
 
+        // --- Streaming: fire an intermediate chunk every N tokens ---
+        //
+        // This runs the decoder on concat(prompt_token, generated[1:]) —
+        // no silence padding (silence is only appended on the final
+        // decode). The callback gets the delta from what was previously
+        // emitted. Skipped entirely when streaming is off, or when the
+        // just-appended token was STOP (the final decode covers that
+        // case right below).
+        if (bStreamingEnabled)
+        {
+            ++TokensSinceLastChunk;
+            if (TokensSinceLastChunk >= StreamChunkTokens)
+            {
+                TokensSinceLastChunk = 0;
+
+                // Build concat(PromptTokens, generated[1:]). Skip index 0
+                // (START); include every non-STOP token we've emitted.
+                const int32 NumGenSoFar = GeneratedTokens.Num();
+                const int32 GenTailLen  = FMath::Max(0, NumGenSoFar - 1);
+                TArray<int64> IntermediateSpan;
+                IntermediateSpan.Reserve((int32)PromptLen + GenTailLen);
+                for (int64 i = 0; i < PromptLen; ++i)
+                {
+                    IntermediateSpan.Add(PromptData[i]);
+                }
+                for (int32 i = 1; i < NumGenSoFar; ++i)
+                {
+                    IntermediateSpan.Add(GeneratedTokens[i]);
+                }
+
+                if (!RunDecoder(IntermediateSpan))
+                {
+                    return Fail(FString::Printf(
+                        TEXT("iter %d: intermediate decoder Run failed: %s"),
+                        Iter, *InternalErr));
+                }
+                // Tokens generated so far, excluding the leading START.
+                // STOP is not in GeneratedTokens yet at this point (it
+                // would have broken out of the loop above).
+                const int32 TokensSoFar = GeneratedTokens.Num() - 1;
+                EmitDeltaChunk(TokensSoFar, /*bFinal=*/ false);
+            }
+        }
+
         // --- Roll state forward for next iter ---
         InputIds.Reset(1);
         InputIds.Add(NextToken);
@@ -450,7 +646,15 @@ bool FInoChatterboxRunner::SynthesizeText(
         - (OutResult.bHitStopToken ? 1 : 0);  // exclude leading START and trailing STOP (if present)
 
     // ------------------------------------------------------------------
-    // 4. Build decoder input: concat(prompt_token, generate[1:-1], silence×3)
+    // 4. Final decode: concat(prompt_token, generate[1:-1], silence×3)
+    //
+    // Always runs exactly once, regardless of streaming mode. Its output
+    // is authoritative for OutResult.AudioSamples. When streaming was
+    // enabled, the per-chunk EmitDeltaChunk above has already shipped
+    // some audio — the final EmitDeltaChunk(bFinal=true) ships the
+    // trailing suffix (the silence + any slightly-drifted regenerated
+    // samples beyond what was emitted), so consumers see the complete
+    // waveform once they've concatenated every chunk.
     // ------------------------------------------------------------------
     const int32 NumGen = GeneratedTokens.Num();
     if (NumGen < 2)
@@ -458,80 +662,44 @@ bool FInoChatterboxRunner::SynthesizeText(
         return Fail(TEXT("AR loop produced too few tokens to decode"));
     }
 
-    TArray<int64> GenSlice;
+    // Build concat(PromptTokens, generated[1:-1], silence×3) as a single
+    // int64 span the RunDecoder helper can copy into a speech_tokens
+    // tensor. GenSlice is just generated[1:-1]; FinalSpan prepends the
+    // prompt and appends silence.
+    TArray<int64> FinalSpan;
     {
         const int32 InnerCount = FMath::Max(0, NumGen - 2);
-        GenSlice.Reserve(InnerCount + 3);
+        FinalSpan.Reserve((int32)PromptLen + InnerCount + 3);
+        for (int64 i = 0; i < PromptLen; ++i)
+        {
+            FinalSpan.Add(PromptData[i]);
+        }
         for (int32 i = 1; i < NumGen - 1; ++i)
         {
-            GenSlice.Add(GeneratedTokens[i]);
+            FinalSpan.Add(GeneratedTokens[i]);
         }
-    }
-    // Silence tail — required by the reference script. 3 SILENCE_TOKEN.
-    for (int32 i = 0; i < 3; ++i) { GenSlice.Add(kSilenceSpeechToken); }
-
-    const int64* PromptData = PromptTokens.GetData<int64>();
-    if (PromptData == nullptr)
-    {
-        return Fail(TEXT("prompt_token GetData<int64> returned null"));
+        // Silence tail — required by the reference script. 3 SILENCE_TOKEN.
+        for (int32 i = 0; i < 3; ++i) { FinalSpan.Add(kSilenceSpeechToken); }
     }
 
-    const int64 TotalSpeechLen = PromptLen + (int64)GenSlice.Num();
-    FInoOnnxTensor SpeechTokens = FInoOnnxTensor::Create(
-        EInoOnnxDtype::Int64, { 1, TotalSpeechLen });
-    if (!SpeechTokens.IsValid())
+    if (!RunDecoder(FinalSpan))
     {
-        return Fail(FString::Printf(TEXT("failed to alloc speech_tokens [%lld]"), TotalSpeechLen));
-    }
-    if (int64* ST = SpeechTokens.GetMutableData<int64>())
-    {
-        FMemory::Memcpy(ST, PromptData, (SIZE_T)PromptLen * sizeof(int64));
-        if (GenSlice.Num() > 0)
-        {
-            FMemory::Memcpy(ST + PromptLen, GenSlice.GetData(),
-                            (SIZE_T)GenSlice.Num() * sizeof(int64));
-        }
+        return Fail(FString::Printf(
+            TEXT("conditional_decoder Run failed: %s"), *InternalErr));
     }
 
-    // ------------------------------------------------------------------
-    // 5. conditional_decoder: speech_tokens + speaker conditioning → wav
-    // ------------------------------------------------------------------
-    TArray<FInoOnnxTensor> DecInputs;
-    DecInputs.Reserve(3);
-    DecInputs.Add(MoveTemp(SpeechTokens));
-    DecInputs.Add(MoveTemp(SpeakerEmbeddings));
-    DecInputs.Add(MoveTemp(SpeakerFeatures));
+    // Fire the terminal chunk. When streaming was enabled this ships
+    // the trailing delta; when it was disabled this ships the full
+    // waveform. Either way, OnChunk(bFinal=true) is the single signal
+    // every streaming consumer binds to, so this fires regardless of
+    // whether StreamChunkTokens was zero or not — but only if OnChunk
+    // is set (empty TFunction = no-op in the helper).
+    EmitDeltaChunk(OutResult.NumGeneratedTokens, /*bFinal=*/ true);
 
-    const double DecT0 = FPlatformTime::Seconds();
-    TArray<FInoOnnxTensor> DecOutputs;
-    if (!DecoderSess->Run(DecInputs, DecOutputs, &InternalErr))
-    {
-        return Fail(FString::Printf(TEXT("conditional_decoder Run failed: %s"), *InternalErr));
-    }
-    OutResult.DecoderMs = (FPlatformTime::Seconds() - DecT0) * 1000.0;
-
-    if (DecOutputs.Num() != 1 || !DecOutputs[0].IsValid())
-    {
-        return Fail(TEXT("conditional_decoder produced no output"));
-    }
-    const FInoOnnxTensor& Wav = DecOutputs[0];
-    const TArray<int64>& WavShape = Wav.GetShape();
-    if (WavShape.Num() != 2 || WavShape[0] != 1
-        || Wav.GetDtype() != EInoOnnxDtype::Float32)
-    {
-        return Fail(TEXT("conditional_decoder output has unexpected shape or dtype"));
-    }
-
-    const int64 SampleCount = WavShape[1];
-    const float* WavData    = Wav.GetData<float>();
-    if (WavData == nullptr)
-    {
-        return Fail(TEXT("conditional_decoder output GetData<float> returned null"));
-    }
-
-    OutResult.AudioSamples.SetNumUninitialized((int32)SampleCount);
-    FMemory::Memcpy(OutResult.AudioSamples.GetData(), WavData,
-                    (SIZE_T)SampleCount * sizeof(float));
+    // Move the final waveform into OutResult. StreamAudioBuffer is no
+    // longer needed after this point — move instead of copy so a
+    // several-megabyte TArray<float> doesn't round-trip through memcpy.
+    OutResult.AudioSamples   = MoveTemp(StreamAudioBuffer);
     OutResult.SampleRate     = kSampleRate;
     OutResult.TotalElapsedMs = (FPlatformTime::Seconds() - TStart) * 1000.0;
 

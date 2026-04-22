@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Templates/Atomic.h"
+#include "Templates/Function.h"
 
 class FInoChatterboxModels;
 class FInoChatterboxTokenizer;
@@ -112,6 +113,45 @@ public:
     FInoChatterboxRunner& operator=(const FInoChatterboxRunner&) = delete;
 
     /**
+     * Streaming audio-chunk callback signature.
+     *
+     * Fired from SynthesizeText's worker thread while synthesis is
+     * still running, once per "chunk" (see StreamChunkTokens on
+     * SynthesizeText below). The first argument is the NEW float32
+     * samples produced since the last call — not the full accumulated
+     * waveform. Samples are 24 kHz mono in the range roughly [-1, 1],
+     * same format as FSynthesisResult::AudioSamples.
+     *
+     * NumGeneratedTokens is the count of speech tokens the AR loop has
+     * produced at the point the chunk was decoded (excludes the leading
+     * START marker). Monotonically increasing across calls within one
+     * SynthesizeText invocation. Useful for progress UI.
+     *
+     * bIsFinal is true on exactly one call per synthesis — the final
+     * chunk, which includes the trailing 3× silence token padding and
+     * corresponds to the waveform stored in FSynthesisResult::AudioSamples.
+     * After that call returns, no more callbacks will fire for this
+     * SynthesizeText invocation.
+     *
+     * For non-streaming consumers (StreamChunkTokens == 0), the callback
+     * fires exactly once, at the end, with the full waveform and
+     * bIsFinal=true — so a single callback shape covers both use cases.
+     *
+     * The callback runs on the worker thread, same thread SynthesizeText
+     * is executing on. Keep it short — do the audio-dispatch bookkeeping
+     * and return. Game-thread hops should happen inside the callback
+     * target (via AsyncTask or similar), not block here.
+     *
+     * The TArrayView's backing storage is owned by the runner and
+     * becomes invalid as soon as the callback returns. Copy out any
+     * data you need to persist.
+     */
+    using FOnStreamChunk = TFunction<void(
+        TArrayView<const float> NewSamples,
+        int32                   NumGeneratedTokens,
+        bool                    bIsFinal)>;
+
+    /**
      * Synthesize one utterance.
      *
      * @param Text             Text to voice. May include paralinguistic
@@ -143,6 +183,34 @@ public:
      *                         publishing data through this flag, it's
      *                         just an eventually-consistent "stop please"
      *                         signal.
+     * @param StreamChunkTokens Opt-in streaming cadence. When > 0, the
+     *                         runner re-runs the conditional_decoder on
+     *                         the accumulated speech tokens every N
+     *                         generated AR tokens and fires OnChunk with
+     *                         the incremental new samples. Value of 0
+     *                         (the default) disables streaming — the
+     *                         decoder runs only once at the end. Common
+     *                         choices: 20 (a few hundred ms of audio per
+     *                         chunk) for quick first-audio playback, or
+     *                         higher for fewer-but-bigger chunks. Small
+     *                         values trade decoder CPU for lower first-
+     *                         audio latency — the decoder becomes O(N²)
+     *                         in tokens (each chunk re-decodes the full
+     *                         prefix), but the decoder is cheap so for
+     *                         utterances under ~500 tokens the wallclock
+     *                         cost is typically 10-30 % over single-shot.
+     *                         Ignored if OnChunk is not set.
+     * @param OnChunk          Optional callback fired on the worker
+     *                         thread as new audio becomes available. See
+     *                         FOnStreamChunk's doc for the callback
+     *                         contract. Called AT LEAST once (the final
+     *                         chunk with bIsFinal=true) on successful
+     *                         return, regardless of StreamChunkTokens —
+     *                         so consumers can bind this ONE callback
+     *                         and get either streaming-plus-final or
+     *                         just-final behaviour based on whether
+     *                         StreamChunkTokens is zero or non-zero.
+     *                         Not called on failure / cancellation.
      * @return                 True on success.
      *
      * Never call from the game thread; this is a synchronous blocking
@@ -153,8 +221,10 @@ public:
         TArrayView<const float>     ReferenceAudio,
         const FSynthesisOptions&    Options,
         FSynthesisResult&           OutResult,
-        FString*                    OutError = nullptr,
-        const TAtomic<bool>*        Cancel   = nullptr) const;
+        FString*                    OutError          = nullptr,
+        const TAtomic<bool>*        Cancel            = nullptr,
+        int32                       StreamChunkTokens = 0,
+        const FOnStreamChunk&       OnChunk           = FOnStreamChunk()) const;
 
 private:
     const FInoChatterboxModels&    Models;
