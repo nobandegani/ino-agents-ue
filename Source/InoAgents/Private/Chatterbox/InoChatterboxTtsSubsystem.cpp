@@ -444,14 +444,50 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
     const FInoChatterboxSynthesisOptions& Options,
     const FOnInoChatterboxSynthesisComplete& OnComplete)
 {
+    // Non-streaming path — StreamChunkTokens=0 + unbound OnAudioChunk
+    // is the "decoder runs once at the end" case inside EnqueueSynth.
+    EnqueueSynth(Text, Voice, Options,
+                 /*StreamChunkTokens=*/ 0,
+                 FOnInoChatterboxAudioChunk(),
+                 OnComplete);
+}
+
+void UInoChatterboxTtsSubsystem::SynthesizeStreamAsync(
+    const FString& Text,
+    const FInoChatterboxVoice& Voice,
+    const FInoChatterboxSynthesisOptions& Options,
+    int32 StreamChunkTokens,
+    const FOnInoChatterboxAudioChunk& OnAudioChunk,
+    const FOnInoChatterboxSynthesisComplete& OnComplete)
+{
+    // Streaming path — forward verbatim. StreamChunkTokens is capped
+    // to [1, 1024] inside the runner (FSynthesisOptions::MaxNewTokens
+    // is the upper bound of a realistic utterance); if a caller passes
+    // something absurd the runner just falls back to "decode once per
+    // token" (useless but not unsafe).
+    EnqueueSynth(Text, Voice, Options,
+                 FMath::Max(0, StreamChunkTokens),
+                 OnAudioChunk, OnComplete);
+}
+
+void UInoChatterboxTtsSubsystem::EnqueueSynth(
+    const FString& Text,
+    const FInoChatterboxVoice& Voice,
+    const FInoChatterboxSynthesisOptions& Options,
+    int32 StreamChunkTokens,
+    const FOnInoChatterboxAudioChunk& OnAudioChunk,
+    const FOnInoChatterboxSynthesisComplete& OnComplete)
+{
     check(IsInGameThread());
 
     // Helper: fire failure synchronously. Used for every pre-flight
     // rejection so callers see a deterministic "same frame" failure
-    // before any worker-thread work happens.
+    // before any worker-thread work happens. Streaming callers get
+    // the same single terminal OnComplete signal; OnAudioChunk is
+    // never fired on the failure path.
     auto FailNow = [&OnComplete](const FString& Msg)
     {
-        UE_LOG(LogInoAgents, Warning, TEXT("Chatterbox SynthesizeAsync: %s"), *Msg);
+        UE_LOG(LogInoAgents, Warning, TEXT("Chatterbox EnqueueSynth: %s"), *Msg);
         FInoChatterboxSynthesisResult Empty;
         OnComplete.ExecuteIfBound(false, Empty, Msg);
     };
@@ -594,22 +630,29 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
 
     // -------- Enqueue --------
     //
-    // FIFO across all SynthesizeAsync calls (same worker, same queue).
-    // A caller firing "sentence 1", "sentence 2", "sentence 3" in the
-    // same frame gets them played back in order without building its
-    // own queue on top.
+    // FIFO across all SynthesizeAsync + SynthesizeStreamAsync calls
+    // (same worker, same queue). A caller firing "sentence 1",
+    // "sentence 2", "sentence 3" in the same frame gets them played
+    // back in order without building its own queue on top — a mix of
+    // streaming and non-streaming requests serialises too.
 
     FInoChatterboxSynthesisWorker::FPendingSynth Item;
-    Item.Text           = Text;
-    Item.ReferenceAudio = MoveTemp(ReferenceAudio);
-    Item.Options        = Options;
-    Item.OnComplete     = OnComplete;
+    Item.Text              = Text;
+    Item.ReferenceAudio    = MoveTemp(ReferenceAudio);
+    Item.Options           = Options;
+    Item.OnComplete        = OnComplete;
+    Item.StreamChunkTokens = StreamChunkTokens;
+    Item.OnAudioChunk      = OnAudioChunk;
 
+    const bool bStreaming = OnAudioChunk.IsBound() && StreamChunkTokens > 0;
     Worker->Enqueue(MoveTemp(Item));
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("Chatterbox SynthesizeAsync: queued (text_len=%d, max_new_tokens=%d)"),
-           Text.Len(), Options.MaxNewTokens);
+           TEXT("Chatterbox EnqueueSynth: queued (text_len=%d, max_new_tokens=%d, ")
+           TEXT("streaming=%s, chunk_tokens=%d)"),
+           Text.Len(), Options.MaxNewTokens,
+           bStreaming ? TEXT("on") : TEXT("off"),
+           StreamChunkTokens);
 }
 
 void UInoChatterboxTtsSubsystem::CancelSynthesis()

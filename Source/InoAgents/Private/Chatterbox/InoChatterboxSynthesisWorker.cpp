@@ -225,6 +225,49 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
     RunnerOpts.MaxNewTokens      = Item.Options.MaxNewTokens;
     RunnerOpts.RepetitionPenalty = Item.Options.RepetitionPenalty;
 
+    // Wire the streaming callback only when the caller bound one —
+    // otherwise pass an empty TFunction and the runner's intermediate-
+    // and final-chunk dispatch becomes a no-op (runner checks
+    // `if (!OnChunk)` before calling). Both SynthesizeAsync (no
+    // streaming) and SynthesizeStreamAsync use this same ProcessSynth;
+    // the difference is purely "is OnAudioChunk bound".
+    const bool bStreaming =
+        Item.OnAudioChunk.IsBound() && Item.StreamChunkTokens > 0;
+
+    // Delegate is captured by value (copy) into the runner's TFunction
+    // so the AsyncTask closure below can still use it even after
+    // ProcessSynth returns (the TFunction outlives the stack frame
+    // only until SynthesizeText returns, but each invocation runs
+    // synchronously on this thread and AsyncTask captures a fresh
+    // copy into its own closure before returning). No lifetime risk.
+    const FOnInoChatterboxAudioChunk OnAudioChunkCopy = Item.OnAudioChunk;
+
+    FInoChatterboxRunner::FOnStreamChunk StreamCb;
+    if (bStreaming)
+    {
+        StreamCb = [OnAudioChunkCopy](
+            TArrayView<const float> NewSamples,
+            int32                   NumGenTokens,
+            bool                    bIsFinal)
+        {
+            // Quantize float32 → int16 PCM LE bytes on the worker
+            // thread (cheap: 2× multiply-clamp per sample, sub-ms for
+            // a few thousand samples). The AsyncTask below ships the
+            // bytes by move — no extra copy when the lambda body runs
+            // on the game thread.
+            TArray<uint8> PcmBytes;
+            InoChatterbox::Float32ToInt16PcmBytesMono(NewSamples, PcmBytes);
+
+            AsyncTask(ENamedThreads::GameThread,
+                [OnAudioChunkCopy,
+                 PcmBytes = MoveTemp(PcmBytes),
+                 NumGenTokens, bIsFinal]()
+            {
+                OnAudioChunkCopy.ExecuteIfBound(PcmBytes, bIsFinal, NumGenTokens);
+            });
+        };
+    }
+
     FInoChatterboxRunner::FSynthesisResult NativeResult;
     FString NativeError;
     const bool bOK = Runner.SynthesizeText(
@@ -233,7 +276,9 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
         RunnerOpts,
         NativeResult,
         &NativeError,
-        &bCancelCurrent);
+        &bCancelCurrent,
+        bStreaming ? Item.StreamChunkTokens : 0,
+        StreamCb);
 
     // Build the Blueprint-visible result regardless of success — timings
     // are still useful on failure (e.g. "we got 500 ms in before cancel").

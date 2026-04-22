@@ -283,6 +283,49 @@ public:
         const FOnInoChatterboxSynthesisComplete& OnComplete);
 
     /**
+     * Streaming variant of SynthesizeAsync: dispatches audio chunks
+     * on the game thread as the runner produces them, then fires
+     * OnComplete once at the end with the full accumulated waveform.
+     *
+     * Under the hood this shares the same worker thread + FIFO queue
+     * as SynthesizeAsync — chunks flow through the same machinery.
+     * The difference is StreamChunkTokens > 0 and OnAudioChunk bound:
+     * the runner re-runs the conditional_decoder every N generated
+     * speech tokens and calls OnAudioChunk with the NEW bytes (delta).
+     *
+     * The final chunk (bIsFinal=true in the delegate) fires BEFORE
+     * OnComplete. Consumers who want the complete waveform at once
+     * can ignore OnAudioChunk and just use OnComplete; consumers who
+     * want streaming playback bind OnAudioChunk and start feeding the
+     * audio system as each chunk arrives, using OnComplete only for
+     * end-of-utterance bookkeeping.
+     *
+     * StreamChunkTokens is a per-call parameter (not in Options) —
+     * set it to 20 (~0.6 s of audio per chunk at typical cadence) for
+     * quick first-audio, higher for fewer-but-bigger chunks, or 0
+     * to fall back to the non-streaming code path (OnAudioChunk is
+     * never called; OnComplete still fires). Values above 512 are
+     * effectively "decode once at the end" for most utterances and
+     * give no streaming benefit.
+     *
+     * Same error semantics as SynthesizeAsync — see that method's doc
+     * for the failure matrix. On failure, OnAudioChunk is NOT fired at
+     * all; only OnComplete fires with bSuccess=false + error message.
+     *
+     * MUST be called on the game thread.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox",
+              meta = (AutoCreateRefTerm = "OnAudioChunk,OnComplete",
+                      AdvancedDisplay  = "StreamChunkTokens"))
+    void SynthesizeStreamAsync(
+        const FString& Text,
+        const FInoChatterboxVoice& Voice,
+        const FInoChatterboxSynthesisOptions& Options,
+        int32 StreamChunkTokens,
+        const FOnInoChatterboxAudioChunk& OnAudioChunk,
+        const FOnInoChatterboxSynthesisComplete& OnComplete);
+
+    /**
      * Cooperatively cancel any queued / in-flight synthesis. The
      * currently-running AR iteration completes (tens of ms), then the
      * worker unwinds and fires OnComplete(bSuccess=false,
@@ -427,4 +470,21 @@ private:
      *  Called both from LoadModelsAsync's files-present fast path and
      *  from FinishDownloadSuccess after an auto-download. */
     void DispatchLoadWorker(EInoChatterboxVariant Variant, const FString& Dir);
+
+    /** Shared worker-enqueue path used by both SynthesizeAsync (streaming
+     *  off) and SynthesizeStreamAsync (streaming on). Validates inputs,
+     *  resolves reference audio (WavFilePath / ReferenceSamples /
+     *  default voice), and pushes a fully-populated FPendingSynth into
+     *  the worker. Pass Zero/Unbound for StreamChunkTokens+OnAudioChunk
+     *  to get the non-streaming path.
+     *
+     *  On failure, fires OnComplete synchronously with bSuccess=false and
+     *  a diagnostic. Must be called on the game thread. */
+    void EnqueueSynth(
+        const FString& Text,
+        const FInoChatterboxVoice& Voice,
+        const FInoChatterboxSynthesisOptions& Options,
+        int32 StreamChunkTokens,
+        const FOnInoChatterboxAudioChunk& OnAudioChunk,
+        const FOnInoChatterboxSynthesisComplete& OnComplete);
 };

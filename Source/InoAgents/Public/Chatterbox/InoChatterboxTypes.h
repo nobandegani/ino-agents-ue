@@ -579,3 +579,28 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoChatterboxDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes);
+
+/**
+ * Fired by UInoChatterboxTtsSubsystem's streaming synthesis path
+ * (UInoChatterboxStreamSynthesize async action) for every incremental
+ * audio chunk produced during synthesis.
+ *
+ *   AudioChunk       — NEW bytes since the last chunk, 24 kHz mono int16
+ *                      PCM little-endian. Append directly to your player's
+ *                      streaming buffer; do not re-concatenate anything
+ *                      already delivered by a prior chunk.
+ *   bIsFinal         — true exactly once, on the last chunk. After the
+ *                      bIsFinal=true broadcast fires, no more chunks
+ *                      will follow for this synthesis request.
+ *   NumGeneratedTokens — running count of speech tokens the AR loop has
+ *                      produced so far. Useful for progress UI
+ *                      ("generated 180 of ~256 tokens...").
+ *
+ * Fires on the GAME THREAD — handlers can touch UObject state safely.
+ * The runner produces these chunks on its worker thread; the subsystem
+ * marshals each one via AsyncTask(GameThread).
+ */
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoChatterboxAudioChunk,
+    const TArray<uint8>&, AudioChunk,
+    bool,                 bIsFinal,
+    int32,                NumGeneratedTokens);

@@ -80,6 +80,25 @@ public:
          *  success, cancel, or error. Always fires exactly once per
          *  enqueued item, even on shutdown. */
         FOnInoChatterboxSynthesisComplete OnComplete;
+
+        /** Streaming cadence: > 0 means run the decoder every N
+         *  generated tokens and dispatch OnAudioChunk for each incremental
+         *  piece; 0 disables streaming (decoder runs once at the end).
+         *  Ignored unless OnAudioChunk is bound. Forwarded verbatim to
+         *  FInoChatterboxRunner::SynthesizeText. */
+        int32 StreamChunkTokens = 0;
+
+        /** Optional per-chunk callback. When bound, the worker dispatches
+         *  this on the game thread (via AsyncTask) for every chunk the
+         *  runner produces — int16 PCM LE bytes, matching the final
+         *  FInoChatterboxSynthesisResult::AudioSamples format so consumers
+         *  can append each chunk directly into a streaming audio buffer.
+         *
+         *  Semantics: the final chunk (bIsFinal=true) fires after every
+         *  intermediate chunk AND before OnComplete — same ordering the
+         *  runner enforces. Safe to leave unbound; the worker takes the
+         *  non-streaming fast path in that case. */
+        FOnInoChatterboxAudioChunk OnAudioChunk;
     };
 
     /**
