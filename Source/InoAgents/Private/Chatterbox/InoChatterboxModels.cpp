@@ -94,6 +94,11 @@ namespace
         Options.InterOpThreadCount = Performance.InterOpThreadCount;
         Options.bEnableProfiling   = Performance.bEnableOrtProfiling;
 
+        // -1 = ORT default (WARNING). 0 = verbose — pipe through the
+        // Blueprint toggle so users can enable session-level logs when
+        // debugging DML or graph-transform issues without touching code.
+        Options.LogSeverityLevel = Performance.bEnableVerboseOrtLogging ? 0 : -1;
+
         return Options;
     }
 

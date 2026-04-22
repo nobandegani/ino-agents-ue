@@ -69,6 +69,22 @@ namespace
             return nullptr;
         }
 
+        // Log-severity override. -1 = use ORT default (WARNING). Lower
+        // values are chattier; 0 (VERBOSE) exposes DML kernel fallback
+        // decisions, graph-transformer rewrites, and the exact op-desc
+        // field that failed validation when DML rejects something.
+        // Indispensable when diagnosing DML op-support issues.
+        if (Options.LogSeverityLevel >= 0)
+        {
+            if (!CheckStatus(
+                    Api->SetSessionLogSeverityLevel(Opts, Options.LogSeverityLevel),
+                    TEXT("SetSessionLogSeverityLevel"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
         // Thread counts (0 = ORT default — don't set explicitly).
         if (Options.IntraOpThreadCount > 0)
         {

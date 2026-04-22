@@ -131,6 +131,20 @@ struct FInoChatterboxPerformanceOptions
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance")
     bool bEnableOrtProfiling = false;
 
+    /** Enable ORT's verbose logging (severity = VERBOSE / 0) for the
+     *  four Chatterbox sessions. When on, ORT emits per-op graph
+     *  decisions, provider-kernel-dispatch rationales, graph-transformer
+     *  rewrites, and the exact DML_OPERATOR_*_DESC field that failed
+     *  validation when DML rejects an op — indispensable when
+     *  diagnosing DML kernel-support gaps.
+     *
+     *  Off by default (ORT default is WARNING which is quiet in the
+     *  normal case). Expect the output log to grow substantially when
+     *  on (~5-10 % performance overhead plus tens of thousands of log
+     *  lines per session). Turn on only for specific debug runs. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance")
+    bool bEnableVerboseOrtLogging = false;
+
     // --- DirectML (Windows GPU/NPU acceleration) ---
 
     /** Use DirectML Execution Provider for GPU / NPU acceleration on

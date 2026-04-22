@@ -9,6 +9,17 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
+#if PLATFORM_WINDOWS
+    // For GetModuleHandleW / GetModuleFileNameW — used to verify which
+    // DLL Windows' base-name cache actually served when we asked to
+    // load a full-path DLL. Without this we can't distinguish "our
+    // InoOnnxRuntime.dll / DirectML.dll / etc. got loaded" from "UE's
+    // already-cached copy at a different path was returned instead."
+    #include "Windows/AllowWindowsPlatformTypes.h"
+    #include <windows.h>
+    #include "Windows/HideWindowsPlatformTypes.h"
+#endif
+
 // ONNX Runtime C API. Included for the struct / function-type definitions
 // (OrtApi, OrtApiBase, OrtStatus, OrtGetApiBase signature, etc.). We do
 // NOT link against the ORT import library:
@@ -66,6 +77,69 @@ namespace
     }
 
 #if PLATFORM_WINDOWS
+    /**
+     * Windows-only: query Windows for the full on-disk path of an
+     * already-loaded DLL (by its base name). Returns empty if the DLL
+     * isn't loaded at all, or a sentinel string on API failure.
+     *
+     * Critical for verifying that our preloaded copies actually won
+     * the base-name cache race vs other DLLs with the same name that
+     * UE or other plugins may have loaded first (notably
+     * Engine/Binaries/Win64/DML/x64/DirectML.dll — different version
+     * than ours but same base name).
+     */
+    FString GetActualLoadedModulePath(const TCHAR* BaseName)
+    {
+        HMODULE Handle = GetModuleHandleW(BaseName);
+        if (Handle == nullptr)
+        {
+            return FString(TEXT("(not loaded)"));
+        }
+        WCHAR PathBuf[MAX_PATH + 1] = {};
+        const DWORD Len = GetModuleFileNameW(Handle, PathBuf, MAX_PATH);
+        if (Len == 0 || Len >= MAX_PATH)
+        {
+            return FString(TEXT("(GetModuleFileName failed)"));
+        }
+        return FString(PathBuf);
+    }
+
+    /**
+     * Verify that a loaded DLL came from the path we expected. Logs a
+     * Warning if Windows' base-name cache served a different copy
+     * (common signal: another plugin loaded its own DirectML.dll
+     * before us, pinning that version into the process).
+     */
+    void VerifyLoadedPath(const TCHAR* BaseName, const FString& ExpectedFullPath)
+    {
+        const FString ActualPath = GetActualLoadedModulePath(BaseName);
+
+        // Windows paths are case-insensitive and may use mixed separators.
+        // Normalise both sides to forward-slash lower-case for comparison.
+        auto Normalize = [](const FString& In) -> FString
+        {
+            FString Out = In;
+            Out.ReplaceInline(TEXT("\\"), TEXT("/"));
+            return Out.ToLower();
+        };
+
+        if (Normalize(ActualPath) == Normalize(ExpectedFullPath))
+        {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("InoAgents: verified %s is loaded from %s"),
+                   BaseName, *ActualPath);
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("InoAgents: BASE-NAME CACHE COLLISION — %s loaded from %s, ")
+                   TEXT("but we wanted %s. Our preload didn't win the race (another plugin ")
+                   TEXT("loaded a different %s first). Symptoms may include version-skew ")
+                   TEXT("bugs at runtime."),
+                   BaseName, *ActualPath, *ExpectedFullPath, BaseName);
+        }
+    }
+
     /**
      * Windows-only: our Binaries/ThirdParty/InoOnnxRuntime/Win64 directory.
      * Used to build full paths for the DirectML.dll + shared-providers
@@ -141,6 +215,17 @@ namespace
             {
                 UE_LOG(LogInoAgents, Log,
                        TEXT("InoAgents: pre-loaded %s"), P.Name);
+
+                // Now verify that the base-name cache actually served
+                // OUR copy and not some earlier-loaded conflicting DLL.
+                // If UE's NNE plugin / Marketplace plugin / anything
+                // else LoadLibrary'd a DLL with the same base name
+                // BEFORE us, Windows' cache returns THAT handle even
+                // though we passed a full path — and our subsequent
+                // InoOnnxRuntime.dll load would bind to the wrong
+                // version's static imports.
+                VerifyLoadedPath(P.Name, FullPath);
+
                 // We deliberately DON'T FreeDllHandle — we want the module
                 // to stay resident until process exit, holding the cache
                 // entry for the whole lifetime of the game. Letting the
@@ -307,6 +392,13 @@ void* Init()
            TEXT("InoAgents: loaded %s"),
            *LibName);
 
+#if PLATFORM_WINDOWS
+    // Verify our ORT DLL won the base-name cache against UE's NNE
+    // plugin copy (which ships a different ORT version). Same reason
+    // we run the verification on DirectML.dll in PreloadWin64Deps.
+    VerifyLoadedPath(TEXT("InoOnnxRuntime.dll"), LibName);
+#endif
+
     // Resolve the single entry-point symbol we need. Everything else
     // goes through the OrtApi vtable returned by GetApiBase()->GetApi().
     // GetDllExport is UE's cross-platform wrapper over
@@ -324,6 +416,21 @@ void* Init()
     }
 
     const OrtApiBase* ApiBase = reinterpret_cast<OrtGetApiBaseFn>(EntryPoint)();
+    if (ApiBase != nullptr && ApiBase->GetVersionString != nullptr)
+    {
+        // ApiBase::GetVersionString reports the runtime version of the
+        // loaded ORT DLL (what the binary is). We compare to
+        // ORT_API_VERSION which is what we COMPILED against. A
+        // mismatch here is a smoking gun for "Windows served a cached
+        // copy of a different ORT version instead of ours" or "the
+        // setup script staged a wrong-version DLL."
+        const char* RuntimeVer = ApiBase->GetVersionString();
+        UE_LOG(LogInoAgents, Log,
+               TEXT("InoAgents: ORT runtime version: %s (compiled-against ORT_API_VERSION=%u)"),
+               UTF8_TO_TCHAR(RuntimeVer != nullptr ? RuntimeVer : "<null>"),
+               (uint32)ORT_API_VERSION);
+    }
+
     GOrtApi = SelectOrtApi(ApiBase);
     if (GOrtApi == nullptr)
     {

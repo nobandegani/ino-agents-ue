@@ -164,4 +164,26 @@ struct FInoOnnxSessionOptions
      * Negative values are invalid per ORT's DML EP. Ignored on non-Windows.
      */
     int32 DirectMlAdapterIndex = 0;
+
+    /**
+     * Set ORT's session log severity level. Values (match
+     * OrtLoggingLevel in onnxruntime_c_api.h):
+     *   0 = ORT_LOGGING_LEVEL_VERBOSE  (most chatty; shows every op
+     *       the provider registers, every graph transformation, etc.)
+     *   1 = ORT_LOGGING_LEVEL_INFO
+     *   2 = ORT_LOGGING_LEVEL_WARNING  (ORT default)
+     *   3 = ORT_LOGGING_LEVEL_ERROR
+     *   4 = ORT_LOGGING_LEVEL_FATAL
+     *
+     * Use value 0 when diagnosing DML kernel fallbacks, op-support
+     * gaps, or metacommand routing — the verbose log tells you
+     * exactly which DML_OPERATOR_*_DESC field validation failed
+     * instead of just a generic E_INVALIDARG line/column. Costs ~5%
+     * runtime (log-print overhead) so leave at 2 for production.
+     *
+     * -1 = don't call SetSessionLogSeverityLevel at all (use ORT's
+     * built-in default). This is the initial value to preserve
+     * behaviour for callers that don't care about log level.
+     */
+    int32 LogSeverityLevel = -1;
 };
