@@ -51,24 +51,47 @@ namespace
         FInoOnnxSessionOptions Options;
 
         // Graph optimization level. On Windows we run at ORT_ENABLE_ALL
-        // (level 3 — includes layout-transformation passes like the
-        // NhwcTransformer) because the MSVC-side ORT build registers
-        // CPU kernels for the 'com.ms.internal.nhwc' domain produced by
-        // that pass. On Android the 1.24.3 AAR does NOT register those
-        // kernels, so level-3 optimizations silently produce a graph
-        // that no provider can execute and session creation fails with
-        //     "Failed to find kernel for com.ms.internal.nhwc.AveragePool(19)"
-        // on the speech_encoder. Drop to ORT_ENABLE_EXTENDED (level 2)
-        // there — we keep every non-layout fusion (ConvAdd fusion,
-        // GELU fusion, constant folding, common-subexpression etc.)
-        // and lose only the NHWC rewrites, which on ARM+CPU wouldn't
-        // have helped anyway (CPU EP prefers NCHW on aarch64).
+        // (level 3 — includes layout-transformation passes) because the
+        // MSVC-side ORT build has full kernel coverage across the
+        // Microsoft-internal domains those passes produce.
         //
-        // This is orthogonal to bForceCpu — the NhwcTransformer pass
-        // fires at graph-build time based on optimization level, not
-        // based on which providers are registered.
+        // On Android the 1.24.3 AAR is missing kernel registrations in
+        // two places that Chatterbox q4f16 hits, so we have to lower
+        // the level:
+        //
+        //   Level 3 (All) → produces 'com.ms.internal.nhwc' domain ops
+        //     (via the NhwcTransformer). The AAR lacks
+        //     com.ms.internal.nhwc.AveragePool(19), failing the
+        //     speech_encoder load:
+        //       "Failed to find kernel for com.ms.internal.nhwc.AveragePool(19)"
+        //
+        //   Level 2 (Extended) → runs op-level fusions including Bias +
+        //     Gelu → BiasGelu. The AAR only registers fp32 BiasGelu, and
+        //     q4f16's conditional_decoder hands it fp16 tensors:
+        //       "Failed to find kernel for com.microsoft.BiasGelu(1)
+        //        ... implemented only for tensor(float), but node has
+        //        tensor(float16)"
+        //
+        // Drop to ORT_ENABLE_BASIC (level 1) — constant folding, dead-
+        // node elimination, basic transpose optimization. We lose the
+        // fusions, so ops like Gelu + Bias run separately (both have
+        // fp16 kernels on Android), and no NHWC rewrites happen. Perf
+        // cost is real but bounded — a well-quantized Chatterbox q4f16
+        // on CPU runs mostly matmul + attention, which aren't fusion-
+        // heavy. Separate Bias + Gelu is a handful of extra kernel
+        // launches per forward pass, not a vectorization loss.
+        //
+        // Alternative to re-investigate once Android synth is healthy:
+        // per-session opt level (speech_encoder + language_model at
+        // Extended, conditional_decoder at Basic) to squeeze some perf
+        // back. Not worth the complexity while the baseline is still
+        // unverified.
+        //
+        // This is orthogonal to bForceCpu — graph optimizer passes run
+        // at graph-build time based on opt level, not on which
+        // providers are registered.
 #if PLATFORM_ANDROID
-        Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::Extended;
+        Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::Basic;
 #else
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
 #endif
