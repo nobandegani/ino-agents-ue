@@ -65,6 +65,106 @@ namespace
 #endif
     }
 
+#if PLATFORM_WINDOWS
+    /**
+     * Windows-only: our Binaries/ThirdParty/InoOnnxRuntime/Win64 directory.
+     * Used to build full paths for the DirectML.dll + shared-providers
+     * preloads below. Returns empty if the plugin can't be resolved.
+     */
+    FString ResolveWin64BinDir()
+    {
+        const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
+        if (!Plugin.IsValid())
+        {
+            return FString();
+        }
+        return FPaths::Combine(
+            Plugin->GetBaseDir(),
+            TEXT("Binaries/ThirdParty/InoOnnxRuntime/Win64"));
+    }
+
+    /**
+     * Pre-load a sibling DLL by full path so its base name is claimed in
+     * Windows' loaded-modules cache before anything else (UE's NNE plugin,
+     * a Marketplace plugin, etc.) gets a chance to.
+     *
+     * Critical for DirectML.dll: our InoOnnxRuntime.dll STATICALLY imports
+     * DirectML.dll. Windows resolves static imports at LoadLibrary time
+     * via the "altered search path" (which does put our DLL's own folder
+     * first), so normally our DirectML.dll wins. But if some other plugin
+     * has already LoadLibrary'd a DirectML.dll from elsewhere (e.g. UE's
+     * own Engine/Source/ThirdParty/DirectML/bin/Win64/DirectML.dll if
+     * some codepath pins it), Windows' base-name cache serves THAT one
+     * instead — a different version than ORT 1.24.3's DML EP was built
+     * against.
+     *
+     * The defensive fix is to pre-load OUR DirectML.dll FIRST, by full
+     * path. Windows caches the module by base name, so when our
+     * InoOnnxRuntime.dll later loads and asks for "DirectML.dll", the
+     * cache returns our already-loaded copy regardless of search path.
+     *
+     * Also pre-loads onnxruntime_providers_shared.dll for the same
+     * defensive reason, though it's not a static import (ORT LoadLibrary's
+     * it lazily for certain shared EPs).
+     *
+     * Failures are logged but non-fatal — if DirectML.dll genuinely isn't
+     * staged (shouldn't happen post-setup-script) we log clearly and let
+     * the subsequent InoOnnxRuntime.dll load fail naturally with a load
+     * error. Preloading a missing optional file just downgrades DML
+     * availability; the CPU fallback still works.
+     */
+    void PreloadWin64Deps()
+    {
+        const FString BinDir = ResolveWin64BinDir();
+        if (BinDir.IsEmpty())
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("InoAgents: cannot resolve plugin bin dir; DirectML.dll preload skipped"));
+            return;
+        }
+
+        // Preload order doesn't matter for the two sibling DLLs — neither
+        // imports the other. What matters is that both are loaded by full
+        // path BEFORE InoOnnxRuntime.dll, so their base-name cache entries
+        // are ours.
+        struct FPreload { const TCHAR* Name; bool bRequired; };
+        const FPreload Preloads[] = {
+            { TEXT("DirectML.dll"),                    true  },
+            { TEXT("onnxruntime_providers_shared.dll"), false },
+        };
+
+        for (const FPreload& P : Preloads)
+        {
+            const FString FullPath = FPaths::Combine(BinDir, P.Name);
+            void* Handle = FPlatformProcess::GetDllHandle(*FullPath);
+            if (Handle != nullptr)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("InoAgents: pre-loaded %s"), P.Name);
+                // We deliberately DON'T FreeDllHandle — we want the module
+                // to stay resident until process exit, holding the cache
+                // entry for the whole lifetime of the game. Letting the
+                // Windows loader clean up at process shutdown is fine.
+            }
+            else if (P.bRequired)
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("InoAgents: REQUIRED preload failed: %s (path=%s). ")
+                       TEXT("DirectML support will not work. Run ")
+                       TEXT("Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
+                       TEXT("to stage the binary."),
+                       P.Name, *FullPath);
+            }
+            else
+            {
+                UE_LOG(LogInoAgents, Verbose,
+                       TEXT("InoAgents: optional preload not found: %s (path=%s)"),
+                       P.Name, *FullPath);
+            }
+        }
+    }
+#endif // PLATFORM_WINDOWS
+
     /**
      * Call OrtApi::GetAvailableProviders and log the returned provider
      * list. Runs once at Init() as proof the vtable is callable.
@@ -171,6 +271,19 @@ void* Init()
     // the older version. By using GetDllExport("OrtGetApiBase") at
     // runtime we bypass the static linker entirely and bind to whatever
     // version our specific DLL/.so provides.
+
+#if PLATFORM_WINDOWS
+    // Pre-load DirectML.dll (+ onnxruntime_providers_shared.dll) by full
+    // path BEFORE loading InoOnnxRuntime.dll. DirectML.dll is a static
+    // import of the DML-flavored ORT — Windows resolves it at LoadLibrary
+    // time from the cached loaded-modules table keyed by base name. The
+    // preload seeds that cache with OUR copy, guaranteeing the main ORT
+    // load binds to the DirectML version we ship rather than any other
+    // plugin's or UE engine-dir copy. See PreloadWin64Deps for the full
+    // rationale.
+    PreloadWin64Deps();
+#endif
+
     const FString LibName = ResolveOnnxLibraryName();
     if (LibName.IsEmpty())
     {
