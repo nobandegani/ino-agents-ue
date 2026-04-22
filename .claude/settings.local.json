@@ -118,7 +118,17 @@
       "Bash(powershell.exe -Command '& { $dll='\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\ggml-base.dll'\\\\''; \\(& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS $dll 2>$null | Select-String '\\\\''ggml_backend_load_all|ggml_backend_reg_'\\\\''\\).Line | Select-Object -First 10 }')",
       "Bash(powershell.exe -Command '& { foreach \\($dll in @\\('\\\\''ggml.dll'\\\\'','\\\\''ggml-base.dll'\\\\'','\\\\''ggml-vulkan.dll'\\\\'','\\\\''llama.dll'\\\\''\\)\\) { $path=\"E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\$dll\"; Write-Host \"=== $dll ===\"; \\(& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS $path 2>$null | Select-String '\\\\''ggml_backend_load_all'\\\\''\\).Line | Select-Object -First 5 } }')",
       "Bash(powershell.exe -Command '& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS '\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\ggml-base.dll'\\\\'' 2>$null | Select-String -Pattern '\\\\''backend_load'\\\\'' | ForEach-Object { $_.Line }')",
-      "Bash(powershell.exe -Command '& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS '\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\ggml.dll'\\\\'' 2>$null | Select-String -Pattern '\\\\''backend'\\\\'' | ForEach-Object { $_.Line } | Select-Object -First 25')"
+      "Bash(powershell.exe -Command '& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS '\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\ggml.dll'\\\\'' 2>$null | Select-String -Pattern '\\\\''backend'\\\\'' | ForEach-Object { $_.Line } | Select-Object -First 25')",
+      "Bash(where conda *)",
+      "Bash(conda --version)",
+      "Bash(conda create *)",
+      "Bash(mkdir -p \"E:/Projects/InoProject/Plugins/InoAgents/NeuTtsNano/.cache\")",
+      "Bash(curl -sSL -o jo.wav \"https://raw.githubusercontent.com/neuphonic/neutts/main/samples/jo.wav\")",
+      "Bash(curl -sSL -o jo.txt \"https://raw.githubusercontent.com/neuphonic/neutts/main/samples/jo.txt\")",
+      "Bash(where espeak-ng *)",
+      "Bash(winget list *)",
+      "Bash(winget install *)",
+      "Bash(\"C:/Program Files/eSpeak NG/espeak-ng.exe\" --version)"
     ]
   }
 }
