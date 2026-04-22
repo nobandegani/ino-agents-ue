@@ -322,6 +322,7 @@ namespace
                 OutApi.FuncName = reinterpret_cast<decltype(OutApi.FuncName)>(P_); \
             } while (0)
 
+        // Milestone C — module startup + backend discovery
         INO_RESOLVE_LLAMA(llama_backend_init);
         INO_RESOLVE_LLAMA(llama_backend_free);
         INO_RESOLVE_LLAMA(llama_print_system_info);
@@ -329,6 +330,54 @@ namespace
         INO_RESOLVE_LLAMA(ggml_backend_reg_count);
         INO_RESOLVE_LLAMA(ggml_backend_reg_get);
         INO_RESOLVE_LLAMA(ggml_backend_reg_name);
+
+        // NeuTTS prerequisite — model
+        INO_RESOLVE_LLAMA(llama_model_default_params);
+        INO_RESOLVE_LLAMA(llama_model_load_from_file);
+        INO_RESOLVE_LLAMA(llama_model_free);
+        INO_RESOLVE_LLAMA(llama_model_get_vocab);
+        INO_RESOLVE_LLAMA(llama_model_desc);
+        INO_RESOLVE_LLAMA(llama_model_n_ctx_train);
+
+        // NeuTTS prerequisite — context
+        INO_RESOLVE_LLAMA(llama_context_default_params);
+        INO_RESOLVE_LLAMA(llama_init_from_model);
+        INO_RESOLVE_LLAMA(llama_free);
+        INO_RESOLVE_LLAMA(llama_n_ctx);
+
+        // NeuTTS prerequisite — memory (KV-cache)
+        INO_RESOLVE_LLAMA(llama_get_memory);
+        INO_RESOLVE_LLAMA(llama_memory_clear);
+
+        // NeuTTS prerequisite — vocab
+        INO_RESOLVE_LLAMA(llama_vocab_n_tokens);
+        INO_RESOLVE_LLAMA(llama_vocab_eos);
+        INO_RESOLVE_LLAMA(llama_vocab_is_eog);
+        INO_RESOLVE_LLAMA(llama_vocab_get_add_bos);
+        INO_RESOLVE_LLAMA(llama_token_to_piece);
+
+        // NeuTTS prerequisite — tokenize / detokenize
+        INO_RESOLVE_LLAMA(llama_tokenize);
+        INO_RESOLVE_LLAMA(llama_detokenize);
+
+        // NeuTTS prerequisite — batch + decode
+        INO_RESOLVE_LLAMA(llama_batch_init);
+        INO_RESOLVE_LLAMA(llama_batch_free);
+        INO_RESOLVE_LLAMA(llama_batch_get_one);
+        INO_RESOLVE_LLAMA(llama_decode);
+        INO_RESOLVE_LLAMA(llama_get_logits_ith);
+
+        // NeuTTS prerequisite — sampler chain
+        INO_RESOLVE_LLAMA(llama_sampler_chain_default_params);
+        INO_RESOLVE_LLAMA(llama_sampler_chain_init);
+        INO_RESOLVE_LLAMA(llama_sampler_chain_add);
+        INO_RESOLVE_LLAMA(llama_sampler_init_greedy);
+        INO_RESOLVE_LLAMA(llama_sampler_init_dist);
+        INO_RESOLVE_LLAMA(llama_sampler_init_top_k);
+        INO_RESOLVE_LLAMA(llama_sampler_init_temp);
+        INO_RESOLVE_LLAMA(llama_sampler_sample);
+        INO_RESOLVE_LLAMA(llama_sampler_accept);
+        INO_RESOLVE_LLAMA(llama_sampler_free);
 
         #undef INO_RESOLVE_LLAMA
 

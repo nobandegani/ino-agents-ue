@@ -2,10 +2,15 @@
 
 #pragma once
 
-// Forward-declare the ggml backend-registration handle so this header
-// doesn't pull in ggml-backend.h. The definition comes from that header
-// in the .cpp consumers.
-struct ggml_backend_reg;
+// Pull in the full llama.cpp C API headers. The vtable below uses
+// function-pointer types that embed struct-by-value parameters and
+// return types (llama_model_default_params, llama_batch, etc.), so
+// forward declarations aren't sufficient. Consumers of GetApi() will
+// also need these types (llama_model, llama_context, llama_vocab,
+// llama_batch, llama_sampler, etc.) so having them here means they
+// get them transitively from this header.
+#include "llama.h"
+#include "ggml-backend.h"
 
 /**
  * llama.cpp module startup / shutdown glue + global API vtable accessor.
@@ -95,6 +100,10 @@ namespace InoAgents::LlamaCpp
      */
     struct FLlamaCppApi
     {
+        // ==================================================================
+        // Milestone C — module startup + backend discovery (always present)
+        // ==================================================================
+
         // Runtime lifecycle. Called once each by Init() / Shutdown() on
         // the game thread during module bring-up/tear-down.
         void        (*llama_backend_init)(void) = nullptr;
@@ -116,9 +125,96 @@ namespace InoAgents::LlamaCpp
         // Backend enumeration — used by the BackendInfoTest smoke test
         // to log which backends actually registered successfully on the
         // host CPU / GPU.
-        size_t                 (*ggml_backend_reg_count)(void) = nullptr;
+        size_t                   (*ggml_backend_reg_count)(void) = nullptr;
         struct ggml_backend_reg* (*ggml_backend_reg_get)(size_t index) = nullptr;
-        const char*            (*ggml_backend_reg_name)(struct ggml_backend_reg* reg) = nullptr;
+        const char*              (*ggml_backend_reg_name)(struct ggml_backend_reg* reg) = nullptr;
+
+        // ==================================================================
+        // NeuTTS prerequisite — model, context, vocab, tokenize, decode,
+        // sampler. Added for the NeuTTS Nano subsystem but generally useful
+        // for any GGUF consumer. All signatures are 1:1 with llama.h at the
+        // pinned tag (currently b8883).
+        // ==================================================================
+
+        // --- Model lifecycle ---
+        struct llama_model_params (*llama_model_default_params)(void) = nullptr;
+        struct llama_model*       (*llama_model_load_from_file)(
+                                      const char* path_model,
+                                      struct llama_model_params params) = nullptr;
+        void                      (*llama_model_free)(struct llama_model* model) = nullptr;
+        const struct llama_vocab* (*llama_model_get_vocab)(const struct llama_model* model) = nullptr;
+        int32_t                   (*llama_model_desc)(
+                                      const struct llama_model* model,
+                                      char* buf, size_t buf_size) = nullptr;
+        int32_t                   (*llama_model_n_ctx_train)(const struct llama_model* model) = nullptr;
+
+        // --- Context lifecycle ---
+        struct llama_context_params (*llama_context_default_params)(void) = nullptr;
+        struct llama_context*       (*llama_init_from_model)(
+                                        struct llama_model* model,
+                                        struct llama_context_params params) = nullptr;
+        void                        (*llama_free)(struct llama_context* ctx) = nullptr;
+        uint32_t                    (*llama_n_ctx)(const struct llama_context* ctx) = nullptr;
+
+        // --- Memory / KV-cache reset (separate memory handle in modern llama.cpp) ---
+        llama_memory_t (*llama_get_memory)(const struct llama_context* ctx) = nullptr;
+        void           (*llama_memory_clear)(llama_memory_t mem, bool data) = nullptr;
+
+        // --- Vocab queries ---
+        int32_t      (*llama_vocab_n_tokens)(const struct llama_vocab* vocab) = nullptr;
+        llama_token  (*llama_vocab_eos)(const struct llama_vocab* vocab) = nullptr;
+        bool         (*llama_vocab_is_eog)(const struct llama_vocab* vocab, llama_token token) = nullptr;
+        bool         (*llama_vocab_get_add_bos)(const struct llama_vocab* vocab) = nullptr;
+        int32_t      (*llama_token_to_piece)(
+                         const struct llama_vocab* vocab,
+                         llama_token token,
+                         char* buf, int32_t length,
+                         int32_t lstrip, bool special) = nullptr;
+
+        // --- Tokenize / detokenize ---
+        int32_t (*llama_tokenize)(
+                    const struct llama_vocab* vocab,
+                    const char* text, int32_t text_len,
+                    llama_token* tokens, int32_t n_tokens_max,
+                    bool add_special, bool parse_special) = nullptr;
+        int32_t (*llama_detokenize)(
+                    const struct llama_vocab* vocab,
+                    const llama_token* tokens, int32_t n_tokens,
+                    char* text, int32_t text_len_max,
+                    bool remove_special, bool unparse_special) = nullptr;
+
+        // --- Batch + decode ---
+        struct llama_batch (*llama_batch_init)(
+                               int32_t n_tokens, int32_t embd, int32_t n_seq_max) = nullptr;
+        void               (*llama_batch_free)(struct llama_batch batch) = nullptr;
+        struct llama_batch (*llama_batch_get_one)(
+                               llama_token* tokens, int32_t n_tokens) = nullptr;
+        int32_t            (*llama_decode)(
+                               struct llama_context* ctx,
+                               struct llama_batch batch) = nullptr;
+        float*             (*llama_get_logits_ith)(
+                               struct llama_context* ctx, int32_t i) = nullptr;
+
+        // --- Sampler chain (takes ownership of added samplers — do NOT call
+        //     llama_sampler_free on members after llama_sampler_chain_add) ---
+        struct llama_sampler_chain_params (*llama_sampler_chain_default_params)(void) = nullptr;
+        struct llama_sampler*             (*llama_sampler_chain_init)(
+                                              struct llama_sampler_chain_params params) = nullptr;
+        void                              (*llama_sampler_chain_add)(
+                                              struct llama_sampler* chain,
+                                              struct llama_sampler* smpl) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_greedy)(void) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_dist)(uint32_t seed) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_top_k)(int32_t k) = nullptr;
+        struct llama_sampler*             (*llama_sampler_init_temp)(float t) = nullptr;
+        llama_token                       (*llama_sampler_sample)(
+                                              struct llama_sampler* smpl,
+                                              struct llama_context* ctx,
+                                              int32_t idx) = nullptr;
+        void                              (*llama_sampler_accept)(
+                                              struct llama_sampler* smpl,
+                                              llama_token token) = nullptr;
+        void                              (*llama_sampler_free)(struct llama_sampler* smpl) = nullptr;
     };
 
     /**
