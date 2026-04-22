@@ -45,7 +45,31 @@
       "PowerShell(\"-- plugin intermediate contents \\(first level\\) --\")",
       "WebFetch(domain:github.com)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "WebFetch(domain:onnxruntime.ai)",
+      "WebFetch(domain:www.nuget.org)",
+      "Bash(curl -sL \"https://api.github.com/repos/microsoft/onnxruntime/releases/tags/v1.24.3\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(a['name'], a['browser_download_url']\\) for a in d['assets']]\")",
+      "Bash(mkdir -p /tmp/dmlnuget)",
+      "Bash(curl -sL -o /tmp/dmlnuget/ort-dml.nupkg \"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.3\")",
+      "Read(//tmp/dmlnuget/**)",
+      "Bash(unzip -l /tmp/dmlnuget/ort-dml.nupkg)",
+      "Bash(curl -sL -o /tmp/dmlnuget/directml.nupkg \"https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4\")",
+      "Bash(unzip -l /tmp/dmlnuget/directml.nupkg)",
+      "Bash(gh api *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(mkdir -p /c/tmp/dml-research)",
+      "Read(//c/tmp/**)",
+      "Bash(curl -sSL -o ort-dml.nupkg \"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.3\")",
+      "Bash(mkdir -p ort-dml)",
+      "Bash(unzip -q -o ort-dml.nupkg -d ort-dml/)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/dml-research/ort-dml/runtimes/win-x64/native/onnxruntime.dll)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //dependents /c/tmp/dml-research/ort-dml/runtimes/win-x64/native/onnxruntime.dll)",
+      "Bash(curl -sSL -o directml.nupkg \"https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4\")",
+      "Bash(mkdir -p directml)",
+      "Bash(unzip -q -o directml.nupkg -d directml/)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/dml-research/directml/bin/x64-win/DirectML.dll)"
     ]
   }
 }
