@@ -22,6 +22,13 @@
 // actual model inference) to the subsystem / worker layer.
 #include "InoOnnxModule.h"
 
+// llama.cpp startup glue — third runtime alongside LiteRT-LM and ORT.
+// Init() preloads the DLL dependency chain on Windows, resolves the
+// function-pointer vtable, and calls llama_backend_init. Failure is
+// non-fatal (matches ORT's treatment) — every llama.cpp consumer
+// null-checks InoAgents::LlamaCpp::GetApi() before use.
+#include "InoLlamaCppModule.h"
+
 // Single definition for the shared log category declared in InoAgentsLog.h.
 // Everything in this module — including every file under Private/SmokeTests/
 // — logs to LogInoAgents via that header.
@@ -180,10 +187,33 @@ void FInoAgentsModule::StartupModule()
     // OnError delegate instead of relying on module-startup state.
     // --------------------------------------------------------------
     OnnxRuntimeHandle = InoAgents::Onnx::Init();
+
+    // --------------------------------------------------------------
+    // llama.cpp startup. Same shape as ORT above: Init() handles
+    // per-platform DLL / .so loading (Windows preloads the ggml
+    // dependency chain + vulkan backend; Android relies on the UPL's
+    // <soLoadLibrary> to have already mapped libllama.so + cascaded
+    // DT_NEEDED), resolves a function-pointer vtable, registers all
+    // ggml backends (CPU variants + Vulkan), and calls
+    // llama_backend_init. Summary line including the build + system
+    // info is emitted to LogInoAgents on success.
+    //
+    // Failure here is non-fatal — Init() logs its own error and
+    // returns false. Any llama.cpp consumer (future subsystem,
+    // conversation, smoke tests) null-checks
+    // InoAgents::LlamaCpp::GetApi() before calling into the vtable,
+    // so a failed init surfaces as a no-op rather than a crash.
+    // --------------------------------------------------------------
+    InoAgents::LlamaCpp::Init();
 }
 
 void FInoAgentsModule::ShutdownModule()
 {
+    // Mirror-image teardown: llama.cpp first (opened last), then ORT,
+    // then LiteRT-LM. All are independent subsystems — order only
+    // matters for keeping the log readable.
+    InoAgents::LlamaCpp::Shutdown();
+
     // Shut down ONNX Runtime before LiteRT-LM — independent subsystems,
     // but keeping teardown in mirror-image of startup is a cheap habit
     // and leaves the log easier to read if something goes wrong.

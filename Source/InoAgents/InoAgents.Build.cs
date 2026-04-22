@@ -37,10 +37,12 @@ public class InoAgents : ModuleRules
 				// #include "InoOnnxModule.h" without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "Onnx"),
 
-				// Private/LlamaCpp is added in Milestone C alongside
-				// InoLlamaCppModule.{h,cpp}. Leaving it off here until
-				// the directory exists avoids a UBT "referenced directory
-				// does not exist" warning at build time.
+				// Subdirectory of Private/ that holds the llama.cpp module
+				// startup glue (dynamic DLL loading + function-pointer
+				// vtable) and future GGUF-consuming code (subsystem,
+				// conversation, worker). Added so InoAgents.cpp can
+				// #include "InoLlamaCppModule.h" without relative paths.
+				Path.Combine(ModuleDirectory, "Private", "LlamaCpp"),
 
 				// Subdirectory of Private/ that holds the Chatterbox Turbo
 				// TTS pipeline (model bundle, tokenizer, runners, worker).
