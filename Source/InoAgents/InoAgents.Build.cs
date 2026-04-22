@@ -69,6 +69,15 @@ public class InoAgents : ModuleRules
 				// (UStreamingSoundWave); we don't ship our own sound-wave
 				// classes or dialogue-queue any more.
 				Path.Combine(ModuleDirectory, "Private", "Audio"),
+
+				// Subdirectory of Private/ that holds the NeuTTS Nano
+				// on-device TTS subsystem (download orchestration in
+				// Milestone 2; runner + worker + voice registry in
+				// Milestone 3; synthesis pipeline in Milestone 4).
+				// NeuTTS Nano is a pure consumer of the existing llama.cpp
+				// vtable (InoLlamaCppModule) and FInoOnnxSession — no
+				// dedicated third-party module of its own.
+				Path.Combine(ModuleDirectory, "Private", "NeuTtsNano"),
 			}
 			);
 

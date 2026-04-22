@@ -8,6 +8,7 @@ class FJsonObject;
 class UInoLiteRtLmSubsystem;
 class UInoElevenLabsSubsystem;
 class UInoChatterboxTtsSubsystem;
+class UInoNeuTtsNanoSubsystem;
 
 /**
  * Helpers shared between the phase-1 smoke test console commands in
@@ -34,6 +35,9 @@ namespace InoSmokeTest
 
     /** Twin of FindLiteRtLmSubsystem for the Chatterbox TTS subsystem. */
     UInoChatterboxTtsSubsystem* FindChatterboxSubsystem();
+
+    /** Twin of FindLiteRtLmSubsystem for the NeuTTS Nano TTS subsystem. */
+    UInoNeuTtsNanoSubsystem* FindNeuTtsNanoSubsystem();
 
     /**
      * Resolve the default phase-1 Gemma 4 E2B model path:

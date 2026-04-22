@@ -8,6 +8,7 @@
 #include "Chatterbox/InoChatterboxTypes.h"
 #include "ElevenLabs/InoElevenLabsTypes.h"
 #include "LiteRtLm/InoLiteRtLmTypes.h"
+#include "NeuTtsNano/InoNeuTtsNanoTypes.h"
 
 #include "InoAgentsSettings.generated.h"
 
@@ -78,6 +79,19 @@ public:
     TArray<FInoChatterboxModelEntry> ChatterboxModels;
 
     // =============================================================
+    // NeuTTS Nano TTS
+    // =============================================================
+
+    /** Available NeuTTS Nano variants and their download URLs.
+     *  UInoNeuTtsNanoSubsystem::LoadModelAsync matches its
+     *  FInoNeuTtsNanoModelConfig::Variant against this array to find
+     *  the backbone GGUF + codec ONNX URLs to pull missing files from.
+     *  Each entry carries TWO HuggingFace repo URLs — one for the
+     *  Qwen2-derived backbone and one for the NeuCodec ONNX decoder. */
+    UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Nano|Models")
+    TArray<FInoNeuTtsNanoModelEntry> NeuTtsNanoModels;
+
+    // =============================================================
     // Accessors
     // =============================================================
 
@@ -104,4 +118,10 @@ public:
      *  treats that as "no download URL for this variant" and fails
      *  LoadModelsAsync with a clear error. */
     const FInoChatterboxModelEntry* FindChatterboxModel(EInoChatterboxVariant Variant) const;
+
+    /** Look up a NeuTTS Nano model entry by backbone variant. Returns
+     *  nullptr if no matching entry is configured — UInoNeuTtsNanoSubsystem
+     *  treats that as "no download URL for this variant" and fails
+     *  LoadModelAsync with a clear error. */
+    const FInoNeuTtsNanoModelEntry* FindNeuTtsNanoModel(EInoNeuTtsNanoBackboneVariant Variant) const;
 };

@@ -6,6 +6,7 @@
 #include "Chatterbox/InoChatterboxTtsSubsystem.h"
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
+#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -59,6 +60,11 @@ UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
 UInoChatterboxTtsSubsystem* FindChatterboxSubsystem()
 {
     return FindGameInstanceSubsystem<UInoChatterboxTtsSubsystem>();
+}
+
+UInoNeuTtsNanoSubsystem* FindNeuTtsNanoSubsystem()
+{
+    return FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
 }
 
 FString ResolveDefaultModelPath()
