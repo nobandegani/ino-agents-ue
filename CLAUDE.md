@@ -8,14 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working inside 
 
 The plugin is named for "agents" deliberately: the goal is not just text generation but **tool-use / function-calling workflows** running natively in UE, driven from Blueprint.
 
-## Runtimes: LiteRT-LM (for LLM) + ONNX Runtime (for everything else)
+## Runtimes: LiteRT-LM + ONNX Runtime + llama.cpp
 
-The plugin carries **two** on-device ML runtimes, each doing what it's best at:
+The plugin carries **three** on-device ML runtimes, each doing what it's best at:
 
 - **LiteRT-LM** — Google's TFLite-based LLM runtime. Handles Gemma 4 inference (chat, tool calling, streaming). Built from source via Bazel; statically-linked monolithic `LiteRtLm.dll` / `libLiteRtLm.so`. See the sections below.
-- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo is the first shipping consumer — see below), audio codec decoders, future vision / classifier / embedding models. Prebuilt binaries downloaded at setup time under renamed filenames (`InoOnnxRuntime.dll` + `InoDml.dll` on Windows, `libInoOnnxRuntime.so` on Android) to avoid UE's NNE bundling collisions. See "[ONNX Runtime (the second runtime)](#onnx-runtime-the-second-runtime)" below.
+- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo + NeuCodec decoder for NeuTTS Nano), audio codec decoders, future vision / classifier / embedding models. Prebuilt binaries downloaded at setup time under renamed filenames (`InoOnnxRuntime.dll` + `InoDml.dll` on Windows, `libInoOnnxRuntime.so` on Android) to avoid UE's NNE bundling collisions. See "[ONNX Runtime (the second runtime)](#onnx-runtime-the-second-runtime)" below.
+- **llama.cpp** — The canonical on-device runtime for GGUF-format LLMs. Prebuilt binaries from upstream GitHub releases staged under original filenames (`llama.dll` + `ggml*.dll` + `libomp140.x86_64.dll` on Windows, `libllama.so` + `libggml*.so` on Android). Used at runtime via a synthesised vtable (`FLlamaCppApi`) resolved via GetProcAddress / dlsym — no implicit linking. First and currently only consumer: **NeuTTS Nano TTS**. See `Plugins/InoAgents/LlamaCpp/README.md` for the setup story and `Source/InoAgents/Private/LlamaCpp/InoLlamaCppModule.{h,cpp}` for the vtable.
 
-Why two runtimes instead of one: LiteRT-LM is purpose-built for on-device LLM inference (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX models. ONNX Runtime is the industry-standard general-purpose runtime and ships prebuilt binaries with sensible execution providers on every target platform. Each runtime is small enough (~14 MB Win64 LLM DLL, ~14 MB Win64 ORT DLL + ~20 MB DirectML if shipped) that carrying both costs less than the engineering cost of trying to force one runtime to do both jobs.
+Why three runtimes instead of one: each is purpose-built for a specific ecosystem of models. LiteRT-LM is purpose-built for Gemma 4 (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX or GGUF models. ONNX Runtime is the industry-standard runtime for ONNX graphs (the only format Chatterbox and NeuCodec ship in) with prebuilts on every platform. llama.cpp is the only production-grade runtime for GGUF-format LLMs (which covers Qwen, Phi, Llama, SmolLM, NeuTTS's Qwen2 backbone, and essentially every non-Gemma open LLM worth running on-device). Each runtime is small enough (~14 MB LiteRT-LM + ~14 MB ORT + ~2-80 MB llama.cpp depending on backends shipped) that carrying all three costs less than forcing one runtime to do all three jobs. All three use the same integration shape (prebuilt binaries, dynamic loading, platform-aware execution providers) so the mental model stays consistent.
 
 ### LiteRT-LM
 
@@ -617,6 +618,114 @@ Confirmed upstream-side via a minimal Python repro using stock `onnxruntime-dire
 ### Streaming via incremental decoder runs
 
 `FInoChatterboxRunner`'s streaming path keeps the language-model AR loop running on its own thread while a parallel `FInoChatterboxDecoderWorker` re-runs `conditional_decoder` on rolling chunks of generated speech tokens. The first chunk fires `OnAudioChunk` once `StreamChunkTokens` (default 20, ~0.6 s of audio) tokens are ready, dropping the typical first-audio latency from "max_new_tokens × per_token_ms + decoder_ms" to roughly "20 × per_token_ms + first decoder_ms" — under a second for short utterances on a modern desktop. The decoder worker exists because `conditional_decoder` is the most expensive single op in the pipeline; running it inline on the AR thread would stall token generation while audio rendered, defeating the latency win.
+
+## NeuTTS Nano TTS (the second on-device TTS — shipping)
+
+Neuphonic's NeuTTS Nano — a Qwen2-derived ~117M-parameter GGUF LLM that emits FSQ speech tokens, fed into NeuCodec's ONNX decoder to produce 24 kHz mono waveforms with voice cloning from a reference voice. Parallel to Chatterbox Turbo as a second on-device TTS with different voice character, smaller LM footprint (195 MB Q4 vs Chatterbox's ~510 MB q4f16), and different licensing (NeuTTS Open License 1.0, not Apache 2.0).
+
+This is the **first and currently only consumer of the llama.cpp runtime** in the plugin. It validates the llama.cpp integration with a real-world workload and establishes the architecture for any future GGUF-format consumer (more TTS models, Whisper/ASR, general small LLMs, etc).
+
+### Canonical source (trust this first)
+
+- **Official Python reference**: [`neuphonic/neutts/neutts/neutts.py`](https://github.com/neuphonic/neutts/blob/main/neutts/neutts.py) — the inference loop we're porting (`_apply_chat_template`, `_infer_ggml`, `_decode`).
+- **Backbone model card**: [`neuphonic/neutts-nano-q4-gguf`](https://huggingface.co/neuphonic/neutts-nano-q4-gguf) — the 195 MB GGUF (`neutts-nano-Q4_0.gguf`).
+- **Codec decoder**: [`neuphonic/neucodec-onnx-decoder`](https://huggingface.co/neuphonic/neucodec-onnx-decoder) — the 783 MB `model.onnx` (fp32, single codebook, 50 Hz token rate, 24 kHz output).
+- **NeuCodec paper / encoder**: [`neuphonic/neucodec`](https://huggingface.co/neuphonic/neucodec) — PyTorch-only, used **offline** via the encoder script to produce reference-voice codes.
+
+### Architecture
+
+NeuTTS Nano is a **pure consumer** of the existing `InoLlamaCppModule` vtable + `FInoOnnxSession`. No dedicated third-party module of its own; no llama.cpp patches.
+
+```
+UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
+├── FInoNeuTtsNanoVoiceRegistry      (loads default_voice.nvoice.json at Initialize)
+├── FInoNeuTtsNanoRunner              (owns llama_model + llama_context + FInoOnnxSession)
+│      ↳ consumes InoAgents::LlamaCpp::GetApi() vtable exclusively
+│      ↳ consumes FInoOnnxSession::Create for the NeuCodec decoder
+└── FInoNeuTtsNanoSynthesisWorker     (FRunnable + Spsc queue + cancel atomic)
+       ↳ hosts the AR loop + full synthesis pipeline
+```
+
+### The pipeline (per-synth, in the worker thread)
+
+1. **Build prompt** via `InoNeuTtsNano::BuildPrompt` — composes the exact NeuTTS chat template:
+   ```
+   user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phonemes}<|TEXT_PROMPT_END|>
+   assistant:<|SPEECH_GENERATION_START|><|speech_N1|><|speech_N2|>...
+   ```
+2. **Tokenize** via `llama_tokenize(parse_special=true)` — `<|...|>` control tokens resolve to single ids from Qwen2's Neuphonic-extended vocab.
+3. **KV-cache clear** via `llama_memory_clear` to wipe state from any previous synth.
+4. **Prefill** via `llama_decode(prompt_batch)` — linear in prompt length. This is typically the dominant cost on CPU for short outputs.
+5. **Build sampler chain**: top-k (default 50) → temperature (default 1.0) → dist (seed, -1 = random).
+6. **AR loop** — `llama_sampler_sample` → stop on `<|SPEECH_GENERATION_END|>` (id resolved at Runner-Create time via vocab scan) / `llama_vocab_is_eog` / `MaxNewTokens` / cancel (checked every 256 tokens). Each accepted token goes through `llama_token_to_piece(special=true)` into an accumulating text buffer AND back into the context via `llama_batch_get_one` + `llama_decode`.
+7. **Regex-parse** `<\|speech_(\d+)\|>` from the generated text → `TArray<int32>` speech-token ids. UE's `FRegexMatcher` is adequate — runs once post-generation, not on the hot path.
+8. **Decoder** — `FInoOnnxTensor::CreateFromBufferCopy<int32>({1, 1, N})` → `Session->Run` → float32 `[1, 1, N_samples]` waveform.
+9. **PCM conversion** — float32 clamp [-1, 1] → int16 LE via round-half-away-from-zero → `TArray<uint8>` (matches Chatterbox's output contract for RuntimeAudioImporter compatibility).
+10. **Dispatch** via `AsyncTask(ENamedThreads::GameThread)` so the dynamic `FOnInoNeuTtsNanoSynthesisComplete` delegate fires on the right thread.
+
+### v1 scope (locked; extension points documented)
+
+| Aspect | v1 Value | Follow-up |
+|---|---|---|
+| Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `InoOnnxRuntime` layer (MIT-licensed, ~5 MB). |
+| Default voice | **Baked in** — `NeuTtsNano/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoVoiceRegistry` + scanning a user-provided voices dir. |
+| Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
+| Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxDecoderWorker`. |
+
+### Why phonemization is offline-only
+
+NeuTTS Nano was trained on IPA phonemes (from espeak-ng), not raw English. The standard runtime phonemizer is espeak-ng itself, which is **GPLv3** — a copyleft dependency that poisons commercial games that ship NeuTTS. Our approach: phonemize **once at voice-encoding time** via the offline Python script (`NeuTtsNano/scripts/encode-default-voice.py`), store the phonemes in the JSON alongside ref_codes, and keep the runtime plugin phonemizer-free. v2 will add an ONNX G2P (MIT) for plain-text input.
+
+### File layout
+
+```
+Plugins/InoAgents/
+├── NeuTtsNano/                                        ← setup + baked-in voice
+│   ├── Resources/
+│   │   └── default_voice.nvoice.json                  ← 653 FSQ codes + IPA phones
+│   │                                                    (generated once from jo.wav)
+│   ├── scripts/
+│   │   ├── encode-default-voice.py                    ← OFFLINE PyTorch encoder
+│   │   │                                                (neucodec + phonemizer + torch)
+│   │   ├── setup-neutts-nano.ps1                      ← optional dev pre-stage
+│   │   └── clean.ps1
+│   └── README.md
+│
+└── Source/InoAgents/
+    ├── Public/NeuTtsNano/
+    │   ├── InoNeuTtsNanoTypes.h                       ← variant enum, entry/config/
+    │   │                                                options USTRUCTs, delegates
+    │   └── InoNeuTtsNanoSubsystem.h                   ← UInoNeuTtsNanoSubsystem
+    └── Private/NeuTtsNano/
+        ├── InoNeuTtsNanoSubsystem.cpp                 ← Blueprint glue, download flow
+        │                                                (Chatterbox-style BuildDownload
+        │                                                Queue + HEAD probe + sequential
+        │                                                GET + .partial + atomic rename),
+        │                                                ThreadPool load dispatch
+        ├── InoNeuTtsNanoTypes.cpp                     ← ResolveModelDir helper
+        ├── InoNeuTtsNanoRunner.{h,cpp}                ← llama_model + llama_context +
+        │                                                 FInoOnnxSession owner (move-only)
+        ├── InoNeuTtsNanoPromptBuilder.{h,cpp}         ← BuildPrompt: exact chat-template
+        ├── InoNeuTtsNanoSynthesisWorker.{h,cpp}       ← FRunnable + Spsc queue + full
+        │                                                 AR-loop synthesis pipeline
+        └── InoNeuTtsNanoVoiceRegistry.{h,cpp}         ← .nvoice.json parser
+```
+
+### Smoke tests
+
+| Command | What it proves | PIE? |
+|---|---|---|
+| `Ino.NeuTtsNano.DownloadTest` | `UInoNeuTtsNanoSubsystem::LoadModelAsync` downloads (cold) or finds (warm) both model files, dispatches the ThreadPool loader, fires `OnLoaded(true)`, file-stat verifies both files on disk. | yes |
+| `Ino.NeuTtsNano.SynthTest [phonemes...]` | Full pipeline: auto-load → `SynthesizeAsync` with the args as pre-phonemized IPA (or a baked-in default) → writes `Saved/InoNeuTtsNanoTest.wav` → logs real-time factor + sample count. | yes |
+
+### Observed numbers on CPU (alderlake variant, warm load)
+
+- Model load: **1.5 s** (backbone ~0.3 s + ORT codec ~1.2 s)
+- LM generation: **~120 tok/s** (Q4 GGUF, CPU)
+- NeuCodec decoder: **~70 ms per second of audio**
+- Full synth of short utterance (~45 chars phonemes, ~650 ref_codes, 2.5 s audio): **~10 s wall-clock** (0.25× real-time; dominant cost is prompt prefill on CPU, linear in ref_codes length)
+
+Throughput scales roughly as: shorter reference voice → less prompt prefill → better real-time factor. Vulkan offload via `Config.NumGpuLayers > 0` is available but untested; the llama.cpp Vulkan backend is registered at module startup on hosts with a working Vulkan driver.
 
 ## Toolchain requirements (Windows host)
 
