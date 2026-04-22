@@ -52,15 +52,43 @@ namespace
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
 
 #if PLATFORM_ANDROID
-        // Android: XNNPACK (ARM-NEON-optimized CPU kernels, measurably
-        // faster than the generic CPU provider on aarch64) + CPU as the
-        // guaranteed fallback. DirectML is D3D12-only, no Android analog.
-        // bForceCpu is a no-op here — Android already skips DML entirely.
-        // Future: WebGPU + NNAPI are in the AAR and could be opt-in.
-        Options.ExecutionProviders = {
-            EInoOnnxProvider::Xnnpack,
-            EInoOnnxProvider::Cpu
-        };
+        // Android: XNNPACK (ARM-NEON-optimized CPU kernels) when allowed,
+        // else CPU-only. DirectML is D3D12-only — no Android analog —
+        // so the Performance.bPreferDirectMl flag is ignored here.
+        //
+        // XNNPACK catch: enabling it requests the NhwcTransformer pass,
+        // which rewrites some ops into the 'com.ms.internal.nhwc'
+        // domain. The Android AAR of ORT 1.24.3 is missing a kernel
+        // registration for `com.ms.internal.nhwc.AveragePool(19)` —
+        // the one the speech_encoder's x-vector block uses — and
+        // session creation fails with
+        //     "Failed to find kernel for com.ms.internal.nhwc.AveragePool(19)
+        //      ... Version mismatch. node_version: 19 kernel start version: 11"
+        // even though the range nominally covers 19. The fallback to
+        // CPU within the same transformed domain trips the same miss.
+        //
+        // Until the upstream kernel-registration gap closes (or we
+        // figure out how to opt a specific session out of the NHWC
+        // transformer without dropping XNNPACK wholesale), we reuse
+        // the same bForceCpu opt-out the Windows DML path uses:
+        //   bForceCpu=true  -> CPU only (no NHWC rewrite, guaranteed to load)
+        //   bForceCpu=false -> XNNPACK + CPU fallback (faster for the
+        //                      sessions where it works)
+        // With the defaults (all four per-session flags on
+        // FInoChatterboxPerformanceOptions set to true), every session
+        // gets CPU-only on Android. Flip specific sessions to false
+        // once you've verified they don't hit the NHWC trap.
+        if (bForceCpu)
+        {
+            Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
+        }
+        else
+        {
+            Options.ExecutionProviders = {
+                EInoOnnxProvider::Xnnpack,
+                EInoOnnxProvider::Cpu
+            };
+        }
 #elif PLATFORM_WINDOWS
         // Windows: DirectML (GPU / NPU via D3D12) if requested AND this
         // session isn't explicitly forced to CPU, else CPU only.
@@ -161,7 +189,10 @@ namespace
             StrategyLabel = TEXT("dml");
         }
 #elif PLATFORM_ANDROID
-        StrategyLabel = TEXT("xnnpack");
+        if (!bForceCpu)
+        {
+            StrategyLabel = TEXT("xnnpack");
+        }
 #endif
 
         UE_LOG(LogInoAgents, Log,

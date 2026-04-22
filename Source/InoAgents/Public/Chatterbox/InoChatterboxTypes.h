@@ -193,12 +193,14 @@ struct FInoChatterboxPerformanceOptions
               meta = (ClampMin = "0", ClampMax = "16"))
     int32 DirectMlAdapterIndex = 0;
 
-    // --- Per-session DirectML opt-out ---
+    // --- Per-session "force CPU" opt-out ---
     //
-    // ALL FOUR sessions default to CPU (b*OnCpu = true) because DirectML
-    // in ORT 1.24.3 has demonstrated kernel-level bugs on every Chatterbox
-    // session we've tested. Empirically:
+    // ALL FOUR sessions default to CPU (b*OnCpu = true) because the
+    // fancier execution provider on each platform (DirectML on Windows,
+    // XNNPACK on Android) has demonstrated kernel-level bugs on at
+    // least one Chatterbox session.
     //
+    // Windows / DirectML (ORT 1.24.3). Empirically:
     //   - speech_encoder         → DML fails with E_INVALIDARG at
     //     MultiHeadAttention (MLOperatorAuthorImpl.cpp:2508)
     //   - embed_tokens           → DML fails with E_INVALIDARG at
@@ -209,53 +211,58 @@ struct FInoChatterboxPerformanceOptions
     //   - conditional_decoder    → DML works correctly
     //
     // Confirmed upstream-side via a minimal Python repro using stock
-    // onnxruntime-directml 1.24.3 (no UE, no renamed DLLs) — fails the
-    // same way. See
-    // Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py for the
-    // reference test case. Microsoft has moved DirectML to "sustained
-    // engineering"; these defects are unlikely to be fixed upstream
-    // soon.
+    // onnxruntime-directml 1.24.3 — see Plugins/InoAgents/Chatterbox/
+    // scripts/repro-dml-encoder.py. Microsoft has moved DirectML to
+    // "sustained engineering"; these defects are unlikely to be fixed
+    // upstream soon.
     //
-    // Safe default is "all CPU." Flip the specific flag(s) you want to
-    // experiment with. The ONLY session currently recommended for DML
-    // is conditional_decoder — sets bConditionalDecoderOnCpu=false and
-    // keeps bPreferDirectMl=true for a low-risk ~15-20% speedup on the
-    // overall synth. Anything else is experimental and may crash or
-    // produce wrong output on your specific hardware / driver combo.
+    // Android / XNNPACK (ORT 1.24.3 AAR). Empirically:
+    //   - speech_encoder         → XNNPACK's NhwcTransformer rewrites
+    //     AveragePool into the 'com.ms.internal.nhwc' domain; the AAR
+    //     is missing a kernel for com.ms.internal.nhwc.AveragePool(19)
+    //     and session creation fails.
+    //   - other sessions         → unverified; likely OK but not yet
+    //     exercised on-device.
     //
-    // Each flag is ignored when bPreferDirectMl is false (everything's
-    // on CPU already) or on non-Windows platforms (DML is D3D12-only).
+    // Safe default is "all CPU" on both platforms. Flip the specific
+    // flag(s) you want to experiment with:
+    //   - Windows: bConditionalDecoderOnCpu=false + bPreferDirectMl=true
+    //     is the verified-safe opt-in, ~15-20% faster overall.
+    //   - Android: flip the non-speech-encoder flags to false one at a
+    //     time and verify on-device. Opt into XNNPACK only where it
+    //     actually loads + produces correct audio.
+    //
+    // When bPreferDirectMl is false on Windows, the per-session flags
+    // are moot (everything's on CPU already). On Android the flags are
+    // always consulted — Android has no "global disable" equivalent.
 
-    /** Force speech_encoder to run on CPU even when bPreferDirectMl is
-     *  true. Default true — known broken on DML: fails with
-     *  E_INVALIDARG at the MultiHeadAttention op on both q4f16 and
-     *  fp16 variants. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
+    /** Force speech_encoder to run on CPU. Default true — known broken
+     *  on both accelerated paths:
+     *    Windows/DML: E_INVALIDARG at MultiHeadAttention
+     *    Android/XNNPACK: missing kernel for NHWC-transformed AveragePool(19) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|Provider overrides")
     bool bSpeechEncoderOnCpu = true;
 
-    /** Force embed_tokens to run on CPU even when bPreferDirectMl is
-     *  true. Default true — known broken on DML: fails with
-     *  E_INVALIDARG at a Slice op on iter 1 of the AR loop (single-
-     *  token path after the full-prompt iter 0). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
+    /** Force embed_tokens to run on CPU. Default true — broken on DML
+     *  (E_INVALIDARG at a Slice op on iter 1 of the AR loop); XNNPACK
+     *  compatibility unverified. Safe to test on Android by flipping
+     *  to false and watching the logs. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|Provider overrides")
     bool bEmbedTokensOnCpu = true;
 
-    /** Force language_model to run on CPU even when bPreferDirectMl is
-     *  true. Default true — known broken on DML: silent numerical
-     *  corruption on fp16 (output is audible noise instead of speech),
-     *  hard crashes on q4f16. This is the hot path, so DML working here
-     *  would be the biggest speedup win — but until Microsoft fixes it,
-     *  CPU is the only correct path. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
+    /** Force language_model to run on CPU. Default true — broken on DML
+     *  (silent numerical corruption on fp16, crash on q4f16); XNNPACK
+     *  compatibility unverified. This is the hot path, so accelerator
+     *  support here would be the biggest speedup win. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|Provider overrides")
     bool bLanguageModelOnCpu = true;
 
-    /** Force conditional_decoder to run on CPU even when bPreferDirectMl
-     *  is true. Default true for safety consistency with the other
-     *  sessions, but the decoder is actually the ONE Chatterbox session
-     *  that runs correctly on DML in testing. Flip this to false (while
-     *  keeping bPreferDirectMl=true) to get a ~15-20% speedup on the
-     *  full synth from the decoder alone. Safe to opt into today. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
+    /** Force conditional_decoder to run on CPU. Default true for safety
+     *  consistency, but on Windows the decoder is the ONE Chatterbox
+     *  session that DML handles correctly — flip this to false (with
+     *  bPreferDirectMl=true) for a ~15-20% speedup. Android/XNNPACK
+     *  compatibility unverified. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|Provider overrides")
     bool bConditionalDecoderOnCpu = true;
 };
 
