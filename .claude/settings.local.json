@@ -69,7 +69,8 @@
       "Bash(curl -sSL -o directml.nupkg \"https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4\")",
       "Bash(mkdir -p directml)",
       "Bash(unzip -q -o directml.nupkg -d directml/)",
-      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/dml-research/directml/bin/x64-win/DirectML.dll)"
+      "Bash('/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe' //imports /c/tmp/dml-research/directml/bin/x64-win/DirectML.dll)",
+      "PowerShell(& \"E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\OnnxRuntime\\\\scripts\\\\setup-onnxruntime.ps1\")"
     ]
   }
 }
