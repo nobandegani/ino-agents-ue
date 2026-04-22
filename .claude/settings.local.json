@@ -110,7 +110,12 @@
       "Bash(powershell.exe -Command 'Get-ChildItem '\\\\''C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Binaries'\\\\'' -Recurse -Filter '\\\\''UnrealBuildTool.*'\\\\'' 2>$null | Select-Object FullName | Format-Table -AutoSize')",
       "Bash(powershell.exe -Command \"& { if \\(Test-Path 'HKLM:\\\\Software\\\\EpicGames\\\\Unreal Engine\\\\5.7'\\) { Get-ItemProperty 'HKLM:\\\\Software\\\\EpicGames\\\\Unreal Engine\\\\5.7' | Select-Object * -ExcludeProperty PS* } }\")",
       "Bash(powershell.exe -Command \"\\(Get-ItemProperty 'HKLM:\\\\SOFTWARE\\\\EpicGames\\\\Unreal Engine\\\\Builds' -ErrorAction SilentlyContinue\\).PSObject.Properties | Where-Object Name -notlike 'PS*' | Select-Object Name, Value\")",
-      "Bash(\"/c/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)"
+      "Bash(\"/c/Inoland/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" InoProjectEditor Win64 Development -Project=\"E:/Projects/InoProject/InoProject.uproject\" -WaitMutex)",
+      "Bash(rm -f \"Saved/Logs/InoProject.log\")",
+      "Bash(\"/c/Inoland/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe\" \"E:/Projects/InoProject/InoProject.uproject\" -run=NullCommandlet -unattended -nopause -nosplash)",
+      "Bash(\"/c/Inoland/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe\" \"E:/Projects/InoProject/InoProject.uproject\" -run=NullCommandlet -ExecCmds=\"Ino.LlamaCpp.BackendInfoTest\" -unattended -nopause -nosplash)",
+      "Bash(powershell.exe -Command '& { $sym = & '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS '\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\llama.dll'\\\\'' 2>$null; if \\($sym\\) { \\($sym | Select-String '\\\\''llama_backend_init|ggml_backend_load_all_from_path|llama_print_system_info'\\\\''\\).Line | Select-Object -First 5 } else { '\\\\''dumpbin not available'\\\\'' } }')",
+      "Bash(powershell.exe -Command '& { $dll='\\\\''E:\\\\Projects\\\\Project\\\\InoProject\\\\Plugins\\\\InoAgents\\\\Binaries\\\\ThirdParty\\\\InoLlamaCpp\\\\Win64\\\\ggml-base.dll'\\\\''; \\(& '\\\\''C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\14.44.35207\\\\bin\\\\Hostx64\\\\x64\\\\dumpbin.exe'\\\\'' /EXPORTS $dll 2>$null | Select-String '\\\\''ggml_backend_load_all|ggml_backend_reg_'\\\\''\\).Line | Select-Object -First 10 }')"
     ]
   }
 }
