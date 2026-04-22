@@ -87,7 +87,9 @@
       "Bash(gh issue *)",
       "Bash(curl -sSL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.3/include/onnxruntime/core/providers/dml/dml_provider_factory.h\" -o \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/dml_provider_factory.h\")",
       "Bash(curl -sSL \"https://raw.githubusercontent.com/microsoft/onnxruntime/rel-1.24.3/onnxruntime/core/providers/dml/dml_provider_factory.cc\" -o \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/dml_provider_factory.cc\")",
-      "Bash(python \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py\" \"E:/Projects/InoProject/Saved/PersistentDownloadDir/InoAgents/Models/Chatterbox/fp16/speech_encoder_fp16.onnx\")"
+      "Bash(python \"E:/Projects/InoProject/Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py\" \"E:/Projects/InoProject/Saved/PersistentDownloadDir/InoAgents/Models/Chatterbox/fp16/speech_encoder_fp16.onnx\")",
+      "Bash(sed 's/.*TEXT\\(\"//')",
+      "Bash(sed 's/\"\\).*//')"
     ]
   }
 }
