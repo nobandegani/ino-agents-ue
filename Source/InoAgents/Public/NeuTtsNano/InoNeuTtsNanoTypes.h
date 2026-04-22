@@ -155,6 +155,34 @@ struct INOAGENTS_API FInoNeuTtsNanoSynthesisOptions
      *  reproducible regression tests. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano")
     int32 Seed = -1;
+
+    /** Streaming chunk size — how many NEW FSQ speech-ids must accumulate
+     *  before the worker fires OnAudioChunk with a partial-waveform
+     *  chunk. Only consulted by SynthesizeStreamAsync (ignored by the
+     *  one-shot SynthesizeAsync path). Tradeoffs:
+     *
+     *    0      = disable streaming (fall back to one-shot semantics;
+     *             OnAudioChunk fires exactly once with the full waveform
+     *             and bIsFinal=true immediately before OnComplete)
+     *    20-25  = low latency — one NeuCodec decoder call every ~0.4-0.5 s
+     *             of audio (NeuCodec FSQ token rate is ~50 Hz), first
+     *             chunk arrives in ~0.4-0.6 s wall-clock on a desktop CPU
+     *    50-75  = moderate — one decoder call per ~1-1.5 s of audio
+     *    100+   = approaching one-shot — only worth it if decoder cost
+     *             dominates wall time
+     *
+     *  Every chunk re-runs the decoder on the FULL prefix of speech-ids
+     *  so far (not just the delta). That means total decoder work
+     *  scales roughly as O(N^2 / StreamChunkTokens) — a sentence that
+     *  produces ~500 FSQ codes with StreamChunkTokens=25 does ~20
+     *  decoder calls at avg length 250, about 10× the CPU work of a
+     *  single one-shot decode. Worth it for conversational UX because
+     *  the first-audio latency is divided by ~(N / StreamChunkTokens),
+     *  but don't pick tiny chunk sizes "to be safe" — they multiply
+     *  total wall-clock cost. 25 is a good default. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Streaming",
+              meta = (ClampMin = "0", ClampMax = "512"))
+    int32 StreamChunkTokens = 25;
 };
 
 /**
@@ -190,16 +218,22 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoNeuTtsNanoModelLoaded,
     FString, ErrorMessage);
 
 /**
- * Fired exactly once when SynthesizeAsync resolves. On success,
- * PcmInt16LE carries raw 24 kHz mono int16 little-endian PCM bytes
- * (directly feedable into UStreamingSoundWave::AppendAudioDataFromRAW
- * via the RuntimeAudioImporter plugin — matches Chatterbox's output
- * contract).
+ * Fired exactly once when SynthesizeAsync (or SynthesizeStreamAsync)
+ * resolves. On success, PcmInt16LE carries raw 24 kHz mono int16
+ * little-endian PCM bytes (directly feedable into
+ * UStreamingSoundWave::AppendAudioDataFromRAW via the RuntimeAudioImporter
+ * plugin — matches Chatterbox's output contract).
+ *
+ * NOTE: no SampleRate param — NeuTTS Nano's output rate is fixed at
+ * 24 kHz by the NeuCodec decoder and cannot be configured at runtime
+ * (it would require retraining the codec). If you need the rate value
+ * (e.g. to construct a USoundWaveProcedural or a WAV header), call
+ * UInoNeuTtsNanoSubsystem::GetOutputSampleRate() — a BlueprintPure
+ * getter that returns 24000.
  */
-DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoSynthesisComplete,
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoSynthesisComplete,
     bool,                   bSuccess,
     const TArray<uint8>&,   PcmInt16LE,
-    int32,                  SampleRate,
     FString,                ErrorMessage);
 // Note: PcmInt16LE is `const TArray<uint8>&`, not TArray<uint8> by value.
 // UE's BP reflection can't pass TArray-by-value through a dynamic delegate —
@@ -218,6 +252,37 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoNeuTtsNanoDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes);
+
+/**
+ * Fired by UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync for each
+ * incremental audio delta produced during synthesis.
+ *
+ *   AudioChunk       — NEW bytes since the last chunk, 24 kHz mono int16
+ *                      PCM little-endian. Append directly to your player's
+ *                      streaming buffer; do NOT re-concatenate anything
+ *                      already delivered by a prior chunk.
+ *   bIsFinal         — true exactly once, on the last chunk. After
+ *                      bIsFinal=true fires, no more chunks will follow
+ *                      for this synthesis request; OnComplete follows
+ *                      shortly after with the full concatenated waveform.
+ *   NumSpeechIds     — running count of FSQ speech-ids the AR loop has
+ *                      produced so far. Useful for progress UI
+ *                      ("generated 180 speech tokens…").
+ *
+ * Fires on the GAME THREAD (marshalled via AsyncTask from the worker).
+ * Handlers can touch UObject state safely.
+ *
+ * AudioChunk is `const TArray<uint8>&` (not by value) because UE's
+ * Blueprint reflection layer cannot pass a TArray by value through a
+ * dynamic delegate — the BindDynamic path fails with "No value will be
+ * returned by reference. Parameter 'AudioChunk'". Same reason
+ * FOnInoNeuTtsNanoSynthesisComplete above uses a const ref; matches
+ * Chatterbox's FOnInoChatterboxAudioChunk shape exactly.
+ */
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoAudioChunk,
+    const TArray<uint8>&, AudioChunk,
+    bool,                 bIsFinal,
+    int32,                NumSpeechIds);
 
 // ============================================================================
 // Free-function helpers

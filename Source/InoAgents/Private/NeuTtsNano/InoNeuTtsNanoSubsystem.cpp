@@ -323,7 +323,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
     {
         UE_LOG(LogInoAgents, Warning,
                TEXT("NeuTtsNano SynthesizeAsync early-failed: %s"), Reason);
-        OnComplete.ExecuteIfBound(false, TArray<uint8>(), 24000, FString(Reason));
+        OnComplete.ExecuteIfBound(false, TArray<uint8>(), FString(Reason));
     };
 
     if (!bModelLoaded)
@@ -362,6 +362,68 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
            Pending.Options.MinP,
            Pending.Options.Temperature,
            Pending.Options.Seed);
+
+    Worker->Enqueue(MoveTemp(Pending));
+}
+
+void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
+    const FString& PhonemesText,
+    FName VoiceName,
+    const FInoNeuTtsNanoSynthesisOptions& Options,
+    const FOnInoNeuTtsNanoAudioChunk& OnAudioChunk,
+    const FOnInoNeuTtsNanoSynthesisComplete& OnComplete)
+{
+    check(IsInGameThread());
+
+    // Same validation shape as SynthesizeAsync — keeps the "exactly one
+    // OnComplete fire per call" contract intact on early-fail paths.
+    // OnAudioChunk is NOT fired on synchronous early-fail (it's the
+    // caller's responsibility to treat OnComplete as the stream terminator).
+    auto FailImmediately = [&](const TCHAR* Reason)
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("NeuTtsNano SynthesizeStreamAsync early-failed: %s"), Reason);
+        OnComplete.ExecuteIfBound(false, TArray<uint8>(), FString(Reason));
+    };
+
+    if (!bModelLoaded)
+    {
+        FailImmediately(TEXT("Model not loaded. Call LoadModelAsync first "
+                             "and wait for its OnLoaded(true) callback."));
+        return;
+    }
+    if (!Worker.IsValid() || !Runner.IsValid() || !VoiceRegistry.IsValid())
+    {
+        FailImmediately(TEXT("Internal state incomplete (worker/runner/voice-registry missing)."));
+        return;
+    }
+    if (PhonemesText.IsEmpty())
+    {
+        FailImmediately(TEXT("PhonemesText is empty. v1 requires pre-phonemized IPA input."));
+        return;
+    }
+
+    FInoNeuTtsNanoPendingSynth Pending;
+    Pending.PhonemesText      = PhonemesText;
+    Pending.VoiceName         = VoiceName.IsNone() ? FName(TEXT("Default")) : VoiceName;
+    Pending.Options           = Options;
+    Pending.OnComplete        = OnComplete;
+    Pending.bStreamingEnabled = true;
+    Pending.OnAudioChunk      = OnAudioChunk;
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano SynthesizeStreamAsync: queued (voice=%s, phonemes=%d chars, "
+                "max_new=%d, top_k=%d, top_p=%.2f, min_p=%.2f, temp=%.2f, seed=%d, "
+                "chunk_tokens=%d)"),
+           *Pending.VoiceName.ToString(),
+           Pending.PhonemesText.Len(),
+           Pending.Options.MaxNewTokens,
+           Pending.Options.TopK,
+           Pending.Options.TopP,
+           Pending.Options.MinP,
+           Pending.Options.Temperature,
+           Pending.Options.Seed,
+           Pending.Options.StreamChunkTokens);
 
     Worker->Enqueue(MoveTemp(Pending));
 }

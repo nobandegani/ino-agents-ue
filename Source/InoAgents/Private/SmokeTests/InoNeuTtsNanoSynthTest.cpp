@@ -104,7 +104,6 @@ void UInoNeuTtsNanoSynthTestObserver::KickOffSynthesis()
 void UInoNeuTtsNanoSynthTestObserver::HandleSynthComplete(
     bool bSuccess,
     const TArray<uint8>& PcmInt16LE,
-    int32 SampleRate,
     FString ErrorMessage)
 {
     const double SynthElapsed = FPlatformTime::Seconds() - SynthStartTime;
@@ -117,6 +116,13 @@ void UInoNeuTtsNanoSynthTestObserver::HandleSynthComplete(
         Finish();
         return;
     }
+
+    // Pull the rate from the subsystem rather than hardcoding 24000 —
+    // keeps the smoke test honest about using the public API (and also
+    // catches the delegate-dropped-SampleRate refactor on a rebuild).
+    const int32 SampleRate = (Subsystem != nullptr)
+        ? Subsystem->GetOutputSampleRate()
+        : 24000;
 
     const int64 ByteCount  = PcmInt16LE.Num();
     const int64 SampleCount = ByteCount / 2;          // int16 = 2 bytes

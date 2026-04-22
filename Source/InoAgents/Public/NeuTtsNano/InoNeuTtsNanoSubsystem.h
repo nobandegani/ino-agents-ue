@@ -134,6 +134,24 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
     EInoNeuTtsNanoBackboneVariant GetLoadedVariant() const { return LoadedVariant; }
 
+    /**
+     * Output sample rate for all NeuTTS Nano synthesis. ALWAYS returns
+     * 24000 — fixed by the NeuCodec decoder's architecture (FSQ rate
+     * 50 Hz × 480 samples/code → 24 kHz) and cannot be configured at
+     * runtime.
+     *
+     * Use this when constructing a USoundWaveProcedural, feeding bytes
+     * into UStreamingSoundWave::AppendAudioDataFromRAW, writing a WAV
+     * header via UInoAudioFunctionLibrary::SaveInt16PcmAsWav, or
+     * anywhere else you'd otherwise hardcode 24000 — routing through
+     * this getter keeps the rate authoritative in one place.
+     *
+     * Blueprint-pure so it's free to call from a widget Tick or a
+     * const-qualified getter.
+     */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
+    int32 GetOutputSampleRate() const { return 24000; }
+
     /** Names of voices registered with the subsystem. In v1 this
      *  contains "Default" (baked-in from NeuTtsNano/Resources/
      *  default_voice.nvoice.json) or is empty if the JSON failed to
@@ -164,6 +182,46 @@ public:
         const FString& PhonemesText,
         FName VoiceName,
         const FInoNeuTtsNanoSynthesisOptions& Options,
+        const FOnInoNeuTtsNanoSynthesisComplete& OnComplete);
+
+    /**
+     * Streaming counterpart of SynthesizeAsync. Fires OnAudioChunk
+     * repeatedly during synthesis with incremental delta waveforms
+     * (24 kHz mono int16 PCM LE bytes), then fires OnComplete exactly
+     * once when the utterance finishes with the full concatenated
+     * waveform (same contract as SynthesizeAsync).
+     *
+     * Event ordering on success:
+     *   OnAudioChunk(delta1, bIsFinal=false, n_ids1)
+     *   OnAudioChunk(delta2, bIsFinal=false, n_ids2)
+     *   ...
+     *   OnAudioChunk(deltaN, bIsFinal=true,  n_idsN)   ← exactly one
+     *   OnComplete(true, full_concatenated, "")
+     *
+     * Event ordering on failure (any stage): zero or more
+     * OnAudioChunk(..., bIsFinal=false, ...) broadcasts, then
+     * OnComplete(false, {}, "error..."). The bIsFinal=true broadcast
+     * is NOT guaranteed on failure — bind handlers to OnComplete for
+     * end-of-stream detection, not to OnAudioChunk's bIsFinal flag.
+     *
+     * Chunk cadence is controlled by Options.StreamChunkTokens (see
+     * FInoNeuTtsNanoSynthesisOptions for the tradeoff discussion).
+     * Passing StreamChunkTokens=0 falls back to one-shot semantics —
+     * exactly one OnAudioChunk fires with the full waveform and
+     * bIsFinal=true immediately before OnComplete.
+     *
+     * Re-running the NeuCodec decoder on a growing prefix of speech-ids
+     * every StreamChunkTokens tokens is extra CPU work (roughly
+     * O(N^2 / StreamChunkTokens) vs O(N) for one-shot). The trade is
+     * first-audio latency, not throughput — tune StreamChunkTokens
+     * against how quickly you want to start hearing audio.
+     */
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano")
+    void SynthesizeStreamAsync(
+        const FString& PhonemesText,
+        FName VoiceName,
+        const FInoNeuTtsNanoSynthesisOptions& Options,
+        const FOnInoNeuTtsNanoAudioChunk& OnAudioChunk,
         const FOnInoNeuTtsNanoSynthesisComplete& OnComplete);
 
     /** Cooperatively abort the currently-synthesising request (if any).

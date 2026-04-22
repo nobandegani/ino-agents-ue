@@ -244,7 +244,6 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
     FOnInoNeuTtsNanoSynthesisComplete OnComplete,
     bool             bSuccess,
     TArray<uint8>    PcmInt16LE,
-    int32            SampleRate,
     FString          ErrorMessage)
 {
     // Dynamic delegates must fire on the game thread. Capture
@@ -256,7 +255,6 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
     AsyncTask(ENamedThreads::GameThread,
         [WeakSelf, OnComplete, bSuccess,
          Pcm = MoveTemp(PcmInt16LE),
-         SampleRate,
          Err = MoveTemp(ErrorMessage)]() mutable
         {
             if (!WeakSelf.IsValid())
@@ -266,7 +264,30 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
                 // are freed as the lambda goes out of scope.
                 return;
             }
-            OnComplete.ExecuteIfBound(bSuccess, MoveTemp(Pcm), SampleRate, Err);
+            OnComplete.ExecuteIfBound(bSuccess, MoveTemp(Pcm), Err);
+        });
+}
+
+void FInoNeuTtsNanoSynthesisWorker::DispatchAudioChunkOnGameThread(
+    FOnInoNeuTtsNanoAudioChunk OnAudioChunk,
+    TArray<uint8>              AudioChunk,
+    bool                       bIsFinal,
+    int32                      NumSpeechIds)
+{
+    // Same pattern as DispatchCompleteOnGameThread — dynamic delegate
+    // invocation must happen on the game thread. Move the audio bytes
+    // into the lambda so we don't pay for a copy.
+    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSelf = WeakSubsystem;
+    AsyncTask(ENamedThreads::GameThread,
+        [WeakSelf, OnAudioChunk,
+         Chunk = MoveTemp(AudioChunk),
+         bIsFinal, NumSpeechIds]() mutable
+        {
+            if (!WeakSelf.IsValid())
+            {
+                return;
+            }
+            OnAudioChunk.ExecuteIfBound(Chunk, bIsFinal, NumSpeechIds);
         });
 }
 
@@ -288,8 +309,13 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
 //   9. Float32 → int16 PCM LE conversion
 //  10. AsyncTask back to game thread to fire OnComplete
 //
-// Every failure path fires OnComplete(false, {}, 24000, "...") exactly
-// once. Happy path fires OnComplete(true, pcm, 24000, "") exactly once.
+// Every failure path fires OnComplete(false, {}, "...") exactly once.
+// Happy path fires OnComplete(true, pcm, "") exactly once.
+//
+// kOutputSampleRate (24000) is used only for diagnostic real-time-factor
+// calculations and for fractional-seconds log lines — it's NOT passed
+// through to the delegate (the caller reads it from
+// UInoNeuTtsNanoSubsystem::GetOutputSampleRate()).
 // ============================================================================
 
 void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pending)
@@ -302,13 +328,13 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         const FString Err(Fmt);
         UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano synth FAILED: %s"), *Err);
         DispatchCompleteOnGameThread(
-            Pending.OnComplete, false, TArray<uint8>(), kOutputSampleRate, Err);
+            Pending.OnComplete, false, TArray<uint8>(), Err);
     };
     auto FailWithFmt = [&](const FString& Err) -> void
     {
         UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano synth FAILED: %s"), *Err);
         DispatchCompleteOnGameThread(
-            Pending.OnComplete, false, TArray<uint8>(), kOutputSampleRate, Err);
+            Pending.OnComplete, false, TArray<uint8>(), Err);
     };
 
     // -----------------------------------------------------------------
@@ -483,6 +509,115 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     };
 
     // -----------------------------------------------------------------
+    // Streaming state
+    //
+    // Populated regardless of bStreamingEnabled, but only consumed in
+    // the streaming branch. The per-iteration regex cost is tiny (the
+    // scan is limited to the newly-appended text via
+    // FRegexMatcher::SetLimits) so we don't bother branching it off in
+    // one-shot mode — the values stay unused.
+    //
+    // FullPcm accumulates every delta chunk dispatched via
+    // OnAudioChunk. OnComplete's final PcmInt16LE is this exact buffer
+    // — see the "OnComplete's full_bytes == concat of emitted chunks"
+    // contract documented on FOnInoNeuTtsNanoAudioChunk. This avoids a
+    // subtle correctness trap: re-running the decoder on growing
+    // prefixes produces slightly different samples near each
+    // intermediate chunk boundary (convolutional-codec right-edge
+    // effects, since the receptive field of the final conv layer
+    // can't see codes that haven't been generated yet), so the concat
+    // of emitted deltas differs from a fresh one-shot decode on the
+    // full prefix. Using concat-of-chunks as OnComplete's payload
+    // makes the two ways a caller might consume the result (chunk-by-
+    // chunk vs. all-at-once) agree byte-for-byte.
+    // -----------------------------------------------------------------
+    static const FRegexPattern SpeechPatternStream(TEXT("<\\|speech_(\\d+)\\|>"));
+
+    TArray<int32> SpeechIds;
+    TArray<uint8> FullPcm;             // concat of dispatched chunk deltas
+    int32 SpeechScanPos        = 0;    // next char to scan in GeneratedText
+    int32 LastEmittedByteCount = 0;    // total PCM bytes dispatched so far
+    int32 LastDecodedCodeCount = 0;    // SpeechIds.Num() at most recent decode
+    int32 ChunksDispatched     = 0;    // diagnostic counter
+
+    // Decode-on-prefix helper. Runs the NeuCodec decoder on the full
+    // current SpeechIds, converts the fresh float32 waveform to int16
+    // PCM LE bytes, slices out the delta since the last emission, and
+    // marshals it to the game thread via OnAudioChunk. Returns false
+    // on failure (in which case FailWith/FailWithFmt has already fired
+    // OnComplete(false,…), and the caller should `return;`).
+    //
+    // Callers: (a) AR loop when SpeechIds grows past chunk threshold;
+    // (b) end-of-loop streaming branch to emit the final chunk.
+    auto RunIntermediateDecodeEmit = [&](bool bIsFinal) -> bool
+    {
+        FInoOnnxTensor CodesTensor = FInoOnnxTensor::CreateFromBufferCopy<int32>(
+            { 1, 1, (int64)SpeechIds.Num() },
+            SpeechIds);
+        if (!CodesTensor.IsValid())
+        {
+            FreeSampler();
+            FailWith(TEXT("Stream: failed to allocate codec input tensor."));
+            return false;
+        }
+
+        FInoOnnxSession* LocalSession = Runner->GetCodecSession();
+        if (LocalSession == nullptr)
+        {
+            FreeSampler();
+            FailWith(TEXT("Stream: codec session is null."));
+            return false;
+        }
+
+        TArray<FInoOnnxTensor> Ins;
+        Ins.Add(MoveTemp(CodesTensor));
+        TArray<FInoOnnxTensor> Outs;
+        FString OrtErr;
+        if (!LocalSession->Run(Ins, Outs, &OrtErr))
+        {
+            FreeSampler();
+            FailWithFmt(FString::Printf(
+                TEXT("Stream: NeuCodec decoder Run failed (codes=%d): %s"),
+                SpeechIds.Num(), *OrtErr));
+            return false;
+        }
+        if (Outs.Num() == 0 || Outs[0].GetDtype() != EInoOnnxDtype::Float32)
+        {
+            FreeSampler();
+            FailWith(TEXT("Stream: decoder returned no/invalid output."));
+            return false;
+        }
+        const float* WavData = Outs[0].GetData<float>();
+        const int64  WavNum  = Outs[0].GetElementCount();
+        if (WavData == nullptr || WavNum <= 0)
+        {
+            FreeSampler();
+            FailWith(TEXT("Stream: decoder output tensor is empty."));
+            return false;
+        }
+
+        TArray<uint8> AllBytes = Float32ToInt16PcmLE(WavData, WavNum);
+        TArray<uint8> Delta;
+        if (AllBytes.Num() > LastEmittedByteCount)
+        {
+            const int32 DeltaLen = AllBytes.Num() - LastEmittedByteCount;
+            Delta.Append(AllBytes.GetData() + LastEmittedByteCount, DeltaLen);
+        }
+
+        LastEmittedByteCount = AllBytes.Num();
+        LastDecodedCodeCount = SpeechIds.Num();
+        ++ChunksDispatched;
+        FullPcm.Append(Delta);
+
+        DispatchAudioChunkOnGameThread(
+            Pending.OnAudioChunk,
+            MoveTemp(Delta),
+            bIsFinal,
+            SpeechIds.Num());
+        return true;
+    };
+
+    // -----------------------------------------------------------------
     // 4. AR loop — sample → detokenize → feed back
     // -----------------------------------------------------------------
     const int32 StopTokenId = Runner->GetStopTokenId();
@@ -548,6 +683,37 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
 
         ++TokensGenerated;
 
+        // Streaming: scan the newly-appended portion of GeneratedText
+        // for <|speech_N|> matches, then emit an intermediate chunk if
+        // we've accumulated enough new FSQ codes since the last decode.
+        //
+        // Constructing a fresh FRegexMatcher each iteration is cheap —
+        // SetLimits constrains the match region to [SpeechScanPos,
+        // GeneratedText.Len()) so the scanner only processes the newly
+        // appended characters. Amortised O(N) across the loop.
+        if (Pending.bStreamingEnabled)
+        {
+            FRegexMatcher SM(SpeechPatternStream, GeneratedText);
+            SM.SetLimits(SpeechScanPos, GeneratedText.Len());
+            while (SM.FindNext())
+            {
+                const FString NumStr = SM.GetCaptureGroup(1);
+                SpeechIds.Add(FCString::Atoi(*NumStr));
+                SpeechScanPos = SM.GetMatchEnding();
+            }
+
+            const int32 ChunkSize = Pending.Options.StreamChunkTokens;
+            if (ChunkSize > 0
+                && SpeechIds.Num() - LastDecodedCodeCount >= ChunkSize)
+            {
+                if (!RunIntermediateDecodeEmit(/*bIsFinal=*/ false))
+                {
+                    // Error already dispatched; abandon synthesis.
+                    return;
+                }
+            }
+        }
+
         // Feed back into context — one-token batch using a stack
         // variable for the token storage. llama_batch_get_one takes a
         // pointer; the batch struct holds a reference to it, which is
@@ -576,9 +742,71 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
            bHitStop ? TEXT("yes") : TEXT("MaxNewTokens"));
 
     // -----------------------------------------------------------------
-    // 5. Regex-parse speech-token ids from the LM output text.
+    // 5a. Streaming branch — emit the final chunk (bIsFinal=true) and
+    //     dispatch OnComplete with the concatenated PCM.
+    //
+    // SpeechIds is already populated (incremental regex ran inside the
+    // AR loop). If the AR loop produced more codes than the most
+    // recent intermediate decode covered, do one last decode to pick
+    // up the tail; otherwise emit an empty terminator so the handler's
+    // bIsFinal=true contract is upheld.
     // -----------------------------------------------------------------
-    TArray<int32> SpeechIds = ParseSpeechTokens(GeneratedText);
+    if (Pending.bStreamingEnabled)
+    {
+        if (SpeechIds.Num() == 0)
+        {
+            FailWithFmt(FString::Printf(
+                TEXT("Stream: LM generated %d tokens but zero matched <|speech_N|>. "
+                     "Fine-tuned vocab drift or wrong model? First 200 chars: %s"),
+                TokensGenerated, *GeneratedText.Left(200)));
+            return;
+        }
+
+        if (SpeechIds.Num() > LastDecodedCodeCount)
+        {
+            if (!RunIntermediateDecodeEmit(/*bIsFinal=*/ true))
+            {
+                return;   // Error already dispatched.
+            }
+        }
+        else
+        {
+            // No undecoded codes — the last intermediate emission
+            // already covered everything. Fire a synthetic empty
+            // terminator so the consumer sees bIsFinal=true exactly
+            // once (per the delegate's documented contract).
+            DispatchAudioChunkOnGameThread(
+                Pending.OnAudioChunk,
+                TArray<uint8>(),
+                /*bIsFinal=*/ true,
+                SpeechIds.Num());
+            ++ChunksDispatched;
+        }
+
+        const double TotalMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
+        const int64  NumSamples = (int64)(FullPcm.Num() / (int32)sizeof(int16));
+        const double AudioSec = (double)NumSamples / (double)kOutputSampleRate;
+        const double RtFactor = AudioSec * 1000.0 / FMath::Max(1.0, TotalMs);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("NeuTtsNano stream: DONE — %d chunks, %lld samples "
+                    "(%.2f s audio @ %d Hz), total %.0f ms (%.2fx real-time)."),
+               ChunksDispatched, NumSamples, AudioSec, kOutputSampleRate,
+               TotalMs, RtFactor);
+
+        DispatchCompleteOnGameThread(
+            Pending.OnComplete,
+            /*bSuccess=*/ true,
+            MoveTemp(FullPcm),
+            /*ErrorMessage=*/ FString());
+        return;
+    }
+
+    // -----------------------------------------------------------------
+    // 5b. One-shot branch — regex-parse speech-token ids from the LM
+    //     output text (streaming populates SpeechIds incrementally, but
+    //     in one-shot mode it's still empty here).
+    // -----------------------------------------------------------------
+    SpeechIds = ParseSpeechTokens(GeneratedText);
     if (SpeechIds.Num() == 0)
     {
         FailWithFmt(FString::Printf(
@@ -671,6 +899,5 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         Pending.OnComplete,
         /*bSuccess=*/true,
         MoveTemp(Pcm),
-        kOutputSampleRate,
         /*ErrorMessage=*/FString());
 }

@@ -57,7 +57,6 @@ public:
     void HandleSynthComplete(
         bool bSuccess,
         const TArray<uint8>& PcmInt16LE,
-        int32 SampleRate,
         FString ErrorMessage);
 
     void KickOffSynthesis();

@@ -19,9 +19,15 @@ class FEvent;
 
 /**
  * One queued synthesis request. Plain-struct, passed by value through
- * the Spsc queue. The dynamic delegate inside is a UObject-aware handle
- * — it's safe to copy into a TQueue entry and later invoke from the
- * game thread (via AsyncTask marshaling in the worker).
+ * the Spsc queue. The dynamic delegates inside are UObject-aware
+ * handles — it's safe to copy them into a TQueue entry and later
+ * invoke from the game thread (via AsyncTask marshaling in the worker).
+ *
+ * One-shot vs streaming: a pending synth is "streaming" iff
+ * bStreamingEnabled is true. One-shot path leaves OnAudioChunk unbound
+ * and Options.StreamChunkTokens ignored; streaming path fires
+ * OnAudioChunk repeatedly during the AR loop with delta waveforms and
+ * fires OnComplete at the end with the full concatenated audio.
  */
 struct FInoNeuTtsNanoPendingSynth
 {
@@ -29,6 +35,18 @@ struct FInoNeuTtsNanoPendingSynth
     FName   VoiceName;
     FInoNeuTtsNanoSynthesisOptions     Options;
     FOnInoNeuTtsNanoSynthesisComplete  OnComplete;     // dynamic — invoke on GT
+
+    /** True when the subsystem's SynthesizeStreamAsync entry point was
+     *  used. When false, OnAudioChunk is left default-constructed and
+     *  never fired. When true, OnAudioChunk fires on the game thread
+     *  for each incremental audio delta; cadence is controlled by
+     *  Options.StreamChunkTokens. */
+    bool bStreamingEnabled = false;
+
+    /** Dynamic delegate for per-chunk audio deltas. Only consulted
+     *  when bStreamingEnabled==true. FString / TArray params by const
+     *  ref per UE BindDynamic rules (same as OnComplete). */
+    FOnInoNeuTtsNanoAudioChunk OnAudioChunk;
 };
 
 /**
@@ -103,11 +121,22 @@ private:
     void ProcessSynth(FInoNeuTtsNanoPendingSynth& Pending);
 
     // Game-thread marshal — dispatches OnComplete via AsyncTask so the
-    // dynamic delegate fires on the correct thread.
+    // dynamic delegate fires on the correct thread. No SampleRate
+    // param: NeuTTS Nano's output rate is fixed at 24 kHz (see
+    // UInoNeuTtsNanoSubsystem::GetOutputSampleRate).
     void DispatchCompleteOnGameThread(
         FOnInoNeuTtsNanoSynthesisComplete OnComplete,
         bool             bSuccess,
         TArray<uint8>    PcmInt16LE,
-        int32            SampleRate,
         FString          ErrorMessage);
+
+    // Game-thread marshal for streaming delta broadcasts. Same pattern
+    // as DispatchCompleteOnGameThread — copy the delegate handle +
+    // move the bytes into the lambda, verify the subsystem is still
+    // alive at invocation time.
+    void DispatchAudioChunkOnGameThread(
+        FOnInoNeuTtsNanoAudioChunk OnAudioChunk,
+        TArray<uint8>              AudioChunk,
+        bool                       bIsFinal,
+        int32                      NumSpeechIds);
 };
