@@ -152,4 +152,16 @@ struct FInoOnnxSessionOptions
     TMap<FString, FString> SessionConfig;
     FString OptimizedModelOutputPath;
     bool bEnableProfiling = false;
+
+    /**
+     * DirectML adapter index (IDXGIFactory::EnumAdapters order). Only used
+     * when EInoOnnxProvider::DirectMl is in ExecutionProviders. 0 = default
+     * adapter, which is typically the primary display GPU. On a system with
+     * an integrated GPU + discrete GPU, adapter 0 is often the integrated
+     * one (power-aware systems) or the discrete one (performance-aware).
+     * Check dxdiag if you need to pick deliberately.
+     *
+     * Negative values are invalid per ORT's DML EP. Ignored on non-Windows.
+     */
+    int32 DirectMlAdapterIndex = 0;
 };

@@ -10,6 +10,20 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 
+#if PLATFORM_WINDOWS
+    // Needed for the OrtDmlApi vtable + OrtSessionOptionsAppendExecutionProvider_DML.
+    // Header transitively #includes <d3d12.h> and <DirectML.h>, both present
+    // in Windows SDK 22621+ on any machine that can build UE 5.7. No extra
+    // third-party header dependency.
+    //
+    // UE's own <Windows.h> inclusion (via CoreMinimal) #defines OPTIONAL
+    // which dml_provider_factory.h's "#undef OPTIONAL" line handles. Order
+    // matters: include it AFTER core UE headers so the undef is effective.
+    #include "Windows/AllowWindowsPlatformTypes.h"
+    #include "dml_provider_factory.h"
+    #include "Windows/HideWindowsPlatformTypes.h"
+#endif
+
 namespace
 {
     using namespace InoAgents::Onnx;
@@ -147,6 +161,46 @@ namespace
 #endif
         }
 
+        // Apply DirectML-mandated session options BEFORE the provider
+        // registration loop. Microsoft's DML EP docs require these two
+        // settings whenever DML is the effective provider:
+        //
+        //   1. DisableMemPattern — DML uses D3D12 resource binding that
+        //      conflicts with ORT's memory-pattern optimization (which
+        //      assumes contiguous host allocations ORT can reuse across
+        //      inferences). Without this, DML sessions crash or produce
+        //      wrong output on the second inference.
+        //
+        //   2. ExecutionMode::ORT_SEQUENTIAL — DML currently doesn't
+        //      support parallel multi-op graph execution. ORT_PARALLEL
+        //      (the default in some builds) would schedule DML kernels
+        //      across multiple queues which the EP doesn't handle.
+        //
+        // Applied unconditionally if DML is in the provider list, even
+        // before we know whether the DML registration will succeed.
+        // Rationale: applying them always is a minor CPU perf cost
+        // (mem-pattern off) but required for correctness when DML IS
+        // active. Applying them conditionally would require a two-pass
+        // register-then-configure flow, and these settings are cheap
+        // enough on CPU that the simpler single-pass approach wins.
+        const bool bDmlRequested =
+            Options.ExecutionProviders.Contains(EInoOnnxProvider::DirectMl);
+        if (bDmlRequested)
+        {
+            if (!CheckStatus(Api->DisableMemPattern(Opts),
+                             TEXT("DisableMemPattern (required for DML)"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+            if (!CheckStatus(Api->SetSessionExecutionMode(Opts, ORT_SEQUENTIAL),
+                             TEXT("SetSessionExecutionMode=ORT_SEQUENTIAL (required for DML)"), OutError))
+            {
+                Api->ReleaseSessionOptions(Opts);
+                return nullptr;
+            }
+        }
+
         // Register execution providers in priority order. Each provider
         // that fails to register is skipped (logged as warning); we
         // keep going so the caller still gets a functional session as
@@ -191,9 +245,52 @@ namespace
                     break;
 
                 case EInoOnnxProvider::DirectMl:
-                    RegStatus = Api->SessionOptionsAppendExecutionProvider(
-                        Opts, "DmlExecutionProvider", nullptr, nullptr, 0);
+#if PLATFORM_WINDOWS
+                    // DML uses a dedicated OrtDmlApi vtable, NOT the generic
+                    // string-based SessionOptionsAppendExecutionProvider path
+                    // (which Microsoft does not document for "DmlExecutionProvider"
+                    // and which silently produces a CPU-only session in
+                    // practice). Fetch the vtable via GetExecutionProviderApi
+                    // and call SessionOptionsAppendExecutionProvider_DML
+                    // with the caller's adapter index.
+                    {
+                        const OrtDmlApi* DmlApi = nullptr;
+                        OrtStatus* VTableStatus = Api->GetExecutionProviderApi(
+                            "DML", ORT_API_VERSION,
+                            reinterpret_cast<const void**>(&DmlApi));
+
+                        if (VTableStatus != nullptr)
+                        {
+                            // GetExecutionProviderApi returning an error means
+                            // the DML EP isn't compiled into this ORT build.
+                            // Log + skip; the session still builds with
+                            // remaining providers (CPU fallback).
+                            const char* ErrMsg = Api->GetErrorMessage(VTableStatus);
+                            UE_LOG(LogInoAgents, Warning,
+                                   TEXT("InoOnnx: GetExecutionProviderApi(\"DML\") failed: %s. ")
+                                   TEXT("The loaded ONNX Runtime does not include the DML EP. ")
+                                   TEXT("Re-run Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
+                                   TEXT("to stage the DirectML-flavored ORT build."),
+                                   UTF8_TO_TCHAR(ErrMsg));
+                            Api->ReleaseStatus(VTableStatus);
+                            continue;
+                        }
+                        if (DmlApi == nullptr)
+                        {
+                            UE_LOG(LogInoAgents, Warning,
+                                   TEXT("InoOnnx: GetExecutionProviderApi(\"DML\") returned null vtable. Skipping DML."));
+                            continue;
+                        }
+
+                        RegStatus = DmlApi->SessionOptionsAppendExecutionProvider_DML(
+                            Opts, Options.DirectMlAdapterIndex);
+                    }
                     break;
+#else
+                    UE_LOG(LogInoAgents, Warning,
+                           TEXT("InoOnnx: DirectML is Windows-only; skipping on this platform."));
+                    continue;
+#endif
 
                 case EInoOnnxProvider::Cuda:
                     RegStatus = Api->SessionOptionsAppendExecutionProvider(
