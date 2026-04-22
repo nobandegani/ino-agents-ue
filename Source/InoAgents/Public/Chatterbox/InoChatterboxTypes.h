@@ -130,6 +130,54 @@ struct FInoChatterboxPerformanceOptions
      *  slowdown. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance")
     bool bEnableOrtProfiling = false;
+
+    // --- DirectML (Windows GPU/NPU acceleration) ---
+
+    /** Use DirectML Execution Provider for GPU / NPU acceleration on
+     *  Windows. Ignored on non-Windows platforms (DirectML is D3D12-
+     *  based, no equivalent on Android / Linux / macOS).
+     *
+     *  When true, Chatterbox registers providers in priority order:
+     *    { DirectMl, Cpu }
+     *  Each op runs on DirectML (GPU or NPU — driver picks the
+     *  fastest D3D12 device) when possible, falling back to CPU for
+     *  the handful of ops DML doesn't cover.
+     *
+     *  When false, Windows uses the same CPU-only path Chatterbox
+     *  has used historically. Useful for benchmarking, for debugging
+     *  suspected DML-specific issues, or for shipping on very old
+     *  Windows GPUs that predate D3D12.
+     *
+     *  Typical speedups vs. CPU-only on modern hardware:
+     *    - Intel Arc iGPU (Xe-LPG on Core Ultra 200):  2-4×
+     *    - NVIDIA RTX 3060+:                           5-10×
+     *    - AMD RX 6000+:                               4-6×
+     *    - Intel AI Boost NPU (24H2+ drivers):         variable,
+     *      transparent routing; some ops fall back to iGPU/CPU.
+     *
+     *  Default true — if DirectML registration fails at runtime (no
+     *  D3D12 device, corrupt DML install), ORT silently falls back
+     *  to CPU. So leaving this on can only be equal to or faster
+     *  than CPU-only, never slower (outside of DML's first-run
+     *  shader-compile warmup hitch, which is one-time per session). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance")
+    bool bPreferDirectMl = true;
+
+    /** Windows-only: D3D12 adapter index for DirectML. 0 = default
+     *  adapter (typically primary display GPU — integrated on laptops,
+     *  discrete on desktops with dGPU). Values match
+     *  IDXGIFactory::EnumAdapters order (check with dxdiag to pick
+     *  deliberately).
+     *
+     *  Leave at 0 for most cases. Override only if you specifically
+     *  want to target a non-default adapter (e.g. secondary dGPU,
+     *  external Thunderbolt GPU, or an NPU that enumerates at a
+     *  higher index on certain Windows 11 24H2+ driver builds).
+     *
+     *  Ignored if bPreferDirectMl is false or on non-Windows. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance",
+              meta = (ClampMin = "0", ClampMax = "16"))
+    int32 DirectMlAdapterIndex = 0;
 };
 
 // ============================================================================

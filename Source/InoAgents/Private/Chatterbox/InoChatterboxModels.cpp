@@ -42,11 +42,35 @@ namespace
         Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
 
 #if PLATFORM_ANDROID
+        // Android: XNNPACK (ARM-NEON-optimized CPU kernels, measurably
+        // faster than the generic CPU provider on aarch64) + CPU as the
+        // guaranteed fallback. DirectML is D3D12-only, no Android analog.
+        // Future: WebGPU + NNAPI are in the AAR and could be opt-in.
         Options.ExecutionProviders = {
             EInoOnnxProvider::Xnnpack,
             EInoOnnxProvider::Cpu
         };
+#elif PLATFORM_WINDOWS
+        // Windows: DirectML (GPU / NPU via D3D12) if requested, else CPU.
+        // Fall-through to CPU is automatic — if DML registration fails
+        // (no D3D12 device, missing DirectML.dll, etc.) ORT silently
+        // uses CPU and the session still works.
+        if (Performance.bPreferDirectMl)
+        {
+            Options.ExecutionProviders = {
+                EInoOnnxProvider::DirectMl,
+                EInoOnnxProvider::Cpu
+            };
+            Options.DirectMlAdapterIndex = Performance.DirectMlAdapterIndex;
+        }
+        else
+        {
+            Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
+        }
 #else
+        // Linux / macOS / iOS: CPU only — we haven't staged ORT for
+        // those platforms. Anything running on this branch would need
+        // a corresponding setup-script and Build.cs addition first.
         Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
 #endif
 
@@ -145,11 +169,13 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s)..."),
+           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s, dml=%s, adapter=%d)..."),
            *BaseDir, *Variant,
            Performance.IntraOpThreadCount,
            Performance.InterOpThreadCount,
-           Performance.bEnableOrtProfiling ? TEXT("yes") : TEXT("no"));
+           Performance.bEnableOrtProfiling ? TEXT("yes") : TEXT("no"),
+           Performance.bPreferDirectMl ? TEXT("yes") : TEXT("no"),
+           Performance.DirectMlAdapterIndex);
 
     TUniquePtr<FInoChatterboxModels> Bundle(new FInoChatterboxModels());
     Bundle->Variant = Variant;
