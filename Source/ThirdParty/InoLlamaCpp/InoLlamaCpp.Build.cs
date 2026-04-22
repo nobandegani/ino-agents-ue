@@ -103,10 +103,22 @@ public class InoLlamaCpp : ModuleRules
             }
 
             // CPU microarchitecture variants. llama.cpp's runtime backend
-            // picker selects the optimal one per-CPU at model-load time.
-            // Enumerate the staged dir so we don't have to hardcode all 14
-            // tier names (haswell, sandybridge, icelake, alderlake, etc.) —
-            // the exact set may shift between upstream releases.
+            // picker selects the optimal one per-CPU at model-load time —
+            // only ONE variant actually gets loaded into the process; the
+            // other 13 remain on disk. Enumerate the staged dir so we
+            // don't have to hardcode all 14 tier names (haswell,
+            // sandybridge, icelake, alderlake, etc.) — the exact set may
+            // shift between upstream releases.
+            //
+            // Staging type MUST be StagedFileType.SystemNonUFS here (not
+            // the default NonUFS). Reason: the default causes Live Coding
+            // to scan every .dll in RuntimeDependencies as a potential
+            // hot-patch target, which produces 13 "Cannot enable module
+            // X because it is not loaded by this process" error lines on
+            // every Live Coding compile — one per unused variant. Marking
+            // them SystemNonUFS tells UBT they're system-ish files that
+            // LiveCoding should skip, while still getting them staged
+            // into packaged builds. Harmless but noisy otherwise.
             if (Directory.Exists(Win64BinDirAbs))
             {
                 string[] cpuVariants = Directory.GetFiles(
@@ -114,7 +126,8 @@ public class InoLlamaCpp : ModuleRules
                 foreach (string path in cpuVariants)
                 {
                     RuntimeDependencies.Add(
-                        Win64BinDirRel + "/" + Path.GetFileName(path));
+                        Win64BinDirRel + "/" + Path.GetFileName(path),
+                        StagedFileType.SystemNonUFS);
                 }
             }
         }
@@ -150,14 +163,18 @@ public class InoLlamaCpp : ModuleRules
                 }
             }
 
-            // CPU variants (ARM tier — armv8.0/8.2/8.6/9.0/9.2).
+            // CPU variants (ARM tier — armv8.0/8.2/8.6/9.0/9.2). Only one
+            // gets loaded at runtime; mark the rest as SystemNonUFS for
+            // parity with the Win64 branch (see rationale above). Live
+            // Coding on Android is uncommon but the classification is the
+            // correct one for system-ish redistributables either way.
             if (Directory.Exists(Arm64BinDirAbs))
             {
                 string[] cpuVariants = Directory.GetFiles(
                     Arm64BinDirAbs, "libggml-cpu-*.so");
                 foreach (string path in cpuVariants)
                 {
-                    RuntimeDependencies.Add(path);
+                    RuntimeDependencies.Add(path, StagedFileType.SystemNonUFS);
                 }
             }
 
