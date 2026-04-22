@@ -78,6 +78,190 @@ struct INOAGENTS_API FInoNeuTtsNanoModelEntry
 };
 
 /**
+ * Advanced tuning knobs for NeuTTS Nano load. Covers BOTH runtimes the
+ * subsystem consumes:
+ *
+ *   - the llama.cpp backbone (GGUF LLM that emits FSQ speech tokens),
+ *   - the NeuCodec ONNX decoder (FSQ ids → 24 kHz waveform).
+ *
+ * Default-constructed gives a safe, portable configuration:
+ *   - CPU-only on both runtimes on Windows (DirectML opt-in to avoid
+ *     surprise driver-bug exposure on unknown GPUs)
+ *   - XNNPACK on Android decoder (matches the hardcoded pre-refactor
+ *     default)
+ *   - llama.cpp auto-threading (reasonable for most CPUs, occasionally
+ *     over-subscribes hybrid cores — set LlmThreadCount to P-core
+ *     count for consistent throughput)
+ *
+ * None of these fields have to be touched to get a working load; they
+ * exist so you can opt into accelerators and pin thread pools when
+ * benchmarking shows the defaults leave performance on the table.
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoNeuTtsNanoPerformanceOptions
+{
+    GENERATED_BODY()
+
+    // ========================================================================
+    // llama.cpp backbone (stage 1: text prompt → FSQ speech tokens)
+    // ========================================================================
+
+    /** Threads for token-generation phase of the AR loop (passed to
+     *  llama_context_params::n_threads). 0 = let llama.cpp auto-pick
+     *  (usually one per logical core — can over-subscribe hybrid CPUs
+     *  like Arrow Lake / Raptor Lake where E-cores set the pace of the
+     *  slowest thread).
+     *
+     *  Good starting points on CPU-only inference:
+     *    0   = auto (works on laptops / unknown hardware)
+     *    4   = older laptops, thin-and-light configs
+     *    8   = most modern Intel / AMD desktops
+     *    P-core count of your hybrid CPU for best throughput.
+     *
+     *  Ignored when NumGpuLayers covers every transformer block (all
+     *  generation work lives on the GPU; CPU only handles dispatch). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|LLM",
+              meta = (ClampMin = "0", ClampMax = "128"))
+    int32 LlmThreadCount = 0;
+
+    /** Threads for the prompt-processing batch decode (passed to
+     *  llama_context_params::n_threads_batch). 0 = inherit from the
+     *  CtxParams default (typically same as n_threads).
+     *
+     *  Prompt prefill parallelises across all prompt tokens at once, so
+     *  it can saturate more cores than per-token generation. If your
+     *  desktop has 16+ cores but LlmThreadCount is pinned low to avoid
+     *  per-token overhead, raising this separately can cut prefill
+     *  latency in half. For NeuTTS prompts (typically a few hundred
+     *  tokens including the reference-voice FSQ codes) the win is in
+     *  the sub-second range but still worthwhile. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|LLM",
+              meta = (ClampMin = "0", ClampMax = "128"))
+    int32 LlmBatchThreadCount = 0;
+
+    /** Flash-attention kernel policy for the attention layer.
+     *    true  = LLAMA_FLASH_ATTN_TYPE_AUTO (llama.cpp decides per-
+     *            backend whether the current device has a usable
+     *            flash-attn kernel — safe default).
+     *    false = LLAMA_FLASH_ATTN_TYPE_DISABLED (force the standard
+     *            attention path — useful only when diagnosing
+     *            suspected flash-attn numerical issues).
+     *
+     *  For NeuTTS's short contexts (a few hundred tokens) the perf win
+     *  is small, but memory footprint shrinks noticeably, which helps
+     *  on memory-pressured Android devices. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|LLM")
+    bool bFlashAttention = true;
+
+    /** Memory-map the GGUF instead of reading it into heap (passed to
+     *  llama_model_params::use_mmap). Almost always leave on — mmap
+     *  gives near-zero load time and shared-COW page caching. Turn off
+     *  only for platforms where mmap misbehaves (rare) or for
+     *  debugging a file-IO issue. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|LLM")
+    bool bUseMmap = true;
+
+    /** Lock model pages in RAM (passed to llama_model_params::use_mlock).
+     *  Off by default. Turn on if you're seeing paging hiccups during
+     *  inference on a low-RAM system — locks the ~195 MB GGUF into
+     *  physical memory so other processes can't swap it out. May fail
+     *  silently on platforms without mlock privileges (Android without
+     *  root, sandboxed iOS). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|LLM")
+    bool bUseMlock = false;
+
+    // ========================================================================
+    // NeuCodec ONNX decoder (stage 2: FSQ speech tokens → 24 kHz audio)
+    // ========================================================================
+
+    /** ORT intra-op threads (parallelism INSIDE one op — matmul, conv
+     *  SIMD, etc.) for the decoder session. 0 = ORT default (typically
+     *  one per physical core). Same hybrid-CPU caveat as LlmThreadCount:
+     *  pin to P-core count for consistent throughput on Arrow Lake /
+     *  Raptor Lake. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Decoder",
+              meta = (ClampMin = "0", ClampMax = "128"))
+    int32 DecoderIntraOpThreadCount = 0;
+
+    /** ORT inter-op threads (parallelism BETWEEN different ops in the
+     *  same inference). 0 = ORT default, 1 = fully sequential. The
+     *  NeuCodec decoder is a mostly-sequential graph; 1 is usually
+     *  optimal and adding threads just adds scheduling noise. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Decoder",
+              meta = (ClampMin = "0", ClampMax = "16"))
+    int32 DecoderInterOpThreadCount = 1;
+
+    // ---- Windows: DirectML ----
+
+    /** Use DirectML for the NeuCodec decoder on Windows. Registers
+     *  providers [DirectMl, Cpu] so DML takes any op it has a kernel
+     *  for, CPU picks up the rest. Ignored on non-Windows.
+     *
+     *  Typical speedups vs. CPU-only on modern hardware:
+     *    - Intel Arc iGPU (Xe-LPG on Core Ultra 200):  2-4×
+     *    - NVIDIA RTX 3060+:                           5-10×
+     *    - AMD RX 6000+:                               4-6×
+     *
+     *  The NeuCodec decoder is a straightforward 1D-conv pipeline, the
+     *  same structural class that DML handles correctly on Chatterbox's
+     *  conditional_decoder. First-run has a shader-compile hitch (one
+     *  time per session); subsequent runs are fully accelerated.
+     *
+     *  Default false — opt in after verifying on your target GPU /
+     *  adapter combination. DirectML registration silently falls back
+     *  to CPU if the adapter isn't D3D12-capable, so flipping this on
+     *  can't make things worse; it just may or may not make them
+     *  faster depending on the hardware. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Decoder|DirectML")
+    bool bPreferDirectMl = false;
+
+    /** Windows-only: D3D12 adapter index for DirectML, matching
+     *  IDXGIFactory::EnumAdapters order. 0 = default adapter
+     *  (primary display GPU — integrated on laptops, discrete on
+     *  typical desktops with a dGPU).
+     *
+     *  Use the Ino.Onnx.ListDmlAdaptersTest console command to
+     *  enumerate adapters on the current machine before picking.
+     *  Ignored when bPreferDirectMl is false or on non-Windows. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Decoder|DirectML",
+              meta = (ClampMin = "0", ClampMax = "16"))
+    int32 DirectMlAdapterIndex = 0;
+
+    // ---- Android: XNNPACK ----
+
+    /** Use XNNPACK for the NeuCodec decoder on Android. Registers
+     *  providers [Xnnpack, Cpu] — XNNPACK takes the ARM-NEON-friendly
+     *  ops (conv, matmul, gemm), CPU picks up the rest.
+     *
+     *  XNNPACK is purpose-built for ARM mobile CPUs and is usually a
+     *  net win on the NeuCodec decoder. Safe default; flip to false
+     *  only if benchmarks on your target device show CPU alone is
+     *  actually faster. Ignored on non-Android platforms. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Decoder|Android")
+    bool bUseXnnpack = true;
+
+    // ---- Diagnostics (off in production) ----
+
+    /** Write ORT's per-op profiler output (onnxruntime_profile_*.json
+     *  next to the executable) for the decoder session. ~5-10 %
+     *  runtime overhead — off by default. Load the output in
+     *  chrome://tracing or Perfetto to see exactly which op dominates
+     *  a specific decode call. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Diagnostics")
+    bool bEnableOrtProfiling = false;
+
+    /** Raise ORT's log severity to VERBOSE (0) for the decoder session.
+     *  Off by default (ORT default is WARNING = 2). Useful when
+     *  diagnosing DML kernel-support fallbacks, provider-dispatch
+     *  decisions, or graph-transformer rewrites — ORT's verbose log
+     *  tells you which DML_OPERATOR_*_DESC validation failed instead
+     *  of a generic E_INVALIDARG line. ~5 % overhead plus a very chatty
+     *  output log; turn on only for specific debug runs. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Performance|Diagnostics")
+    bool bEnableVerboseOrtLogging = false;
+};
+
+/**
  * Runtime-side load configuration. Chooses a variant; the URLs / file
  * names / SHA come from the matching UInoAgentsSettings entry.
  *
@@ -106,6 +290,13 @@ struct INOAGENTS_API FInoNeuTtsNanoModelConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano",
               meta = (ClampMin = "512", ClampMax = "8192"))
     int32 NumContextTokens = 2048;
+
+    /** Advanced perf tuning — thread counts, accelerator selection,
+     *  diagnostics. All fields have safe defaults; most callers leave
+     *  this default-constructed. See FInoNeuTtsNanoPerformanceOptions
+     *  for the per-field discussion. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano")
+    FInoNeuTtsNanoPerformanceOptions Performance;
 };
 
 /**

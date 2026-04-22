@@ -61,32 +61,63 @@ namespace
     }
 
     /**
-     * Choose the ONNX Runtime execution-provider list for the NeuCodec
-     * decoder. Matches the Chatterbox pattern: CPU-first on Win64 to
-     * avoid DirectML kernel-validation issues on large decoders;
-     * XNNPACK-preferred on Android for ARM-NEON acceleration.
+     * Translate FInoNeuTtsNanoPerformanceOptions into the generic
+     * FInoOnnxSessionOptions consumed by FInoOnnxSession::Create.
      *
-     * A future milestone can expose this to callers via
-     * FInoNeuTtsNanoModelConfig (e.g. bPreferDirectMl flag mirroring
-     * Chatterbox) once we've verified which providers work with the
-     * NeuCodec model specifically.
+     * Per-platform provider list:
+     *   - Windows: [DirectMl, Cpu] when bPreferDirectMl, else [Cpu]
+     *   - Android: [Xnnpack, Cpu] when bUseXnnpack,   else [Cpu]
+     *   - Other:  [Cpu]
+     *
+     * Providers are registered in priority order. If the preferred one
+     * fails to register at runtime (no D3D12 device, corrupt DML
+     * install, Android AAR missing a kernel, etc.) ORT silently falls
+     * through to CPU — the session still loads, just without the
+     * accelerator.
      */
-    FInoOnnxSessionOptions MakeNeuCodecOptions()
+    FInoOnnxSessionOptions MakeNeuCodecOptions(
+        const FInoNeuTtsNanoPerformanceOptions& Perf)
     {
         FInoOnnxSessionOptions Options;
 
-#if PLATFORM_ANDROID
-        Options.ExecutionProviders = {
-            EInoOnnxProvider::Xnnpack,
-            EInoOnnxProvider::Cpu
-        };
+#if PLATFORM_WINDOWS
+        if (Perf.bPreferDirectMl)
+        {
+            Options.ExecutionProviders = {
+                EInoOnnxProvider::DirectMl,
+                EInoOnnxProvider::Cpu
+            };
+            Options.DirectMlAdapterIndex = Perf.DirectMlAdapterIndex;
+        }
+        else
+        {
+            Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
+        }
+#elif PLATFORM_ANDROID
+        if (Perf.bUseXnnpack)
+        {
+            Options.ExecutionProviders = {
+                EInoOnnxProvider::Xnnpack,
+                EInoOnnxProvider::Cpu
+            };
+        }
+        else
+        {
+            Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
+        }
 #else
-        // Windows + everything else: CPU-only for v1. DirectML on the
-        // NeuCodec decoder is untested; promote to Milestone 4+ after
-        // validating kernel coverage.
+        // Linux / macOS / iOS: CPU-only until we stage prebuilt ORT
+        // with platform-specific accelerators.
         Options.ExecutionProviders = { EInoOnnxProvider::Cpu };
 #endif
-        Options.GraphOptimization = EInoOnnxGraphOptimizationLevel::All;
+
+        Options.GraphOptimization        = EInoOnnxGraphOptimizationLevel::All;
+        Options.IntraOpThreadCount       = Perf.DecoderIntraOpThreadCount;
+        Options.InterOpThreadCount       = Perf.DecoderInterOpThreadCount;
+        Options.bEnableProfiling         = Perf.bEnableOrtProfiling;
+        // Verbose = 0, Warning (ORT default) = 2. -1 leaves ORT's default in place.
+        Options.LogSeverityLevel         = Perf.bEnableVerboseOrtLogging ? 0 : -1;
+
         return Options;
     }
 } // namespace
@@ -127,9 +158,16 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
 
     // -----------------------------------------------------------------
     // 1. Load the backbone GGUF.
+    //
+    // ModelParams knobs wired from Config.Performance:
+    //   use_mmap   — near-zero-cost load via memory-map (usually leave on)
+    //   use_mlock  — lock pages in RAM (opt-in for low-memory hosts)
+    // Everything else stays at the llama.cpp defaults.
     // -----------------------------------------------------------------
     struct llama_model_params ModelParams = Api->llama_model_default_params();
     ModelParams.n_gpu_layers = Config.NumGpuLayers;
+    ModelParams.use_mmap     = Config.Performance.bUseMmap;
+    ModelParams.use_mlock    = Config.Performance.bUseMlock;
 
     const FTCHARToUTF8 BackboneUtf8(*BackboneGgufPath);
     struct llama_model* NewModel =
@@ -157,9 +195,29 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
 
     // -----------------------------------------------------------------
     // 2. Create a context with the requested size.
+    //
+    // CtxParams knobs wired from Config.Performance:
+    //   n_threads         — token-generation thread pool (0 = llama default)
+    //   n_threads_batch   — prompt-prefill thread pool (0 = inherit n_threads)
+    //   flash_attn_type   — AUTO (let llama.cpp decide) or DISABLED
+    // Everything else stays at the llama.cpp defaults (n_ctx gets the
+    // requested size, n_batch / n_ubatch / KV-cache dtype all use
+    // llama.cpp's conservative defaults, fine for NeuTTS workloads).
     // -----------------------------------------------------------------
     struct llama_context_params CtxParams = Api->llama_context_default_params();
     CtxParams.n_ctx = (uint32_t)Config.NumContextTokens;
+
+    if (Config.Performance.LlmThreadCount > 0)
+    {
+        CtxParams.n_threads = Config.Performance.LlmThreadCount;
+    }
+    if (Config.Performance.LlmBatchThreadCount > 0)
+    {
+        CtxParams.n_threads_batch = Config.Performance.LlmBatchThreadCount;
+    }
+    CtxParams.flash_attn_type = Config.Performance.bFlashAttention
+        ? LLAMA_FLASH_ATTN_TYPE_AUTO
+        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
 
     struct llama_context* NewCtx = Api->llama_init_from_model(NewModel, CtxParams);
     if (NewCtx == nullptr)
@@ -191,10 +249,18 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
 
     // -----------------------------------------------------------------
     // 4. Create the NeuCodec ONNX session.
+    //
+    // MakeNeuCodecOptions translates Config.Performance into the
+    // generic FInoOnnxSessionOptions the InoOnnx layer consumes —
+    // execution-provider list (Cpu / DirectMl / Xnnpack), thread counts,
+    // profiling + verbose-logging toggles, DirectML adapter index.
     // -----------------------------------------------------------------
     FString OrtErr;
     TUniquePtr<FInoOnnxSession> NewSession =
-        FInoOnnxSession::Create(CodecOnnxPath, MakeNeuCodecOptions(), &OrtErr);
+        FInoOnnxSession::Create(
+            CodecOnnxPath,
+            MakeNeuCodecOptions(Config.Performance),
+            &OrtErr);
     if (!NewSession)
     {
         Api->llama_free(NewCtx);
@@ -215,8 +281,37 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     Runner->StopTokenId  = StopId;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTTS Nano Runner ready: n_ctx=%u, stop_token_id=%d, n_gpu_layers=%d"),
-           Api->llama_n_ctx(NewCtx), StopId, Config.NumGpuLayers);
+           TEXT("NeuTTS Nano Runner ready: n_ctx=%u, stop_token_id=%d, "
+                "n_gpu_layers=%d, llm_threads=%d/%d (gen/batch), flash_attn=%s, "
+                "mmap=%s, mlock=%s"),
+           Api->llama_n_ctx(NewCtx), StopId, Config.NumGpuLayers,
+           Config.Performance.LlmThreadCount,
+           Config.Performance.LlmBatchThreadCount,
+           Config.Performance.bFlashAttention ? TEXT("auto") : TEXT("disabled"),
+           Config.Performance.bUseMmap  ? TEXT("on") : TEXT("off"),
+           Config.Performance.bUseMlock ? TEXT("on") : TEXT("off"));
+
+#if PLATFORM_WINDOWS
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTTS Nano decoder: providers=%s, intra/inter_op=%d/%d, "
+                "profiling=%s, verbose_ort=%s"),
+           Config.Performance.bPreferDirectMl
+               ? TEXT("[DirectMl, Cpu]") : TEXT("[Cpu]"),
+           Config.Performance.DecoderIntraOpThreadCount,
+           Config.Performance.DecoderInterOpThreadCount,
+           Config.Performance.bEnableOrtProfiling      ? TEXT("on") : TEXT("off"),
+           Config.Performance.bEnableVerboseOrtLogging ? TEXT("on") : TEXT("off"));
+#elif PLATFORM_ANDROID
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTTS Nano decoder: providers=%s, intra/inter_op=%d/%d, "
+                "profiling=%s, verbose_ort=%s"),
+           Config.Performance.bUseXnnpack
+               ? TEXT("[Xnnpack, Cpu]") : TEXT("[Cpu]"),
+           Config.Performance.DecoderIntraOpThreadCount,
+           Config.Performance.DecoderInterOpThreadCount,
+           Config.Performance.bEnableOrtProfiling      ? TEXT("on") : TEXT("off"),
+           Config.Performance.bEnableVerboseOrtLogging ? TEXT("on") : TEXT("off"));
+#endif
 
     return Runner;
 }
