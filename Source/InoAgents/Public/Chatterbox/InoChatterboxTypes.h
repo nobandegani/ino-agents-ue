@@ -195,64 +195,68 @@ struct FInoChatterboxPerformanceOptions
 
     // --- Per-session DirectML opt-out ---
     //
-    // DirectML's kernel library doesn't cover every combination of op +
-    // dtype + shape that Chatterbox's graphs throw at it. When a specific
-    // session hits a DML-unsupported case, the whole inference fails at
-    // Run time (E_INVALIDARG out of MLOperatorAuthorImpl). These flags
-    // let you surgically route individual sessions back to CPU while
-    // keeping the rest on DML, matching the "per-session provider
-    // selection" pattern Resemble AI documents for their CUDA case
-    // (https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/discussions/5).
+    // ALL FOUR sessions default to CPU (b*OnCpu = true) because DirectML
+    // in ORT 1.24.3 has demonstrated kernel-level bugs on every Chatterbox
+    // session we've tested. Empirically:
     //
-    // All default false except bSpeechEncoderOnCpu, because:
+    //   - speech_encoder         → DML fails with E_INVALIDARG at
+    //     MultiHeadAttention (MLOperatorAuthorImpl.cpp:2508)
+    //   - embed_tokens           → DML fails with E_INVALIDARG at
+    //     Slice on iter 1 of the AR loop (MLOperatorAuthorImpl.cpp:2853)
+    //   - language_model         → DML produces silent numerical
+    //     corruption on fp16 (outputs audible noise instead of speech);
+    //     crashes on q4f16
+    //   - conditional_decoder    → DML works correctly
     //
-    //   - speech_encoder q4f16 KNOWN to fail on DML:
-    //     '/s3/encoder/blocks.0/attn/MultiHeadAttention' E_INVALIDARG
-    //     — DML's MultiHeadAttention kernel has strict shape/dtype
-    //       validation, Chatterbox's q4f16 encoder attention params
-    //       land outside the supported set. Default-route to CPU so the
-    //       "default" Windows+DML config works out of the box.
-    //     Encoder cost: ~270ms, runs ONCE per voice (not per token), so
-    //       routing it to CPU adds ~7% to total synth time — negligible
-    //       vs the 2-4× overall speedup we get from keeping LM + decoder
-    //       on DML.
+    // Confirmed upstream-side via a minimal Python repro using stock
+    // onnxruntime-directml 1.24.3 (no UE, no renamed DLLs) — fails the
+    // same way. See
+    // Plugins/InoAgents/Chatterbox/scripts/repro-dml-encoder.py for the
+    // reference test case. Microsoft has moved DirectML to "sustained
+    // engineering"; these defects are unlikely to be fixed upstream
+    // soon.
     //
-    //   - embed_tokens / language_model / conditional_decoder default
-    //     to DML (bXxxOnCpu = false). They may also turn out to have
-    //     DML issues on some variants — flip the corresponding flag
-    //     true to route to CPU without a code change.
+    // Safe default is "all CPU." Flip the specific flag(s) you want to
+    // experiment with. The ONLY session currently recommended for DML
+    // is conditional_decoder — sets bConditionalDecoderOnCpu=false and
+    // keeps bPreferDirectMl=true for a low-risk ~15-20% speedup on the
+    // overall synth. Anything else is experimental and may crash or
+    // produce wrong output on your specific hardware / driver combo.
     //
     // Each flag is ignored when bPreferDirectMl is false (everything's
     // on CPU already) or on non-Windows platforms (DML is D3D12-only).
 
     /** Force speech_encoder to run on CPU even when bPreferDirectMl is
-     *  true. Default true — known-good fallback for q4f16's
-     *  MultiHeadAttention DML mismatch. */
+     *  true. Default true — known broken on DML: fails with
+     *  E_INVALIDARG at the MultiHeadAttention op on both q4f16 and
+     *  fp16 variants. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
     bool bSpeechEncoderOnCpu = true;
 
     /** Force embed_tokens to run on CPU even when bPreferDirectMl is
-     *  true. Default false — the embedding lookup is a tiny op (~3 ms)
-     *  that should work fine on either provider; no known issues. */
+     *  true. Default true — known broken on DML: fails with
+     *  E_INVALIDARG at a Slice op on iter 1 of the AR loop (single-
+     *  token path after the full-prompt iter 0). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
-    bool bEmbedTokensOnCpu = false;
+    bool bEmbedTokensOnCpu = true;
 
     /** Force language_model to run on CPU even when bPreferDirectMl is
-     *  true. Default false. This is THE hot path (2.2s on CPU, runs
-     *  per token); if this turns out to fail on DML, you lose the
-     *  main reason for enabling DML in the first place. If you need
-     *  to flip this true, log a GitHub issue — it's the most
-     *  impactful one to get working on GPU. */
+     *  true. Default true — known broken on DML: silent numerical
+     *  corruption on fp16 (output is audible noise instead of speech),
+     *  hard crashes on q4f16. This is the hot path, so DML working here
+     *  would be the biggest speedup win — but until Microsoft fixes it,
+     *  CPU is the only correct path. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
-    bool bLanguageModelOnCpu = false;
+    bool bLanguageModelOnCpu = true;
 
     /** Force conditional_decoder to run on CPU even when bPreferDirectMl
-     *  is true. Default false. The decoder is mostly HiFi-GAN (convs +
-     *  smaller attention), lower DML-incompatibility risk than the
-     *  language_model. Accounts for ~1.5s out of the current ~4s total;
-     *  worth having on DML. */
+     *  is true. Default true for safety consistency with the other
+     *  sessions, but the decoder is actually the ONE Chatterbox session
+     *  that runs correctly on DML in testing. Flip this to false (while
+     *  keeping bPreferDirectMl=true) to get a ~15-20% speedup on the
+     *  full synth from the decoder alone. Safe to opt into today. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox|Performance|DML overrides")
-    bool bConditionalDecoderOnCpu = false;
+    bool bConditionalDecoderOnCpu = true;
 };
 
 // ============================================================================
