@@ -347,7 +347,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoLiteRtLmToolCalled,
  *                     is NOT fired; the error flows through OnLoaded
  *                     with bSuccess=false instead.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoModelDownloadProgress,
+DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoModelDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes,

@@ -225,7 +225,7 @@ static void RunNeuTtsNanoSynthTest(const TArray<FString>& Args)
         UE_LOG(LogInoAgents, Log,
                TEXT("SynthTest: model not loaded — calling LoadModelAsync first "
                     "(cold cache = ~1-3 min, warm cache = ~1.7 s)."));
-        Subsys->LoadModelAsync(Config, LoadDelegate);
+        Subsys->LoadModelAsync(Config, FOnInoNeuTtsNanoDownloadProgress(), LoadDelegate);
     }
 }
 

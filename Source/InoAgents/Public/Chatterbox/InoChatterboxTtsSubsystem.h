@@ -136,54 +136,55 @@ public:
     // ------------------------------------------------------------------
 
     /**
-     * Fires during multi-file model download. Percent is the aggregate
-     * across the whole variant (4 ONNX files + 3 config files = 7
-     * required files, optionally plus .onnx_data companions). See
-     * FOnInoChatterboxDownloadProgress for the exact semantics.
+     * Asynchronously load a Chatterbox variant (or per-session mix of
+     * variants). Returns immediately; the two per-call delegates fire
+     * on the game thread:
      *
-     * Only fires when files are missing from disk and need to be
-     * fetched from the URL configured in Project Settings → Plugins →
-     * InoAgents → Chatterbox → Models. For a fully-cached variant,
-     * LoadModelsAsync skips the download and goes straight to ORT
-     * session creation — no progress events fire.
-     */
-    UPROPERTY(BlueprintAssignable, Category = "InoAgents|Chatterbox")
-    FOnInoChatterboxDownloadProgress OnDownloadProgress;
-
-    /**
-     * Asynchronously load a Chatterbox variant. Returns immediately.
-     * When loading finishes (success or failure), OnLoaded fires on
-     * the game thread.
+     *   OnDownloadProgress — fires 0+ times during download only. If
+     *     every file is already cached on disk, this never fires.
+     *     Payload: (Percent, BytesReceived, TotalBytes, bCompleted).
+     *     Percent is aggregate across the whole variant queue.
+     *     bCompleted=false on intermediate ticks; bCompleted=true on
+     *     ONE terminal tick, fired AFTER every file in the queue has
+     *     been atomic-renamed on disk, BEFORE the ThreadPool load
+     *     dispatches. Use it to flip UI from "downloading" to
+     *     "loading" without waiting for OnLoaded.
+     *
+     *   OnLoaded — fires exactly ONCE at the end, when the 4 ORT
+     *     sessions + tokenizer are ready (bSuccess=true) or a terminal
+     *     error prevented load (bSuccess=false, ErrorMessage filled).
      *
      * Flow:
-     *   1. Look up Config.Variant in Project Settings to find its
-     *      download URL + revision (FInoChatterboxModelEntry).
-     *   2. Check ChatterboxResolveVariantDir for required files
-     *      (the 4 .onnx + tokenizer.json + configs). If all present,
+     *   1. Resolve per-session variants from Config.
+     *   2. Check per-session files present on disk. If all present,
      *      skip to step 4.
-     *   3. Download missing files via HTTP → PersistentDownloadDir.
-     *      Fires OnDownloadProgress repeatedly during this phase.
-     *   4. Dispatch ThreadPool: load tokenizer (tokenizer.json) +
-     *      FInoChatterboxModels::LoadFromDir (the 4 ORT sessions).
+     *   3. Download missing files from HuggingFace. OnDownloadProgress
+     *      fires during this phase; bCompleted=true fires at the end
+     *      of a successful download.
+     *   4. Dispatch ThreadPool: load tokenizer + 4 ORT sessions.
      *   5. Marshal result to the game thread; fire OnLoaded.
      *
      * Error cases that fire OnLoaded with bSuccess=false:
      *   - Another LoadModelsAsync is already in flight
      *   - A variant is already loaded (call UnloadModels first)
-     *   - No Project Settings entry for the requested variant
+     *   - No Project Settings entry for any of the requested variants
      *   - A required file is missing and no URL is configured
      *   - HTTP download failed (network error / 404 / etc.)
      *   - tokenizer.json parse failed
-     *   - Any of the 4 ORT sessions failed to construct (corrupt /
-     *     missing .onnx_data companion / unsupported variant)
+     *   - Any ORT session failed to construct (corrupt / missing
+     *     companion / unsupported op / kernel coverage gap)
+     *
+     * On download failure the OnDownloadProgress.bCompleted=true is
+     * NOT fired — the error flows through OnLoaded(false, err).
      *
      * MUST be called on the game thread.
      */
     UFUNCTION(BlueprintCallable, Category = "InoAgents|Chatterbox",
-              meta = (AutoCreateRefTerm = "OnLoaded"))
+              meta = (AutoCreateRefTerm = "OnDownloadProgress,OnLoaded"))
     void LoadModelsAsync(
-        const FInoChatterboxModelConfig& Config,
-        const FOnInoChatterboxModelsLoaded& OnLoaded);
+        const FInoChatterboxModelConfig&        Config,
+        const FOnInoChatterboxDownloadProgress& OnDownloadProgress,
+        const FOnInoChatterboxModelsLoaded&     OnLoaded);
 
     /**
      * Destroy the loaded ORT sessions + tokenizer. Safe to call with
@@ -439,6 +440,14 @@ private:
     /** The OnLoaded delegate LoadModelsAsync was called with — we remember
      *  it so FinishDownloadSuccess / FinishDownloadError can fire it. */
     FOnInoChatterboxModelsLoaded PendingOnLoaded;
+
+    /** Per-call download-progress handler, stashed here for the
+     *  duration of the load. Every progress tick (including the
+     *  bCompleted=true terminal tick inside FinishDownloadSuccess)
+     *  fires through this delegate. Reassigned at each LoadModelsAsync
+     *  so a prior load's stale delegate can't accidentally receive
+     *  events for a new one. */
+    FOnInoChatterboxDownloadProgress PendingOnDownloadProgress;
 
     /** Download-flow helpers — see InoChatterboxTtsSubsystem.cpp for the
      *  narrative; flow is:

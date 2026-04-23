@@ -108,18 +108,35 @@ public:
      * marshals back to the game thread.
      */
     /**
-     * Fires during model download with progress info. Only fires when
-     * the model file isn't cached locally and needs to be downloaded
-     * from the URL configured in Project Settings. Bind this to show
-     * a loading screen / progress bar. */
-    UPROPERTY(BlueprintAssignable, Category="InoAgents|LiteRT-LM")
-    FOnInoModelDownloadProgress OnDownloadProgress;
-
+     * Dispatch a model load.
+     *
+     * Two per-call delegates (both are single-cast dynamic delegates,
+     * same ergonomic as OnLoaded before this — they show as exec-pin
+     * Events on the BP node when AutoCreateRefTerm fires, and in C++
+     * you bind one handler per call via BindDynamic):
+     *
+     *   OnDownloadProgress — fires 0+ times during download only. If
+     *     the model file is already cached on disk, this never fires.
+     *     Payload: (Percent, BytesReceived, TotalBytes, bCompleted).
+     *     bCompleted=false on every intermediate tick; bCompleted=true
+     *     on exactly ONE terminal tick, fired AFTER the download is
+     *     fully written + renamed on disk, BEFORE the SHA-256 verify
+     *     + engine construction begin. Use it to flip UI from
+     *     "downloading" to "loading" without waiting for OnLoaded.
+     *
+     *   OnLoaded — fires exactly ONCE at the end, when the engine is
+     *     actually usable (bSuccess=true) or a terminal error
+     *     prevented load (bSuccess=false, ErrorMessage filled).
+     *
+     * On download failure the OnDownloadProgress.bCompleted=true is
+     * NOT fired — the error flows through OnLoaded(false, err).
+     */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM",
-              meta=(AutoCreateRefTerm="OnLoaded"))
+              meta=(AutoCreateRefTerm="OnDownloadProgress,OnLoaded"))
     void LoadModelAsync(
-        const FInoLiteRtLmModelConfig& Config,
-        const FOnInoLiteRtLmModelLoaded& OnLoaded);
+        const FInoLiteRtLmModelConfig&         Config,
+        const FOnInoModelDownloadProgress&     OnDownloadProgress,
+        const FOnInoLiteRtLmModelLoaded&       OnLoaded);
 
     /**
      * True if LoadModelAsync has successfully completed and UnloadModel has
@@ -323,7 +340,13 @@ private:
 
     FString         DownloadUrl;
     FString         PendingDownloadTargetPath;
-    FOnInoLiteRtLmModelLoaded PendingOnLoaded;
+    FOnInoLiteRtLmModelLoaded        PendingOnLoaded;
+    /** Per-call download-progress handler stashed here for the
+     *  duration of the load so every progress tick (including the
+     *  bCompleted=true terminal tick) fires through the caller's
+     *  delegate. Cleared on terminal completion so a stale delegate
+     *  from a prior load can't be invoked against a fresh request. */
+    FOnInoModelDownloadProgress      PendingOnDownloadProgress;
     IFileHandle*    DownloadFileHandle = nullptr;
     int64           DownloadBytesWritten = 0;
     // Full file size in bytes, as learned from the first response's

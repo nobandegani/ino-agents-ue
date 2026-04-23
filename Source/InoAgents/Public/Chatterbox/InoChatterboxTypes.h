@@ -734,7 +734,7 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoChatterboxSynthesisComplete,
  * to keep the Chatterbox feature self-contained — Blueprint graphs do
  * not cross-pollinate LiteRT-LM and Chatterbox types.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoChatterboxDownloadProgress,
+DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoChatterboxDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes,

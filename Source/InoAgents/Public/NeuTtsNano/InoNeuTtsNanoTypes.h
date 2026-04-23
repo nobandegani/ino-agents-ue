@@ -450,7 +450,7 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoSynthesisComplete,
  *                   broadcast is NOT fired — the error flows through
  *                   OnLoaded(false, err).
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoNeuTtsNanoDownloadProgress,
+DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes,

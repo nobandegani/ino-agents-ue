@@ -404,7 +404,7 @@ namespace
                TEXT("StreamSynthTest: start — variant=%s chunk_tokens=%d max_new_tokens=%d prompt=\"%s\""),
                *VariantStr, ChunkTokens, MaxNewTokens, *PromptText);
 
-        Subsys->LoadModelsAsync(Config, OnLoaded);
+        Subsys->LoadModelsAsync(Config, FOnInoChatterboxDownloadProgress(), OnLoaded);
     }
 
     FAutoConsoleCommand GChatterboxStreamSynthTestCmd(

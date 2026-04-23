@@ -193,8 +193,9 @@ void UInoNeuTtsNanoSubsystem::Deinitialize()
 // ============================================================================
 
 void UInoNeuTtsNanoSubsystem::LoadModelAsync(
-    const FInoNeuTtsNanoModelConfig& Config,
-    const FOnInoNeuTtsNanoModelLoaded& OnLoaded)
+    const FInoNeuTtsNanoModelConfig&        Config,
+    const FOnInoNeuTtsNanoDownloadProgress& OnDownloadProgress,
+    const FOnInoNeuTtsNanoModelLoaded&      OnLoaded)
 {
     check(IsInGameThread());
 
@@ -244,10 +245,11 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
         return;
     }
 
-    bLoadInFlight   = true;
-    LoadedVariant   = Config.Variant;
-    PendingConfig   = Config;
-    PendingOnLoaded = OnLoaded;
+    bLoadInFlight             = true;
+    LoadedVariant             = Config.Variant;
+    PendingConfig             = Config;
+    PendingOnLoaded           = OnLoaded;
+    PendingOnDownloadProgress = OnDownloadProgress;
 
     // Fast path: both files already on disk → skip download, dispatch
     // the loader immediately.
@@ -812,7 +814,7 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
     const int32 FileCount = DownloadQueue.Num();
     if (FileCount == 0)
     {
-        OnDownloadProgress.Broadcast(0.0f, 0, -1, /*bCompleted=*/ false);
+        PendingOnDownloadProgress.ExecuteIfBound(0.0f, 0, -1, /*bCompleted=*/ false);
         return;
     }
 
@@ -881,9 +883,10 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
     }
 
     // Intermediate progress tick — bCompleted=false. The terminal
-    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
+    // bCompleted=true tick is fired inside FinishDownloadSuccess
     // after the whole queue has been staged on disk.
-    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalBytes, /*bCompleted=*/ false);
+    PendingOnDownloadProgress.ExecuteIfBound(
+        Percent, AggregateReceived, TotalBytes, /*bCompleted=*/ false);
 }
 
 void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
@@ -909,7 +912,7 @@ void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
         else if (F.BytesWritten > 0) { FinalTotal += F.BytesWritten; }
         else { bAllKnown = false; }
     }
-    OnDownloadProgress.Broadcast(
+    PendingOnDownloadProgress.ExecuteIfBound(
         100.0f, FinalReceived, bAllKnown ? FinalTotal : -1,
         /*bCompleted=*/ true);
 

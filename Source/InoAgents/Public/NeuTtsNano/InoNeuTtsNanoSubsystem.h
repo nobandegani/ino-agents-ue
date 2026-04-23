@@ -108,10 +108,12 @@ public:
      * Calling it when the same variant is already loaded returns
      * OnLoaded(true) immediately without reloading.
      */
-    UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano")
+    UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano",
+              meta = (AutoCreateRefTerm = "OnDownloadProgress,OnLoaded"))
     void LoadModelAsync(
-        const FInoNeuTtsNanoModelConfig& Config,
-        const FOnInoNeuTtsNanoModelLoaded& OnLoaded);
+        const FInoNeuTtsNanoModelConfig&        Config,
+        const FOnInoNeuTtsNanoDownloadProgress& OnDownloadProgress,
+        const FOnInoNeuTtsNanoModelLoaded&      OnLoaded);
 
     /** Tear down any loaded model + abort any in-flight download. Safe
      *  to call whether or not a load is active. */
@@ -238,14 +240,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano")
     void CancelDownload();
 
-    /** Fires periodically during LoadModelAsync's download phase and
-     *  once more when each file completes. Percent is 0..100
-     *  (clamped). BytesReceived is total bytes on disk across all
-     *  files in the queue. TotalBytes is -1 when the aggregate total
-     *  isn't yet known (HF CDN sometimes strips Content-Length). */
-    UPROPERTY(BlueprintAssignable, Category = "InoAgents|NeuTTS Nano")
-    FOnInoNeuTtsNanoDownloadProgress OnDownloadProgress;
-
 private:
     // ==================================================================
     // Load state
@@ -270,6 +264,13 @@ private:
     /** Dynamic delegate to fire exactly once when LoadModelAsync
      *  resolves. Zeroed after firing. */
     FOnInoNeuTtsNanoModelLoaded PendingOnLoaded;
+
+    /** Per-call download-progress handler stashed at LoadModelAsync
+     *  entry. Every progress tick (including the bCompleted=true
+     *  terminal tick inside FinishDownloadSuccess) fires through this
+     *  delegate. Reassigned at each LoadModelAsync so stale delegates
+     *  from prior loads can't fire against a fresh one. */
+    FOnInoNeuTtsNanoDownloadProgress PendingOnDownloadProgress;
 
     // ==================================================================
     // Download state (game-thread only — all callbacks route through

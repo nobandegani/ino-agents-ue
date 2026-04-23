@@ -86,8 +86,9 @@ void UInoLiteRtLmSubsystem::Deinitialize()
 }
 
 void UInoLiteRtLmSubsystem::LoadModelAsync(
-    const FInoLiteRtLmModelConfig& Config,
-    const FOnInoLiteRtLmModelLoaded& OnLoaded)
+    const FInoLiteRtLmModelConfig&     Config,
+    const FOnInoModelDownloadProgress& OnDownloadProgress,
+    const FOnInoLiteRtLmModelLoaded&   OnLoaded)
 {
     check(IsInGameThread());
 
@@ -106,6 +107,13 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
         OnLoaded.ExecuteIfBound(false, TEXT("A model is already loaded; call UnloadModel first"));
         return;
     }
+
+    // Stash the per-call progress delegate so every progress tick
+    // during download routes through it. Cleared on CleanupDownload
+    // so a stale delegate from a prior load can't fire against a
+    // subsequent load. Pre-flight rejections (above) never set this,
+    // which is fine — they failed before any download state was set up.
+    PendingOnDownloadProgress = OnDownloadProgress;
 
     // Resolve settings entry first. FindModel is permissive — it matches
     // by either ModelFileName ("gemma-4-E2B-it.litertlm") OR DisplayName
@@ -711,10 +719,11 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
             0.0f, 100.0f);
     }
     // Intermediate progress tick — bCompleted=false. The final
-    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
+    // bCompleted=true tick is fired inside FinishDownloadSuccess
     // once the last chunk has been written to disk, so UI can flip
     // state cleanly without waiting for the engine-load phase.
-    OnDownloadProgress.Broadcast(Percent, DownloadBytesWritten, DownloadTotalBytes, false);
+    PendingOnDownloadProgress.ExecuteIfBound(
+        Percent, DownloadBytesWritten, DownloadTotalBytes, /*bCompleted=*/ false);
 
     if (DownloadTotalBytes > 0)
     {
@@ -762,15 +771,15 @@ void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
            TEXT("LoadModelAsync: model downloaded and saved to %s (%lld bytes)"),
            *PendingDownloadTargetPath, DownloadBytesWritten);
 
-    // Terminal download-progress broadcast — bCompleted=true. Fires
+    // Terminal download-progress tick — bCompleted=true. Fires
     // exactly once per successful download, AFTER the .partial has
-    // been renamed to the final path. UI listeners bound to
+    // been renamed to the final path. UI handlers bound to
     // OnDownloadProgress can use this to flip from "downloading" to
     // "loading" immediately, without waiting for OnLoaded (which only
     // fires after SHA-256 verify + engine construction, seconds later).
-    // On download failure this broadcast does NOT fire — the caller
-    // sees OnLoaded(false, error) instead.
-    OnDownloadProgress.Broadcast(
+    // On download failure this does NOT fire — the caller sees
+    // OnLoaded(false, error) instead.
+    PendingOnDownloadProgress.ExecuteIfBound(
         100.0f,
         DownloadBytesWritten,
         DownloadTotalBytes > 0 ? DownloadTotalBytes : DownloadBytesWritten,

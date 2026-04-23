@@ -97,8 +97,9 @@ void UInoChatterboxTtsSubsystem::Deinitialize()
 // ============================================================================
 
 void UInoChatterboxTtsSubsystem::LoadModelsAsync(
-    const FInoChatterboxModelConfig& Config,
-    const FOnInoChatterboxModelsLoaded& OnLoaded)
+    const FInoChatterboxModelConfig&        Config,
+    const FOnInoChatterboxDownloadProgress& OnDownloadProgress,
+    const FOnInoChatterboxModelsLoaded&     OnLoaded)
 {
     check(IsInGameThread());
 
@@ -167,12 +168,13 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
         }
     }
 
-    // Remember the config + delegate for the download flow's
+    // Remember the config + delegates for the download flow's
     // post-download hop into DispatchLoadWorker, and (if we skip
     // download) for symmetry.
-    bLoadInFlight   = true;
-    PendingConfig   = Config;
-    PendingOnLoaded = OnLoaded;
+    bLoadInFlight             = true;
+    PendingConfig             = Config;
+    PendingOnLoaded           = OnLoaded;
+    PendingOnDownloadProgress = OnDownloadProgress;
 
     // -------- Files-present fast path --------
     if (IsConfigDownloaded(Config))
@@ -1463,7 +1465,7 @@ void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
     const int32 FileCount = DownloadQueue.Num();
     if (FileCount == 0)
     {
-        OnDownloadProgress.Broadcast(0.0f, 0, -1, /*bCompleted=*/ false);
+        PendingOnDownloadProgress.ExecuteIfBound(0.0f, 0, -1, /*bCompleted=*/ false);
         return;
     }
 
@@ -1534,10 +1536,11 @@ void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
 
     const int64 TotalReport = bAllSizesKnown ? AggregateTotalKnown : -1;
 
-    // Intermediate progress tick — bCompleted=false. The final
-    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
-    // after the whole queue has been atomic-renamed on disk.
-    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalReport, /*bCompleted=*/ false);
+    // Intermediate progress tick — bCompleted=false. The terminal
+    // bCompleted=true tick is fired inside FinishDownloadSuccess after
+    // the whole queue has been atomic-renamed on disk.
+    PendingOnDownloadProgress.ExecuteIfBound(
+        Percent, AggregateReceived, TotalReport, /*bCompleted=*/ false);
 }
 
 void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
@@ -1570,7 +1573,7 @@ void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
         else if (F.BytesWritten > 0) { FinalTotal += F.BytesWritten; }
         else { bAllKnown = false; }
     }
-    OnDownloadProgress.Broadcast(
+    PendingOnDownloadProgress.ExecuteIfBound(
         100.0f, FinalReceived, bAllKnown ? FinalTotal : -1,
         /*bCompleted=*/ true);
 

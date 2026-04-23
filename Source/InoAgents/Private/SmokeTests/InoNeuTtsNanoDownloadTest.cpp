@@ -176,11 +176,12 @@ static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
     Observer->Config              = Config;
     Observer->AddToRoot();
 
-    // Progress subscription — multicast; we register as one listener,
-    // unregister never (we RemoveFromRoot when Loaded fires and our
-    // observer becomes GC-eligible, whose destruction drops the
-    // delegate binding automatically).
-    Subsys->OnDownloadProgress.AddDynamic(
+    // Per-call delegates — OnDownloadProgress fires during download
+    // only, OnLoaded fires once at terminal completion. Single-cast
+    // dynamic so we bind one observer handler for each and hand them
+    // to LoadModelAsync as parameters.
+    FOnInoNeuTtsNanoDownloadProgress ProgressDelegate;
+    ProgressDelegate.BindDynamic(
         Observer, &UInoNeuTtsNanoDownloadTestObserver::HandleProgress);
 
     FOnInoNeuTtsNanoModelLoaded LoadedDelegate;
@@ -191,7 +192,7 @@ static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
            TEXT("NeuTtsNano.DownloadTest: calling LoadModelAsync (non-blocking). "
                 "On cold cache this downloads ~978 MB and may take 1-3 minutes."));
 
-    Subsys->LoadModelAsync(Config, LoadedDelegate);
+    Subsys->LoadModelAsync(Config, ProgressDelegate, LoadedDelegate);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("NeuTtsNano.DownloadTest: LoadModelAsync returned synchronously."));

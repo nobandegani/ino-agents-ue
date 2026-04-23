@@ -112,7 +112,7 @@ static void RunLiteRtLmSubsystemLoadTest(const TArray<FString>& /*Args*/)
     UE_LOG(LogInoAgents, Log,
            TEXT("SubsystemLoadTest: starting — kicking off LoadModelAsync (non-blocking)"));
 
-    Subsys->LoadModelAsync(Config, Delegate);
+    Subsys->LoadModelAsync(Config, FOnInoModelDownloadProgress(), Delegate);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("SubsystemLoadTest: LoadModelAsync returned synchronously. Editor stays responsive."));

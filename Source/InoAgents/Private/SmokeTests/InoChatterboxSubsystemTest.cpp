@@ -317,7 +317,9 @@ namespace
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: LoadModelsAsync dispatching (non-blocking)."));
 
-        Subsys->LoadModelsAsync(Config, OnLoaded);
+        // This smoke test doesn't observe download progress — pass an
+        // unbound delegate so ExecuteIfBound no-ops the progress ticks.
+        Subsys->LoadModelsAsync(Config, FOnInoChatterboxDownloadProgress(), OnLoaded);
     }
 
     FAutoConsoleCommand GChatterboxSubsystemSynthTestCmd(
