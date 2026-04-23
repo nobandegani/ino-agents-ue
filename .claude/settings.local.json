@@ -132,7 +132,8 @@
       "Bash(mkdir -p /tmp/neutts-audit)",
       "Bash(curl -sSL -o neutts.py \"https://raw.githubusercontent.com/neuphonic/neutts/main/neutts/neutts.py\")",
       "Bash(python3 -c ' *)",
-      "Bash(git reset *)"
+      "Bash(git reset *)",
+      "Bash(curl -s -o MLOperatorAuthorImpl.cpp \"https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.3/onnxruntime/core/providers/dml/DmlExecutionProvider/src/MLOperatorAuthorImpl.cpp\")"
     ]
   }
 }
