@@ -713,20 +713,32 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoChatterboxSynthesisComplete,
     FString, ErrorMessage);
 
 /**
- * Fired during multi-file model downloads. Percent is the aggregate
- * across every file in the queue (0..100), BytesReceived is the
- * rolling sum of bytes written across all files so far, TotalBytes is
- * the aggregate total (or -1 if the server didn't advertise
- * Content-Length for any file — HF's 302 redirects sometimes strip it).
+ * Fired during multi-file model downloads.
+ *
+ *   Percent        — aggregate across every file in the queue (0..100).
+ *   BytesReceived  — rolling sum of bytes written across all files so far.
+ *   TotalBytes     — aggregate total, or -1 if any file's Content-Length
+ *                    was missing (HF's 302 redirects occasionally strip it).
+ *   bCompleted     — false for every intermediate progress tick; true on
+ *                    exactly ONE terminal broadcast, fired after EVERY
+ *                    file in the queue has been downloaded + atomic-
+ *                    renamed on disk, BEFORE the subsystem chains into
+ *                    its ThreadPool load. Bind this to flip UI state
+ *                    from "downloading" to "loading" immediately,
+ *                    without waiting for OnLoaded (the models still
+ *                    have to construct — typically another 1-5 s).
+ *                    On download failure this broadcast is NOT fired —
+ *                    the error flows through OnLoaded(false, error).
  *
  * Declared separately from the LiteRT-LM delegate of the same shape
  * to keep the Chatterbox feature self-contained — Blueprint graphs do
  * not cross-pollinate LiteRT-LM and Chatterbox types.
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoChatterboxDownloadProgress,
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoChatterboxDownloadProgress,
     float, Percent,
     int64, BytesReceived,
-    int64, TotalBytes);
+    int64, TotalBytes,
+    bool,  bCompleted);
 
 /**
  * Fired by UInoChatterboxTtsSubsystem's streaming synthesis path

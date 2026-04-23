@@ -329,10 +329,26 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoLiteRtLmToolCalled,
     FString, ArgumentsJson,
     FString, ResultJson);
 
-/** Fired during model file download. Percent is 0..100 based on
- *  Content-Length. TotalBytes is -1 if the server didn't send
- *  Content-Length (rare for Hugging Face). */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoModelDownloadProgress,
+/** Fired during model file download.
+ *
+ *   Percent         — 0..100 based on Content-Length; 0 if TotalBytes<0.
+ *   BytesReceived   — rolling sum of bytes written to disk so far.
+ *   TotalBytes      — known total, or -1 if the server didn't send
+ *                     Content-Length (rare for Hugging Face).
+ *   bCompleted      — false for every intermediate progress tick;
+ *                     true on exactly ONE terminal broadcast, fired
+ *                     after the download has been fully written and
+ *                     renamed on disk, BEFORE LoadModelAsync chains
+ *                     into the ThreadPool load. Bind this to flip UI
+ *                     state from "downloading" to "loading" without
+ *                     waiting for OnLoaded (the model isn't usable
+ *                     yet at this point — the engine still has to
+ *                     construct). On download failure, bCompleted=true
+ *                     is NOT fired; the error flows through OnLoaded
+ *                     with bSuccess=false instead.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoModelDownloadProgress,
     float, Percent,
     int64, BytesReceived,
-    int64, TotalBytes);
+    int64, TotalBytes,
+    bool,  bCompleted);

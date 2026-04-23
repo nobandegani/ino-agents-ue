@@ -710,7 +710,11 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
                                static_cast<double>(DownloadTotalBytes)),
             0.0f, 100.0f);
     }
-    OnDownloadProgress.Broadcast(Percent, DownloadBytesWritten, DownloadTotalBytes);
+    // Intermediate progress tick — bCompleted=false. The final
+    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
+    // once the last chunk has been written to disk, so UI can flip
+    // state cleanly without waiting for the engine-load phase.
+    OnDownloadProgress.Broadcast(Percent, DownloadBytesWritten, DownloadTotalBytes, false);
 
     if (DownloadTotalBytes > 0)
     {
@@ -757,6 +761,20 @@ void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
     UE_LOG(LogInoAgents, Log,
            TEXT("LoadModelAsync: model downloaded and saved to %s (%lld bytes)"),
            *PendingDownloadTargetPath, DownloadBytesWritten);
+
+    // Terminal download-progress broadcast — bCompleted=true. Fires
+    // exactly once per successful download, AFTER the .partial has
+    // been renamed to the final path. UI listeners bound to
+    // OnDownloadProgress can use this to flip from "downloading" to
+    // "loading" immediately, without waiting for OnLoaded (which only
+    // fires after SHA-256 verify + engine construction, seconds later).
+    // On download failure this broadcast does NOT fire — the caller
+    // sees OnLoaded(false, error) instead.
+    OnDownloadProgress.Broadcast(
+        100.0f,
+        DownloadBytesWritten,
+        DownloadTotalBytes > 0 ? DownloadTotalBytes : DownloadBytesWritten,
+        /*bCompleted=*/ true);
 
     // Verify the freshly-downloaded file against the entry's ExpectedSha256
     // before handing it to the native engine. bAllowRedownloadOnMismatch=false

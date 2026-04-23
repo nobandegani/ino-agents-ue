@@ -40,5 +40,5 @@ public:
     void HandleLoaded(bool bSuccess, FString ErrorMessage);
 
     UFUNCTION()
-    void HandleProgress(float Percent, int64 BytesReceived, int64 TotalBytes);
+    void HandleProgress(float Percent, int64 BytesReceived, int64 TotalBytes, bool bCompleted);
 };

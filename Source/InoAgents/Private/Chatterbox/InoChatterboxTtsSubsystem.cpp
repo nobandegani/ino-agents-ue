@@ -1463,7 +1463,7 @@ void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
     const int32 FileCount = DownloadQueue.Num();
     if (FileCount == 0)
     {
-        OnDownloadProgress.Broadcast(0.0f, 0, -1);
+        OnDownloadProgress.Broadcast(0.0f, 0, -1, /*bCompleted=*/ false);
         return;
     }
 
@@ -1534,7 +1534,10 @@ void UInoChatterboxTtsSubsystem::BroadcastDownloadProgress()
 
     const int64 TotalReport = bAllSizesKnown ? AggregateTotalKnown : -1;
 
-    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalReport);
+    // Intermediate progress tick — bCompleted=false. The final
+    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
+    // after the whole queue has been atomic-renamed on disk.
+    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalReport, /*bCompleted=*/ false);
 }
 
 void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
@@ -1544,6 +1547,32 @@ void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
     const int32 NumFiles = DownloadQueue.Num();
     UE_LOG(LogInoAgents, Log,
            TEXT("Chatterbox download complete — %d files staged"), NumFiles);
+
+    // Terminal download-progress broadcast — bCompleted=true. Fires
+    // exactly once per successful download, BEFORE the ThreadPool
+    // load dispatch. UI listeners can flip state from "downloading"
+    // to "loading" here without waiting for OnLoaded (session creation
+    // takes another 1-5 s). Percent clamps to 100.0 for a clean final
+    // tick even if the byte-weighted calculation didn't quite land
+    // there due to aggregate-total estimation vs actual bytes.
+    //
+    // Compute aggregate-received + total from the queue before
+    // CleanupDownload clears it. On download failure this broadcast
+    // does NOT fire — FinishDownloadError routes the error through
+    // OnLoaded(false, err) instead.
+    int64 FinalReceived = 0;
+    int64 FinalTotal    = 0;
+    bool  bAllKnown     = true;
+    for (const FInoChatterboxDownloadFile& F : DownloadQueue)
+    {
+        FinalReceived += F.BytesWritten;
+        if (F.ExpectedBytes > 0) { FinalTotal += F.ExpectedBytes; }
+        else if (F.BytesWritten > 0) { FinalTotal += F.BytesWritten; }
+        else { bAllKnown = false; }
+    }
+    OnDownloadProgress.Broadcast(
+        100.0f, FinalReceived, bAllKnown ? FinalTotal : -1,
+        /*bCompleted=*/ true);
 
     // Snapshot the config before CleanupDownload (which doesn't clear
     // PendingConfig, but keeping it explicit) so the chained

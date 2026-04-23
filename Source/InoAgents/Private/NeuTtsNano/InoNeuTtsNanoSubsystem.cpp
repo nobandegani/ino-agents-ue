@@ -812,7 +812,7 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
     const int32 FileCount = DownloadQueue.Num();
     if (FileCount == 0)
     {
-        OnDownloadProgress.Broadcast(0.0f, 0, -1);
+        OnDownloadProgress.Broadcast(0.0f, 0, -1, /*bCompleted=*/ false);
         return;
     }
 
@@ -880,7 +880,10 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
             0.0f, 100.0f);
     }
 
-    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalBytes);
+    // Intermediate progress tick — bCompleted=false. The terminal
+    // bCompleted=true broadcast is fired inside FinishDownloadSuccess
+    // after the whole queue has been staged on disk.
+    OnDownloadProgress.Broadcast(Percent, AggregateReceived, TotalBytes, /*bCompleted=*/ false);
 }
 
 void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
@@ -889,6 +892,27 @@ void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
     UE_LOG(LogInoAgents, Log,
            TEXT("NeuTTS Nano download complete — all %d files staged."),
            DownloadQueue.Num());
+
+    // Terminal download-progress broadcast — bCompleted=true. Fires
+    // exactly once per successful download, BEFORE the ThreadPool
+    // load dispatch. UI listeners can flip state from "downloading"
+    // to "loading" without waiting for OnLoaded (backbone + codec
+    // construction takes another 1-3 s). On download failure this
+    // does NOT fire — FinishDownloadError routes through OnLoaded.
+    int64 FinalReceived = 0;
+    int64 FinalTotal    = 0;
+    bool  bAllKnown     = true;
+    for (const FInoNeuTtsNanoDownloadFile& F : DownloadQueue)
+    {
+        FinalReceived += F.BytesWritten;
+        if (F.ExpectedBytes > 0) { FinalTotal += F.ExpectedBytes; }
+        else if (F.BytesWritten > 0) { FinalTotal += F.BytesWritten; }
+        else { bAllKnown = false; }
+    }
+    OnDownloadProgress.Broadcast(
+        100.0f, FinalReceived, bAllKnown ? FinalTotal : -1,
+        /*bCompleted=*/ true);
+
     CleanupDownload();
     DispatchLoadWorker();
 }

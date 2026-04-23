@@ -38,10 +38,23 @@
 #include "Misc/Paths.h"
 
 void UInoNeuTtsNanoDownloadTestObserver::HandleProgress(
-    float Percent, int64 BytesReceived, int64 TotalBytes)
+    float Percent, int64 BytesReceived, int64 TotalBytes, bool bCompleted)
 {
-    // Throttle progress logs to ~1 Hz so the Output Log doesn't drown
-    // in 100+ lines per file.
+    // Always log the terminal completion tick regardless of throttle —
+    // useful diagnostic for confirming bCompleted fires exactly once
+    // per successful download.
+    if (bCompleted)
+    {
+        const double MbReceived = (double)BytesReceived / (1024.0 * 1024.0);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("NeuTtsNano.DownloadTest: DOWNLOAD COMPLETE (%.1f MB, 100%%); ")
+               TEXT("ThreadPool load dispatching next."),
+               MbReceived);
+        return;
+    }
+
+    // Throttle intermediate progress logs to ~1 Hz so the Output Log
+    // doesn't drown in 100+ lines per file.
     const double Now = FPlatformTime::Seconds();
     if (Now - LastProgressLogTime < 1.0)
     {

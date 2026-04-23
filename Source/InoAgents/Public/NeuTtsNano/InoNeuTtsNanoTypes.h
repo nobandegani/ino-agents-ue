@@ -433,16 +433,28 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoSynthesisComplete,
 // FOnInoChatterboxAudioChunk uses for the same AudioChunk byte buffer.
 
 /**
- * Multicast download-progress signal. Percent is 0..100 (clamped).
- * BytesReceived counts on-disk bytes written. TotalBytes is -1 when
- * the aggregate total isn't yet known (HF CDN sometimes strips
- * Content-Length; the progress falls back to file-count counting
- * until GET headers fill in sizes).
+ * Multicast download-progress signal.
+ *
+ *   Percent       — 0..100 (clamped).
+ *   BytesReceived — on-disk bytes written across all files so far.
+ *   TotalBytes    — aggregate, or -1 if any file's Content-Length was
+ *                   missing (HF CDN sometimes strips it).
+ *   bCompleted    — false for every intermediate progress tick; true on
+ *                   exactly ONE terminal broadcast, fired after every
+ *                   queued file has been atomic-renamed on disk, BEFORE
+ *                   the subsystem chains into its ThreadPool load. Bind
+ *                   this to flip UI state from "downloading" to
+ *                   "loading" immediately, without waiting for OnLoaded
+ *                   (the backbone + codec still have to construct —
+ *                   typically another 1-3 s). On download failure this
+ *                   broadcast is NOT fired — the error flows through
+ *                   OnLoaded(false, err).
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoNeuTtsNanoDownloadProgress,
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoNeuTtsNanoDownloadProgress,
     float, Percent,
     int64, BytesReceived,
-    int64, TotalBytes);
+    int64, TotalBytes,
+    bool,  bCompleted);
 
 /**
  * Fired by UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync for each
