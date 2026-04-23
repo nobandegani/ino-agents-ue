@@ -72,9 +72,34 @@ INOAGENTS_API bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V);
 
 /** Convert a variant enum to its canonical lowercase string
  *  ("q4f16", "fp16", "q4", "fp32", "quantized"). The returned value
- *  is the exact string embedded in ONNX filenames and used as the
- *  on-disk directory name. */
+ *  is used as the on-disk directory name and (for every variant
+ *  EXCEPT fp32) as the filename suffix.
+ *
+ *  See ChatterboxVariantToFileSuffix for the filename-suffix form:
+ *  Chatterbox Turbo's upstream HF repo uses NO suffix for the fp32
+ *  variant (files are named e.g. "speech_encoder.onnx", not
+ *  "speech_encoder_fp32.onnx"), and ORT's external-data protocol
+ *  requires the local filenames to match what's embedded in the
+ *  .onnx — so URLs + local paths both drop the suffix for fp32 even
+ *  though the directory name still says "fp32". */
 INOAGENTS_API FString ChatterboxVariantToString(EInoChatterboxVariant Variant);
+
+/** Filename suffix (including the leading underscore) for a variant's
+ *  ONNX / ONNX_DATA files. Empty for fp32 (matches HF's naming);
+ *  "_" + variant string for every other variant.
+ *
+ *    fp32      → ""          → "speech_encoder.onnx"
+ *    q4f16     → "_q4f16"    → "speech_encoder_q4f16.onnx"
+ *    fp16      → "_fp16"     → "speech_encoder_fp16.onnx"
+ *    q4        → "_q4"       → "speech_encoder_q4.onnx"
+ *    quantized → "_quantized"→ "speech_encoder_quantized.onnx"
+ *
+ *  Use this for both URL construction (HF path) AND local filename
+ *  construction (on-disk cache). They MUST match, otherwise ORT's
+ *  external-data lookup will fail when loading the .onnx_data
+ *  companion — the .onnx file embeds its companion path as a relative
+ *  string. */
+INOAGENTS_API FString ChatterboxVariantToFileSuffix(EInoChatterboxVariant Variant);
 
 /** Parse a variant string (case-insensitive) into an enum value.
  *  Returns false on unknown input and leaves OutVariant untouched. */

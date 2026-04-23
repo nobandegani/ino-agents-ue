@@ -182,6 +182,21 @@ namespace
      * Component is the Chatterbox logical piece name: "speech_encoder",
      * "embed_tokens", "language_model", or "conditional_decoder".
      */
+    /** Filename suffix for a variant string: empty for "fp32" (HF
+     *  baseline naming), "_" + variant for every other string. Mirrors
+     *  ChatterboxVariantToFileSuffix(enum) but operates on the string
+     *  form so the existing LoadChatterboxSession(Variant as FString)
+     *  signature keeps working. Both sides MUST agree — any session
+     *  load path composing filenames needs to use this rule, otherwise
+     *  a direct "%s_%s.onnx" composition produces bogus names like
+     *  "speech_encoder_fp32.onnx" that don't exist in the HF repo. */
+    FString VariantSuffixFromString(const FString& Variant)
+    {
+        return Variant.Equals(TEXT("fp32"), ESearchCase::IgnoreCase)
+            ? FString()
+            : FString::Printf(TEXT("_%s"), *Variant);
+    }
+
     TUniquePtr<FInoOnnxSession> LoadChatterboxSession(
         const FString& BaseDir,
         const FString& Variant,
@@ -190,7 +205,8 @@ namespace
         bool bForceCpu,
         FString* OutError)
     {
-        const FString FileName = FString::Printf(TEXT("%s_%s.onnx"), Component, *Variant);
+        const FString FileName = FString::Printf(
+            TEXT("%s%s.onnx"), Component, *VariantSuffixFromString(Variant));
         const FString FullPath = FPaths::Combine(BaseDir, FileName);
 
         if (!IFileManager::Get().FileExists(*FullPath))

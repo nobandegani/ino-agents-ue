@@ -464,10 +464,20 @@ namespace
         return Fm.FileSize(*Path) > 0;
     }
 
-    /** Required component filename for one session at one variant. */
-    FString ChatterboxComponentFilename(const TCHAR* Component, const FString& Variant)
+    /** Required component filename for one session at one variant.
+     *  Uses ChatterboxVariantToFileSuffix so fp32's suffix-less naming
+     *  (matching the HF repo) flows through consistently. */
+    FString ChatterboxComponentFilename(const TCHAR* Component, EInoChatterboxVariant Variant)
     {
-        return FString::Printf(TEXT("%s_%s.onnx"), Component, *Variant);
+        return FString::Printf(TEXT("%s%s.onnx"),
+            Component, *ChatterboxVariantToFileSuffix(Variant));
+    }
+
+    /** Companion .onnx_data filename — same suffix rule. */
+    FString ChatterboxComponentDataFilename(const TCHAR* Component, EInoChatterboxVariant Variant)
+    {
+        return FString::Printf(TEXT("%s%s.onnx_data"),
+            Component, *ChatterboxVariantToFileSuffix(Variant));
     }
 }
 
@@ -482,14 +492,13 @@ bool UInoChatterboxTtsSubsystem::IsModelDownloaded(EInoChatterboxVariant Variant
     // config.json / generation_config.json are also NOT in the required
     // set — the runtime pipeline doesn't read them; the PS1 downloads
     // them for completeness only.
-    const FString VariantStr = ChatterboxVariantToString(Variant);
-    const FString Dir        = ChatterboxResolveVariantDir(Variant);
+    const FString Dir = ChatterboxResolveVariantDir(Variant);
 
     const FString RequiredFiles[] = {
-        ChatterboxComponentFilename(TEXT("speech_encoder"),      VariantStr),
-        ChatterboxComponentFilename(TEXT("embed_tokens"),        VariantStr),
-        ChatterboxComponentFilename(TEXT("language_model"),      VariantStr),
-        ChatterboxComponentFilename(TEXT("conditional_decoder"), VariantStr),
+        ChatterboxComponentFilename(TEXT("speech_encoder"),      Variant),
+        ChatterboxComponentFilename(TEXT("embed_tokens"),        Variant),
+        ChatterboxComponentFilename(TEXT("language_model"),      Variant),
+        ChatterboxComponentFilename(TEXT("conditional_decoder"), Variant),
         FString(TEXT("tokenizer.json")),
     };
 
@@ -527,10 +536,9 @@ bool UInoChatterboxTtsSubsystem::IsConfigDownloaded(
 
     for (const FCheck& C : Checks)
     {
-        const FString VariantStr = ChatterboxVariantToString(C.Variant);
-        const FString Dir        = ChatterboxResolveVariantDir(C.Variant);
-        const FString File       = FPaths::Combine(
-            Dir, ChatterboxComponentFilename(C.Component, VariantStr));
+        const FString Dir  = ChatterboxResolveVariantDir(C.Variant);
+        const FString File = FPaths::Combine(
+            Dir, ChatterboxComponentFilename(C.Component, C.Variant));
         if (!ChatterboxFileOkNonEmpty(File))
         {
             return false;
@@ -844,9 +852,14 @@ namespace
     {
         using FFile = FInoChatterboxDownloadFile;
 
-        const FString VariantStr = ChatterboxVariantToString(Variant);
-        const FString OnnxName = FString::Printf(TEXT("%s_%s.onnx"), Component, *VariantStr);
-        const FString DataName = FString::Printf(TEXT("%s_%s.onnx_data"), Component, *VariantStr);
+        // Suffix is empty for fp32 (HF names it "speech_encoder.onnx")
+        // and "_" + variant for every other variant
+        // ("speech_encoder_q4f16.onnx" etc.). URL + local path MUST
+        // match so ORT's external-data lookup for the .onnx_data
+        // companion resolves — the .onnx file embeds the companion
+        // path as a relative filename.
+        const FString OnnxName = ChatterboxComponentFilename(Component, Variant);
+        const FString DataName = ChatterboxComponentDataFilename(Component, Variant);
         const FString OnnxPath = FPaths::Combine(TargetDir, OnnxName);
         const FString DataPath = FPaths::Combine(TargetDir, DataName);
 

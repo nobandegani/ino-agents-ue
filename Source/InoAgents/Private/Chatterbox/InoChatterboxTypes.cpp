@@ -19,6 +19,20 @@ FString ChatterboxVariantToString(EInoChatterboxVariant Variant)
     return TEXT("q4f16");
 }
 
+FString ChatterboxVariantToFileSuffix(EInoChatterboxVariant Variant)
+{
+    // fp32 is the "baseline" variant in the upstream HF repo — files
+    // are named speech_encoder.onnx (no suffix). Every other variant
+    // has a "_<variant>" suffix. Must match on BOTH sides (URL + local
+    // filename) so ORT's external-data lookup for the .onnx_data
+    // companion resolves correctly.
+    if (Variant == EInoChatterboxVariant::FP32)
+    {
+        return FString();
+    }
+    return FString::Printf(TEXT("_%s"), *ChatterboxVariantToString(Variant));
+}
+
 bool ChatterboxVariantFromString(
     const FString& InString,
     EInoChatterboxVariant& OutVariant)
