@@ -48,6 +48,46 @@ UInoAgentsSettings::UInoAgentsSettings()
         FP16.Revision           = TEXT("main");
         ChatterboxModels.Add(MoveTemp(FP16));
     }
+    // q4 — ~640 MB total, 4-bit weights but FP32 activations.
+    // Notable for mobile: avoids the fp16 BiasGelu kernel gap on
+    // Android's ORT 1.24.3 AAR that bites q4f16 on conditional_decoder
+    // at graph-opt level 2 (Extended). If q4f16 is slow because we
+    // had to drop to Basic on Android, q4 may let us go back up to
+    // Extended and regain the fusion optimizations. Worth testing.
+    {
+        FInoChatterboxModelEntry Q4;
+        Q4.DisplayName        = TEXT("Chatterbox Turbo q4");
+        Q4.Variant            = EInoChatterboxVariant::Q4;
+        Q4.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        Q4.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(Q4));
+    }
+    // fp32 — ~3.2 GB total, reference-quality weights + activations.
+    // Rarely worth shipping (too big) but indispensable for
+    // benchmarking — if fp32 is faster than a quantized variant on
+    // your hardware, that's a strong signal the quantized tier is
+    // hitting a slow / unoptimized kernel path.
+    {
+        FInoChatterboxModelEntry FP32;
+        FP32.DisplayName        = TEXT("Chatterbox Turbo fp32");
+        FP32.Variant            = EInoChatterboxVariant::FP32;
+        FP32.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        FP32.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(FP32));
+    }
+    // quantized — ~1.0 GB total, INT8 throughout (unusual suffix
+    // "_quantized" on the file names, matching the HF naming convention).
+    // Quality varies more than the other variants sentence-to-sentence;
+    // worth trying if you're CPU-bound and can tolerate occasional
+    // artifacts.
+    {
+        FInoChatterboxModelEntry Quantized;
+        Quantized.DisplayName        = TEXT("Chatterbox Turbo quantized (int8)");
+        Quantized.Variant            = EInoChatterboxVariant::Quantized;
+        Quantized.HuggingFaceRepoUrl = TEXT("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX");
+        Quantized.Revision           = TEXT("main");
+        ChatterboxModels.Add(MoveTemp(Quantized));
+    }
 
     // Default NeuTTS Nano entry — Q4 only in v1. Backbone GGUF from
     // neuphonic/neutts-nano-q4-gguf (195 MB, Qwen2-derived ~117M params).
