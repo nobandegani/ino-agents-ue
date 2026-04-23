@@ -37,10 +37,50 @@ namespace
         return Min + Rng.FRand() * (Max - Min);
     }
 
-    /** Pick the next random interval before a blink. */
-    float PickNextBlinkInterval(FRandomStream& Rng, const FInoBlinkConfig& Cfg)
+    /**
+     * Pick the next inter-blink interval.
+     *
+     * Two-component pseudo-log-normal approximation:
+     *   - With probability Cfg.LongPauseChance (default 10%), sample an
+     *     extended "stare" interval in [MaxInterval, MaxInterval *
+     *     LongPauseMaxMultiplier]. Mimics the heavy right tail of real
+     *     human blink intervals (focused / thinking periods).
+     *   - Otherwise, sample uniform in [MinInterval, MaxInterval].
+     *     This is the typical distraction-free range.
+     *
+     * Finally, scale by a speaking-rate multiplier so active speech
+     * compresses intervals (real humans blink ~60% more often while
+     * talking). At SpeakingIntensity=1.0 the returned interval is 60%
+     * of the sampled value.
+     */
+    float PickNextBlinkInterval(
+        FRandomStream&           Rng,
+        const FInoBlinkConfig&   Cfg,
+        float                    SpeakingIntensity)
     {
-        return RandRange(Rng, Cfg.MinInterval, Cfg.MaxInterval);
+        const float LongPauseChance = FMath::Clamp(Cfg.LongPauseChance, 0.f, 1.f);
+        const float LongPauseMul    = FMath::Max(Cfg.LongPauseMaxMultiplier, 1.f);
+
+        float Interval;
+        if (LongPauseChance > 0.f && Rng.FRand() < LongPauseChance)
+        {
+            // Extended stare: above the typical-range ceiling up to N×.
+            const float StareMin = Cfg.MaxInterval;
+            const float StareMax = Cfg.MaxInterval * LongPauseMul;
+            Interval = RandRange(Rng, StareMin, StareMax);
+        }
+        else
+        {
+            Interval = RandRange(Rng, Cfg.MinInterval, Cfg.MaxInterval);
+        }
+
+        // Speaking compresses intervals. At SpeakingIntensity=1.0 the
+        // multiplier is 0.6 — matches the ~60% increase in blink rate
+        // observed during active speech in psychophysical studies.
+        const float Speak = FMath::Clamp(SpeakingIntensity, 0.f, 1.f);
+        const float SpeakMul = 1.0f - 0.4f * Speak;
+
+        return Interval * SpeakMul;
     }
 
     /** Randomise per-blink durations (seconds). */
@@ -52,12 +92,27 @@ namespace
         OutOpen  = RandRange(Rng, Cfg.MinOpenDuration,   Cfg.MaxOpenDuration);
     }
 
-    /** Smooth ease curve: fast start/end, smooth through 0→1. */
-    float EaseInOut(float T)
+    /**
+     * Cubic ease-in for the eyelid-close phase. Slow start, accelerating
+     * finish — matches gravity-assisted eyelid descent. Real closes are
+     * almost a "snap"; pure linear or ease-in-out looks too mechanical.
+     */
+    float EaseInCubic(float T)
     {
-        // Hermite smoothstep.
         T = FMath::Clamp(T, 0.f, 1.f);
-        return T * T * (3.f - 2.f * T);
+        return T * T * T;
+    }
+
+    /**
+     * Quadratic ease-out for the eyelid-open phase. Fast start, decelerating
+     * finish — the eye settles into the open position rather than snapping
+     * to it. Slower than the close by design (see interval defaults).
+     */
+    float EaseOutQuad(float T)
+    {
+        T = FMath::Clamp(T, 0.f, 1.f);
+        const float OneMinus = 1.f - T;
+        return 1.f - OneMinus * OneMinus;
     }
 }
 
@@ -163,106 +218,210 @@ FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
 FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
     float DeltaTime,
     const FInoBlinkState& PreviousState,
-    const FInoBlinkConfig& Config)
+    const FInoBlinkConfig& Config,
+    float SpeakingIntensity)
 {
     FInoBlinkState S = PreviousState;
 
     // First-frame init: seed the RNG and pick the first blink time.
+    // Use non-deterministic seed from FMath::Rand() so each character
+    // starts blinking on an independent schedule — if we all seeded
+    // from 0, every NPC in a crowd would blink in lockstep.
     if (!S.bSeeded)
     {
         S.Seed = FMath::Rand();
         S.bSeeded = true;
-        FRandomStream Rng(S.Seed);
-        // Advance the seed so subsequent calls get different values.
-        S.Seed = Rng.RandHelper(MAX_int32);
-        S.NextBlinkTime = PickNextBlinkInterval(Rng, Config);
-        S.Seed = Rng.RandHelper(MAX_int32);
-        S.Timer = 0.f;
-        S.Phase = 0;
+
+        FRandomStream InitRng(S.Seed);
+        S.NextBlinkTime = PickNextBlinkInterval(InitRng, Config, SpeakingIntensity);
+        S.Seed = InitRng.RandHelper(MAX_int32);
+
+        S.Timer       = 0.f;
+        S.Phase       = 0;
+        S.PhaseTimer  = 0.f;
         S.BlinkWeight = 0.f;
+        return S;
+    }
+
+    // Don't process zero or negative time — paused game, bad frame, etc.
+    if (DeltaTime <= 0.f)
+    {
         return S;
     }
 
     FRandomStream Rng(S.Seed);
 
-    if (S.Phase == 0)
+    // -------------------------------------------------------------------
+    //  State machine: drain DeltaTime across as many phase transitions
+    //  as needed in this single tick. This is what makes the blink
+    //  framerate-independent even at 30 fps where a whole hold phase
+    //  (30–70 ms) can complete inside a 33 ms frame.
+    //
+    //  The loop body is one phase-advance step: it consumes AT MOST the
+    //  time needed to finish the current phase, then the loop reconsiders.
+    //  A generous safety bound stops any theoretical infinite loop if all
+    //  durations collapse to zero at runtime.
+    // -------------------------------------------------------------------
+    float Remaining = DeltaTime;
+    int32 SafetyBound = 16;  // max phase transitions per frame
+
+    while (Remaining > 0.f && SafetyBound-- > 0)
     {
-        // Idle — waiting for next blink.
-        S.Timer += DeltaTime;
-        S.BlinkWeight = 0.f;
-
-        if (S.Timer >= S.NextBlinkTime)
+        if (S.Phase == 0)
         {
-            // Start closing.
-            S.Phase = 1;
-            S.PhaseTimer = 0.f;
-            PickBlinkDurations(Rng, Config, S.CloseDuration, S.HoldDuration, S.OpenDuration);
-            S.Seed = Rng.RandHelper(MAX_int32);
-
-            if (S.PendingDoubleBlinks == 0 && Rng.FRand() < Config.DoubleBlinkChance)
+            // Idle — wait out the interval, then start a close.
+            const float TimeLeft = S.NextBlinkTime - S.Timer;
+            if (Remaining < TimeLeft)
             {
-                S.PendingDoubleBlinks = 1;
-            }
-            S.Seed = Rng.RandHelper(MAX_int32);
-        }
-    }
-
-    if (S.Phase == 1)
-    {
-        // Closing.
-        S.PhaseTimer += DeltaTime;
-        const float T = FMath::Clamp(S.PhaseTimer / FMath::Max(S.CloseDuration, 0.001f), 0.f, 1.f);
-        S.BlinkWeight = EaseInOut(T);
-
-        if (S.PhaseTimer >= S.CloseDuration)
-        {
-            S.Phase = 2;
-            S.PhaseTimer = 0.f;
-            S.BlinkWeight = 1.f;
-        }
-    }
-    else if (S.Phase == 2)
-    {
-        // Hold closed.
-        S.PhaseTimer += DeltaTime;
-        S.BlinkWeight = 1.f;
-
-        if (S.PhaseTimer >= S.HoldDuration)
-        {
-            S.Phase = 3;
-            S.PhaseTimer = 0.f;
-        }
-    }
-    else if (S.Phase == 3)
-    {
-        // Opening.
-        S.PhaseTimer += DeltaTime;
-        const float T = FMath::Clamp(S.PhaseTimer / FMath::Max(S.OpenDuration, 0.001f), 0.f, 1.f);
-        S.BlinkWeight = 1.f - EaseInOut(T);
-
-        if (S.PhaseTimer >= S.OpenDuration)
-        {
-            // Blink complete.
-            S.BlinkWeight = 0.f;
-
-            if (S.PendingDoubleBlinks > 0)
-            {
-                // Immediately start another blink (double blink).
-                S.PendingDoubleBlinks--;
-                S.Phase = 1;
-                S.PhaseTimer = 0.f;
-                PickBlinkDurations(Rng, Config, S.CloseDuration, S.HoldDuration, S.OpenDuration);
-                S.Seed = Rng.RandHelper(MAX_int32);
+                // Still idle at end of frame.
+                S.Timer += Remaining;
+                Remaining = 0.f;
             }
             else
             {
-                // Back to idle.
-                S.Phase = 0;
-                S.Timer = 0.f;
-                S.NextBlinkTime = PickNextBlinkInterval(Rng, Config);
+                // Interval elapsed this frame — carry the overshoot
+                // into the close phase so short intervals at low fps
+                // don't get clipped.
+                Remaining -= TimeLeft;
+                S.Timer   = S.NextBlinkTime;
+
+                // Pick per-blink durations.
+                PickBlinkDurations(Rng, Config,
+                                   S.CloseDuration, S.HoldDuration, S.OpenDuration);
                 S.Seed = Rng.RandHelper(MAX_int32);
+
+                // Maybe queue a double blink. Only rolls if we're not
+                // already servicing one — avoids triple/quadruple chains.
+                if (S.PendingDoubleBlinks == 0
+                    && Config.DoubleBlinkChance > 0.f
+                    && Rng.FRand() < Config.DoubleBlinkChance)
+                {
+                    S.PendingDoubleBlinks = 1;
+                }
+                S.Seed = Rng.RandHelper(MAX_int32);
+
+                S.Phase      = 1;
+                S.PhaseTimer = 0.f;
             }
         }
+        else if (S.Phase == 1)
+        {
+            // Closing — eyelid descends. Use EaseInCubic externally.
+            const float TimeLeft = S.CloseDuration - S.PhaseTimer;
+            if (Remaining < TimeLeft)
+            {
+                S.PhaseTimer += Remaining;
+                Remaining = 0.f;
+            }
+            else
+            {
+                Remaining    -= TimeLeft;
+                S.Phase       = 2;
+                S.PhaseTimer  = 0.f;
+            }
+        }
+        else if (S.Phase == 2)
+        {
+            // Holding closed.
+            const float TimeLeft = S.HoldDuration - S.PhaseTimer;
+            if (Remaining < TimeLeft)
+            {
+                S.PhaseTimer += Remaining;
+                Remaining = 0.f;
+            }
+            else
+            {
+                Remaining    -= TimeLeft;
+                S.Phase       = 3;
+                S.PhaseTimer  = 0.f;
+            }
+        }
+        else  // S.Phase == 3 (opening)
+        {
+            const float TimeLeft = S.OpenDuration - S.PhaseTimer;
+            if (Remaining < TimeLeft)
+            {
+                S.PhaseTimer += Remaining;
+                Remaining = 0.f;
+            }
+            else
+            {
+                Remaining -= TimeLeft;
+
+                if (S.PendingDoubleBlinks > 0)
+                {
+                    // Chain immediately into a second blink. Re-roll
+                    // per-blink durations so the double blink isn't
+                    // a bit-exact copy of the first.
+                    S.PendingDoubleBlinks--;
+                    PickBlinkDurations(Rng, Config,
+                                       S.CloseDuration, S.HoldDuration, S.OpenDuration);
+                    S.Seed = Rng.RandHelper(MAX_int32);
+
+                    S.Phase      = 1;
+                    S.PhaseTimer = 0.f;
+                }
+                else
+                {
+                    // Back to idle; pick the NEXT blink interval using
+                    // the current SpeakingIntensity so starting/stopping
+                    // to talk takes effect at the cleanest possible point
+                    // (between blinks, not mid-eyelid-motion).
+                    S.NextBlinkTime = PickNextBlinkInterval(Rng, Config, SpeakingIntensity);
+                    S.Seed = Rng.RandHelper(MAX_int32);
+
+                    S.Phase      = 0;
+                    S.Timer      = 0.f;
+                    S.PhaseTimer = 0.f;
+                }
+            }
+        }
+    }
+
+    // Persist the RNG state for next call.
+    S.Seed = Rng.RandHelper(MAX_int32);
+
+    // -------------------------------------------------------------------
+    //  Compute BlinkWeight from the final phase state. Single source of
+    //  truth — no setting it inside the loop above means we can't drift
+    //  between "phase advanced" and "weight updated".
+    //
+    //  Close uses EaseInCubic (snap-like), open uses EaseOutQuad
+    //  (muscle-driven settle). Hold is hardcoded 1.0. Idle is 0.0.
+    // -------------------------------------------------------------------
+    switch (S.Phase)
+    {
+        case 0:
+            S.BlinkWeight = 0.f;
+            break;
+
+        case 1:
+        {
+            const float T = (S.CloseDuration > 0.001f)
+                ? (S.PhaseTimer / S.CloseDuration)
+                : 1.f;
+            S.BlinkWeight = EaseInCubic(T);
+            break;
+        }
+
+        case 2:
+            S.BlinkWeight = 1.f;
+            break;
+
+        case 3:
+        {
+            const float T = (S.OpenDuration > 0.001f)
+                ? (S.PhaseTimer / S.OpenDuration)
+                : 1.f;
+            S.BlinkWeight = 1.f - EaseOutQuad(T);
+            break;
+        }
+
+        default:
+            // Shouldn't happen, but defense in depth.
+            S.BlinkWeight = 0.f;
+            S.Phase       = 0;
+            break;
     }
 
     return S;

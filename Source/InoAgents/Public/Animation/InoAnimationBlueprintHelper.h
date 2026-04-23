@@ -105,6 +105,31 @@ struct INOAGENTS_API FInoBlinkConfig
     /** Chance of a double blink (0.0 – 1.0). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float DoubleBlinkChance = 0.20f;
+
+    /**
+     * Chance that any given inter-blink interval is an extended "stare"
+     * pause rather than a typical-length interval (0.0 – 1.0). Real human
+     * blink intervals follow a log-normal-like distribution — most fall
+     * in the typical 2–6 s range, but occasional pauses stretch out to
+     * 10–15 s (someone focused, thinking, or staring). 10% default
+     * approximates real data.
+     *
+     * Set to 0.0 for purely uniform intervals (more metronomic but
+     * simpler to reason about).
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float LongPauseChance = 0.10f;
+
+    /**
+     * Upper multiplier on MaxInterval when a long pause fires. A value
+     * of 2.5 means occasional intervals extend up to 2.5 × MaxInterval
+     * (with MaxInterval=6 s → up to 15 s). Lower values keep long
+     * pauses closer to the typical range.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "1.0", ClampMax = "10.0"))
+    float LongPauseMaxMultiplier = 2.5f;
 };
 
 /**
@@ -209,18 +234,47 @@ public:
     /**
      * Procedural eye blink simulation.
      *
-     * Call every frame, feed the output back as PreviousState.
-     * Produces a natural blink pattern: random intervals,
-     * asymmetric close/open speed, occasional double blinks.
+     * Call every frame, feed the output back as PreviousState. Produces
+     * a natural blink pattern with several layers of realism:
      *
-     * @param DeltaTime      Frame delta time (seconds).
-     * @param PreviousState  Output from the previous frame.
-     * @return               Updated state with BlinkWeight in [0, 1].
+     *   - Random inter-blink intervals in the configured range, with an
+     *     occasional long "stare" pause (log-normal-like distribution).
+     *     Breaks the "metronome" feel that pure uniform sampling has
+     *     over long observation periods.
+     *   - Asymmetric eyelid motion: fast cubic-ease-in close (gravity-
+     *     assisted), brief hold, slower quadratic-ease-out reopen
+     *     (muscle-driven). Matches real eyelid kinematics.
+     *   - Occasional double blinks (configurable chance). Real humans
+     *     do this unconsciously every so often.
+     *   - Speaking-rate modulation: humans blink ~60% more often while
+     *     talking than while silent. Drive SpeakingIntensity from your
+     *     TTS / voice-activity signal to have the character's blink
+     *     rate breathe with its speech.
+     *   - Framerate-independent time consumption: even at 30 fps with
+     *     a 33 ms frame, short phases (hold = 30–70 ms) transition
+     *     correctly without losing or double-counting time — internally
+     *     the state machine drains DeltaTime across as many phase
+     *     transitions as it needs to.
+     *
+     * @param DeltaTime          Frame delta time (seconds).
+     * @param PreviousState      Output from the previous frame.
+     * @param Config             Timing + distribution parameters.
+     * @param SpeakingIntensity  0.0 = idle/silent (configured intervals),
+     *                           1.0 = actively talking (intervals
+     *                           compressed to ~60% of configured range).
+     *                           Typical game signal: set to your TTS
+     *                           amplitude envelope or a simple
+     *                           "isSpeaking ? 1.0 : 0.0" boolean.
+     *                           Takes effect on the next interval pick
+     *                           (at end of a blink), not mid-interval.
+     * @return                   Updated state with BlinkWeight in [0, 1].
      */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Animation",
               meta = (DisplayName = "Calculate Blink Weight"))
     static FInoBlinkState CalculateBlinkWeight(
         float DeltaTime,
         const FInoBlinkState& PreviousState,
-        const FInoBlinkConfig& Config);
+        const FInoBlinkConfig& Config,
+        UPARAM(meta = (ClampMin = "0.0", ClampMax = "1.0"))
+        float SpeakingIntensity = 0.0f);
 };
