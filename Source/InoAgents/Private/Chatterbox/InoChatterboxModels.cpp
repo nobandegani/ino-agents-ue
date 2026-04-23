@@ -344,6 +344,114 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     return Bundle;
 }
 
+TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadPerSession(
+    const FSessionLoadSpec& Enc,
+    const FSessionLoadSpec& Embed,
+    const FSessionLoadSpec& LM,
+    const FSessionLoadSpec& Dec,
+    FString*                                OutError,
+    const FInoChatterboxPerformanceOptions& Performance)
+{
+    auto ValidateSpec = [&](const FSessionLoadSpec& Spec,
+                            const TCHAR* Component,
+                            FString* Err) -> bool
+    {
+        if (Spec.Dir.IsEmpty() || Spec.Variant.IsEmpty())
+        {
+            if (Err)
+            {
+                *Err = FString::Printf(
+                    TEXT("FInoChatterboxModels::LoadPerSession: %s has empty Dir or Variant."),
+                    Component);
+            }
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("LoadPerSession: %s spec invalid (Dir='%s', Variant='%s')"),
+                   Component, *Spec.Dir, *Spec.Variant);
+            return false;
+        }
+        if (!FPaths::DirectoryExists(Spec.Dir))
+        {
+            if (Err)
+            {
+                *Err = FString::Printf(
+                    TEXT("LoadPerSession: %s directory missing: %s"),
+                    Component, *Spec.Dir);
+            }
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("LoadPerSession: %s directory missing: %s"),
+                   Component, *Spec.Dir);
+            return false;
+        }
+        return true;
+    };
+
+    if (!ValidateSpec(Enc,   TEXT("speech_encoder"),      OutError)) return nullptr;
+    if (!ValidateSpec(Embed, TEXT("embed_tokens"),        OutError)) return nullptr;
+    if (!ValidateSpec(LM,    TEXT("language_model"),      OutError)) return nullptr;
+    if (!ValidateSpec(Dec,   TEXT("conditional_decoder"), OutError)) return nullptr;
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: per-session load — enc=%s embed=%s lm=%s dec=%s, ")
+           TEXT("intra=%d inter=%d profiling=%s dml=%s adapter=%d ")
+           TEXT("cpu-overrides: enc=%s embed=%s lm=%s dec=%s"),
+           *Enc.Variant, *Embed.Variant, *LM.Variant, *Dec.Variant,
+           Performance.IntraOpThreadCount,
+           Performance.InterOpThreadCount,
+           Performance.bEnableOrtProfiling ? TEXT("yes") : TEXT("no"),
+           Performance.bPreferDirectMl     ? TEXT("yes") : TEXT("no"),
+           Performance.DirectMlAdapterIndex,
+           Performance.bSpeechEncoderOnCpu      ? TEXT("yes") : TEXT("no"),
+           Performance.bEmbedTokensOnCpu        ? TEXT("yes") : TEXT("no"),
+           Performance.bLanguageModelOnCpu      ? TEXT("yes") : TEXT("no"),
+           Performance.bConditionalDecoderOnCpu ? TEXT("yes") : TEXT("no"));
+
+    TUniquePtr<FInoChatterboxModels> Bundle(new FInoChatterboxModels());
+    // Variant + BaseDir store the speech_encoder's values as the
+    // "representative" — used by UI / logs that want a single string
+    // for display ("what's loaded?"). For multi-variant bundles the
+    // getters are best-effort; callers that need per-session info
+    // should go through the session accessors directly.
+    Bundle->Variant = Enc.Variant;
+    Bundle->BaseDir = Enc.Dir;
+
+    Bundle->SpeechEncoder = LoadChatterboxSession(
+        Enc.Dir, Enc.Variant, TEXT("speech_encoder"), Performance,
+        Performance.bSpeechEncoderOnCpu, OutError);
+    if (!Bundle->SpeechEncoder.IsValid())
+    {
+        return nullptr;
+    }
+
+    Bundle->EmbedTokens = LoadChatterboxSession(
+        Embed.Dir, Embed.Variant, TEXT("embed_tokens"), Performance,
+        Performance.bEmbedTokensOnCpu, OutError);
+    if (!Bundle->EmbedTokens.IsValid())
+    {
+        return nullptr;
+    }
+
+    Bundle->LanguageModel = LoadChatterboxSession(
+        LM.Dir, LM.Variant, TEXT("language_model"), Performance,
+        Performance.bLanguageModelOnCpu, OutError);
+    if (!Bundle->LanguageModel.IsValid())
+    {
+        return nullptr;
+    }
+
+    Bundle->ConditionalDecoder = LoadChatterboxSession(
+        Dec.Dir, Dec.Variant, TEXT("conditional_decoder"), Performance,
+        Performance.bConditionalDecoderOnCpu, OutError);
+    if (!Bundle->ConditionalDecoder.IsValid())
+    {
+        return nullptr;
+    }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: all four sessions loaded (per-session)."));
+
+    return Bundle;
+}
+
 void FInoChatterboxModels::LogMetadata() const
 {
     if (!SpeechEncoder.IsValid() || !EmbedTokens.IsValid()

@@ -72,9 +72,37 @@ public:
      * Returns a valid TUniquePtr on success, nullptr on failure (with
      * *OutError populated and a detailed log line).
      */
+    /**
+     * Single-variant shorthand: load all 4 sessions at the same
+     * quantization level from one directory. Used by the subsystem's
+     * non-per-session path and by the smoke tests.
+     */
     static TUniquePtr<FInoChatterboxModels> LoadFromDir(
         const FString& BaseDir,
         const FString& Variant,
+        FString* OutError = nullptr,
+        const FInoChatterboxPerformanceOptions& Performance = FInoChatterboxPerformanceOptions{});
+
+    /**
+     * Per-session load: each of the 4 sessions has its own variant +
+     * directory. Used when FInoChatterboxModelConfig::bUsePerSessionVariants
+     * is true. Consumers typically call ChatterboxResolveVariantDir
+     * per session to compute the directories, then pass them here.
+     *
+     * Same failure semantics as LoadFromDir — returns nullptr + fills
+     * OutError on first load failure (stops at the failing session).
+     */
+    struct FSessionLoadSpec
+    {
+        FString Dir;
+        FString Variant;  ///< lowercase, matches the filename suffix
+    };
+
+    static TUniquePtr<FInoChatterboxModels> LoadPerSession(
+        const FSessionLoadSpec& SpeechEncoder,
+        const FSessionLoadSpec& EmbedTokens,
+        const FSessionLoadSpec& LanguageModel,
+        const FSessionLoadSpec& ConditionalDecoder,
         FString* OutError = nullptr,
         const FInoChatterboxPerformanceOptions& Performance = FInoChatterboxPerformanceOptions{});
 

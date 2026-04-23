@@ -71,3 +71,57 @@ FString ChatterboxResolveVariantDir(EInoChatterboxVariant Variant)
         TEXT("Chatterbox"),
         ChatterboxVariantToString(Variant));
 }
+
+bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V)
+{
+    // fp16 group: both quantization tiers that ONNX-export with fp16
+    // activations. The ONNX file's intermediate tensor dtypes are what
+    // governs this — not the weight storage format. q4f16's 4-bit
+    // weights get dequantized to fp16 at runtime, same activation
+    // plane as vanilla fp16 export.
+    switch (V)
+    {
+        case EInoChatterboxVariant::Q4F16:
+        case EInoChatterboxVariant::FP16:
+            return true;
+        case EInoChatterboxVariant::Q4:
+        case EInoChatterboxVariant::FP32:
+        case EInoChatterboxVariant::Quantized:
+            return false;
+    }
+    return false;
+}
+
+bool ChatterboxVariantsAreDtypeCompatible(
+    EInoChatterboxVariant A, EInoChatterboxVariant B)
+{
+    // Compatible iff both variants share the same activation dtype
+    // group. This is what ORT needs to hand tensors off between
+    // sessions without an explicit cast.
+    return ChatterboxVariantHasFp16Activations(A)
+        == ChatterboxVariantHasFp16Activations(B);
+}
+
+void ChatterboxResolveSessionVariants(
+    const FInoChatterboxModelConfig& Config,
+    EInoChatterboxVariant&           OutSpeechEncoder,
+    EInoChatterboxVariant&           OutEmbedTokens,
+    EInoChatterboxVariant&           OutLanguageModel,
+    EInoChatterboxVariant&           OutConditionalDecoder)
+{
+    if (Config.bUsePerSessionVariants)
+    {
+        OutSpeechEncoder      = Config.SpeechEncoderVariant;
+        OutEmbedTokens        = Config.EmbedTokensVariant;
+        OutLanguageModel      = Config.LanguageModelVariant;
+        OutConditionalDecoder = Config.ConditionalDecoderVariant;
+    }
+    else
+    {
+        // Simple case: Variant applies to every session.
+        OutSpeechEncoder      = Config.Variant;
+        OutEmbedTokens        = Config.Variant;
+        OutLanguageModel      = Config.Variant;
+        OutConditionalDecoder = Config.Variant;
+    }
+}

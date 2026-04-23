@@ -126,11 +126,46 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
         return;
     }
 
-    // -------- Resolve the variant directory --------
+    // -------- Resolve per-session variants --------
+    //
+    // Simple case (bUsePerSessionVariants=false): all four sessions
+    // resolve to Config.Variant — identical to the pre-per-session
+    // behavior. Per-session case: each session gets its own variant
+    // + directory. Both paths flow through the same downstream code.
 
-    const EInoChatterboxVariant VariantEnum = Config.Variant;
-    const FString               VariantStr  = ChatterboxVariantToString(VariantEnum);
-    const FString               Dir         = ChatterboxResolveVariantDir(VariantEnum);
+    EInoChatterboxVariant EncV, EmbedV, LMV, DecV;
+    ChatterboxResolveSessionVariants(Config, EncV, EmbedV, LMV, DecV);
+
+    // Diagnostic: warn if the user's per-session combination mixes
+    // activation dtypes. ORT does not cast tensors across session
+    // boundaries — the synth will fail at first Run with a dtype
+    // error. We still proceed to load so the user can see what
+    // happens, but log loudly so they know what's up.
+    if (Config.bUsePerSessionVariants)
+    {
+        const bool bAllFp16 = ChatterboxVariantHasFp16Activations(EncV)
+                           && ChatterboxVariantHasFp16Activations(EmbedV)
+                           && ChatterboxVariantHasFp16Activations(LMV)
+                           && ChatterboxVariantHasFp16Activations(DecV);
+        const bool bAllFp32 = !ChatterboxVariantHasFp16Activations(EncV)
+                           && !ChatterboxVariantHasFp16Activations(EmbedV)
+                           && !ChatterboxVariantHasFp16Activations(LMV)
+                           && !ChatterboxVariantHasFp16Activations(DecV);
+        if (!bAllFp16 && !bAllFp32)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Chatterbox LoadModelsAsync: per-session variants mix ")
+                   TEXT("activation dtypes (enc=%s embed=%s lm=%s dec=%s). ")
+                   TEXT("ORT will not cast tensors across session boundaries — ")
+                   TEXT("synth will fail with a dtype mismatch error at first Run. ")
+                   TEXT("Stay within one activation dtype group: fp16 (Q4F16, FP16) ")
+                   TEXT("or fp32 (Q4, FP32, Quantized)."),
+                   *ChatterboxVariantToString(EncV),
+                   *ChatterboxVariantToString(EmbedV),
+                   *ChatterboxVariantToString(LMV),
+                   *ChatterboxVariantToString(DecV));
+        }
+    }
 
     // Remember the config + delegate for the download flow's
     // post-download hop into DispatchLoadWorker, and (if we skip
@@ -140,13 +175,16 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     PendingOnLoaded = OnLoaded;
 
     // -------- Files-present fast path --------
-    if (IsModelDownloaded(VariantEnum))
+    if (IsConfigDownloaded(Config))
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox LoadModelsAsync: files present, skipping download ")
-               TEXT("(variant=%s, dir=%s)"),
-               *VariantStr, *Dir);
-        DispatchLoadWorker(VariantEnum, Dir);
+               TEXT("Chatterbox LoadModelsAsync: files present (enc=%s embed=%s ")
+               TEXT("lm=%s dec=%s), skipping download"),
+               *ChatterboxVariantToString(EncV),
+               *ChatterboxVariantToString(EmbedV),
+               *ChatterboxVariantToString(LMV),
+               *ChatterboxVariantToString(DecV));
+        DispatchLoadWorker(Config);
         return;
     }
 
@@ -157,14 +195,17 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     // callbacks on the game thread; LoadModelsAsync returns here.
     UE_LOG(LogInoAgents, Log,
            TEXT("Chatterbox LoadModelsAsync: files missing — starting download ")
-           TEXT("(variant=%s, dir=%s)"),
-           *VariantStr, *Dir);
+           TEXT("(enc=%s embed=%s lm=%s dec=%s)"),
+           *ChatterboxVariantToString(EncV),
+           *ChatterboxVariantToString(EmbedV),
+           *ChatterboxVariantToString(LMV),
+           *ChatterboxVariantToString(DecV));
 
     StartDownload();
 }
 
 void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
-    EInoChatterboxVariant Variant, const FString& Dir)
+    const FInoChatterboxModelConfig& Config)
 {
     check(IsInGameThread());
     check(bLoadInFlight);
@@ -178,20 +219,44 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
     // no-op cleanly if the subsystem is torn down mid-load.
 
     TWeakObjectPtr<UInoChatterboxTtsSubsystem> WeakThis(this);
-    const FString                              VariantStr = ChatterboxVariantToString(Variant);
     const FOnInoChatterboxModelsLoaded         OnLoaded   = PendingOnLoaded;
     // Snapshot the performance options so the worker lambda doesn't
     // reach back into PendingConfig (which could be mutated from the
     // game thread while the worker is mid-load).
-    const FInoChatterboxPerformanceOptions     Performance = PendingConfig.Performance;
+    const FInoChatterboxPerformanceOptions     Performance = Config.Performance;
     const double                               TStart     = FPlatformTime::Seconds();
 
+    // Resolve per-session variants up front so the worker lambda is
+    // self-contained (no dereferencing this / PendingConfig from the
+    // worker thread). For the simple (non-per-session) case, all four
+    // resolve to Config.Variant.
+    EInoChatterboxVariant EncV, EmbedV, LMV, DecV;
+    ChatterboxResolveSessionVariants(Config, EncV, EmbedV, LMV, DecV);
+
+    FInoChatterboxModels::FSessionLoadSpec EncSpec   { ChatterboxResolveVariantDir(EncV),   ChatterboxVariantToString(EncV)   };
+    FInoChatterboxModels::FSessionLoadSpec EmbedSpec { ChatterboxResolveVariantDir(EmbedV), ChatterboxVariantToString(EmbedV) };
+    FInoChatterboxModels::FSessionLoadSpec LMSpec    { ChatterboxResolveVariantDir(LMV),    ChatterboxVariantToString(LMV)    };
+    FInoChatterboxModels::FSessionLoadSpec DecSpec   { ChatterboxResolveVariantDir(DecV),   ChatterboxVariantToString(DecV)   };
+
+    // Tokenizer is variant-agnostic — pick the speech_encoder's dir
+    // (guaranteed present if IsConfigDownloaded passed) as the source.
+    const FString TokenizerPath = FPaths::Combine(EncSpec.Dir, TEXT("tokenizer.json"));
+
+    // "Representative" variant used by GetLoadedVariant() for
+    // single-value UI queries. Speech_encoder's variant is the most
+    // natural choice — it's the session most associated with the
+    // user's "voice pipeline" decision.
+    const EInoChatterboxVariant RepresentativeVariant = EncV;
+
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox DispatchLoadWorker: dispatching (variant=%s, dir=%s)"),
-           *VariantStr, *Dir);
+           TEXT("Chatterbox DispatchLoadWorker: dispatching (enc=%s embed=%s ")
+           TEXT("lm=%s dec=%s)"),
+           *EncSpec.Variant, *EmbedSpec.Variant, *LMSpec.Variant, *DecSpec.Variant);
 
     Async(EAsyncExecution::ThreadPool,
-          [Variant, VariantStr, Dir, WeakThis, OnLoaded, Performance, TStart]()
+          [EncSpec, EmbedSpec, LMSpec, DecSpec, TokenizerPath,
+           RepresentativeVariant,
+           WeakThis, OnLoaded, Performance, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -210,15 +275,14 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
         FString LocalError;
 
         TUniquePtr<FInoChatterboxTokenizer> LocalTokenizer =
-            FInoChatterboxTokenizer::LoadFromJson(
-                FPaths::Combine(Dir, TEXT("tokenizer.json")),
-                &LocalError);
+            FInoChatterboxTokenizer::LoadFromJson(TokenizerPath, &LocalError);
 
         TUniquePtr<FInoChatterboxModels> LocalModels;
         if (LocalTokenizer.IsValid())
         {
-            LocalModels = FInoChatterboxModels::LoadFromDir(
-                Dir, VariantStr, &LocalError, Performance);
+            LocalModels = FInoChatterboxModels::LoadPerSession(
+                EncSpec, EmbedSpec, LMSpec, DecSpec,
+                &LocalError, Performance);
         }
 
         const double ElapsedMs = (FPlatformTime::Seconds() - TStart) * 1000.0;
@@ -229,7 +293,8 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
         // the lambda is `mutable` so we can then MoveTemp them again
         // into the subsystem's members.
         AsyncTask(ENamedThreads::GameThread,
-            [WeakThis, OnLoaded, ElapsedMs, Variant,
+            [WeakThis, OnLoaded, ElapsedMs,
+             Variant = RepresentativeVariant,
              LocalError = MoveTemp(LocalError),
              LocalTokenizer = MoveTemp(LocalTokenizer),
              LocalModels = MoveTemp(LocalModels)]() mutable
@@ -385,6 +450,27 @@ bool UInoChatterboxTtsSubsystem::IsModelsLoaded() const
     return Models.IsValid() && Tokenizer.IsValid();
 }
 
+namespace
+{
+    bool ChatterboxFileOkNonEmpty(const FString& Path)
+    {
+        IFileManager& Fm = IFileManager::Get();
+        if (!Fm.FileExists(*Path))
+        {
+            return false;
+        }
+        // FileSize returns -1 on stat failure; zero-length stubs also
+        // fail the > 0 check. Cheap enough to do for every required file.
+        return Fm.FileSize(*Path) > 0;
+    }
+
+    /** Required component filename for one session at one variant. */
+    FString ChatterboxComponentFilename(const TCHAR* Component, const FString& Variant)
+    {
+        return FString::Printf(TEXT("%s_%s.onnx"), Component, *Variant);
+    }
+}
+
 bool UInoChatterboxTtsSubsystem::IsModelDownloaded(EInoChatterboxVariant Variant) const
 {
     // Required file set for a runnable variant. Matches
@@ -399,34 +485,72 @@ bool UInoChatterboxTtsSubsystem::IsModelDownloaded(EInoChatterboxVariant Variant
     const FString VariantStr = ChatterboxVariantToString(Variant);
     const FString Dir        = ChatterboxResolveVariantDir(Variant);
 
-    auto FileOkNonEmpty = [](const FString& Path) -> bool
-    {
-        IFileManager& Fm = IFileManager::Get();
-        if (!Fm.FileExists(*Path))
-        {
-            return false;
-        }
-        // FileSize returns -1 on stat failure; zero-length stubs also
-        // fail the > 0 check. Cheap enough to do for every required file.
-        return Fm.FileSize(*Path) > 0;
-    };
-
     const FString RequiredFiles[] = {
-        FString::Printf(TEXT("speech_encoder_%s.onnx"),      *VariantStr),
-        FString::Printf(TEXT("embed_tokens_%s.onnx"),        *VariantStr),
-        FString::Printf(TEXT("language_model_%s.onnx"),      *VariantStr),
-        FString::Printf(TEXT("conditional_decoder_%s.onnx"), *VariantStr),
+        ChatterboxComponentFilename(TEXT("speech_encoder"),      VariantStr),
+        ChatterboxComponentFilename(TEXT("embed_tokens"),        VariantStr),
+        ChatterboxComponentFilename(TEXT("language_model"),      VariantStr),
+        ChatterboxComponentFilename(TEXT("conditional_decoder"), VariantStr),
         FString(TEXT("tokenizer.json")),
     };
 
     for (const FString& Name : RequiredFiles)
     {
-        if (!FileOkNonEmpty(FPaths::Combine(Dir, Name)))
+        if (!ChatterboxFileOkNonEmpty(FPaths::Combine(Dir, Name)))
         {
             return false;
         }
     }
     return true;
+}
+
+bool UInoChatterboxTtsSubsystem::IsConfigDownloaded(
+    const FInoChatterboxModelConfig& Config) const
+{
+    // Resolve per-session variants and check each session's specific
+    // file under its own variant dir. Tokenizer is variant-agnostic —
+    // it's enough that ANY of the (possibly-same) 4 variant dirs
+    // contains a tokenizer.json.
+    EInoChatterboxVariant EncV, EmbedV, LMV, DecV;
+    ChatterboxResolveSessionVariants(Config, EncV, EmbedV, LMV, DecV);
+
+    struct FCheck
+    {
+        const TCHAR*          Component;
+        EInoChatterboxVariant Variant;
+    };
+    const FCheck Checks[] = {
+        { TEXT("speech_encoder"),      EncV   },
+        { TEXT("embed_tokens"),        EmbedV },
+        { TEXT("language_model"),      LMV    },
+        { TEXT("conditional_decoder"), DecV   },
+    };
+
+    for (const FCheck& C : Checks)
+    {
+        const FString VariantStr = ChatterboxVariantToString(C.Variant);
+        const FString Dir        = ChatterboxResolveVariantDir(C.Variant);
+        const FString File       = FPaths::Combine(
+            Dir, ChatterboxComponentFilename(C.Component, VariantStr));
+        if (!ChatterboxFileOkNonEmpty(File))
+        {
+            return false;
+        }
+    }
+
+    // tokenizer.json — check all four variant dirs in case of dedup;
+    // if any one of them has a valid file, we're good. (They're
+    // variant-agnostic text tokenizers.)
+    const EInoChatterboxVariant TokDirs[] = { EncV, EmbedV, LMV, DecV };
+    for (const EInoChatterboxVariant V : TokDirs)
+    {
+        const FString Dir = ChatterboxResolveVariantDir(V);
+        if (ChatterboxFileOkNonEmpty(
+                FPaths::Combine(Dir, TEXT("tokenizer.json"))))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 EInoChatterboxVariant UInoChatterboxTtsSubsystem::GetLoadedVariant() const
@@ -694,98 +818,191 @@ void UInoChatterboxTtsSubsystem::CancelSynthesis()
 
 namespace
 {
-    /** Build the URL + target path + required-ness for every file the
-     *  subsystem needs to fetch for a given variant. Mirrors the file
-     *  list in Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1
-     *  exactly so dev-time and runtime populate identical directories. */
-    TArray<FInoChatterboxDownloadFile> BuildDownloadQueue(
+    /** Derive the HuggingFace base URL (minus trailing slash) + revision
+     *  path fragment for one settings entry. */
+    void BuildRepoBaseUrl(
         const FInoChatterboxModelEntry& Entry,
-        EInoChatterboxVariant           Variant,
-        const FString&                  TargetDir)
+        FString&                        OutBase)
+    {
+        FString RepoUrl = Entry.HuggingFaceRepoUrl;
+        while (RepoUrl.EndsWith(TEXT("/"))) { RepoUrl.LeftChopInline(1); }
+        const FString Rev = Entry.Revision.IsEmpty() ? TEXT("main") : Entry.Revision;
+        OutBase = FString::Printf(TEXT("%s/resolve/%s"), *RepoUrl, *Rev);
+    }
+
+    /** Append per-session ONNX + .onnx_data entries to Queue for one
+     *  (component, variant) pair. TargetDir is the variant's own
+     *  resolved directory (e.g. .../Chatterbox/q4/). Skips if the
+     *  target file is already present + non-empty on disk so we don't
+     *  re-download cached files. */
+    void AppendSessionFiles(
+        TArray<FInoChatterboxDownloadFile>& Queue,
+        const FString&                      Base,
+        const TCHAR*                        Component,
+        EInoChatterboxVariant               Variant,
+        const FString&                      TargetDir)
     {
         using FFile = FInoChatterboxDownloadFile;
 
-        // Trim any trailing slash on the repo URL so the composed URLs
-        // don't end up with a double slash (HF tolerates it but it's
-        // ugly in logs).
-        FString RepoUrl = Entry.HuggingFaceRepoUrl;
-        while (RepoUrl.EndsWith(TEXT("/"))) { RepoUrl.LeftChopInline(1); }
+        const FString VariantStr = ChatterboxVariantToString(Variant);
+        const FString OnnxName = FString::Printf(TEXT("%s_%s.onnx"), Component, *VariantStr);
+        const FString DataName = FString::Printf(TEXT("%s_%s.onnx_data"), Component, *VariantStr);
+        const FString OnnxPath = FPaths::Combine(TargetDir, OnnxName);
+        const FString DataPath = FPaths::Combine(TargetDir, DataName);
 
-        const FString Rev      = Entry.Revision.IsEmpty() ? TEXT("main") : Entry.Revision;
-        const FString Base     = FString::Printf(TEXT("%s/resolve/%s"), *RepoUrl, *Rev);
-        const FString Variant2 = ChatterboxVariantToString(Variant);
-
-        TArray<FFile> Queue;
-
-        // The four ONNX graph components. Each has a paired .onnx_data
-        // companion that MAY be present (spill-over weights for >2 GB
-        // variants) or may 404 (tiny variants inline weights). We queue
-        // both unconditionally and tolerate 404 on the _data side via
-        // bRequired = false.
-        static const TCHAR* const Components[] = {
-            TEXT("speech_encoder"),
-            TEXT("embed_tokens"),
-            TEXT("language_model"),
-            TEXT("conditional_decoder"),
-        };
-        for (const TCHAR* Comp : Components)
+        if (!ChatterboxFileOkNonEmpty(OnnxPath))
         {
-            const FString OnnxName = FString::Printf(TEXT("%s_%s.onnx"), Comp, *Variant2);
             Queue.Add(FFile{
                 /*Url*/        FString::Printf(TEXT("%s/onnx/%s"), *Base, *OnnxName),
-                /*TargetPath*/ FPaths::Combine(TargetDir, OnnxName),
+                /*TargetPath*/ OnnxPath,
                 /*bRequired*/  true,
             });
-
-            const FString DataName = FString::Printf(TEXT("%s_%s.onnx_data"), Comp, *Variant2);
+        }
+        // .onnx_data is optional — 404s are tolerated via bRequired=false.
+        // We still queue it unless it's already on disk; variants with
+        // >2 GB weights need it, tiny variants inline the weights and
+        // legitimately 404.
+        if (!ChatterboxFileOkNonEmpty(DataPath))
+        {
             Queue.Add(FFile{
                 /*Url*/        FString::Printf(TEXT("%s/onnx/%s"), *Base, *DataName),
-                /*TargetPath*/ FPaths::Combine(TargetDir, DataName),
-                /*bRequired*/  false,   // 404 legal for variants that inline weights
+                /*TargetPath*/ DataPath,
+                /*bRequired*/  false,
             });
         }
+    }
 
-        // Three repo-root config files. tokenizer.json is required by
-        // FInoChatterboxTokenizer::LoadFromJson; the other two aren't
-        // consumed at runtime by our pipeline but they're tiny, we
-        // download them for self-containment so a later tool has
-        // everything it needs.
-        static const TCHAR* const ConfigFiles[] = {
+    /** Append the variant-agnostic files (tokenizer.json + configs +
+     *  default voice) to Queue under TargetDir, skipping any already
+     *  downloaded. These are the same across every variant so we only
+     *  need them in ONE variant dir. */
+    void AppendSharedFiles(
+        TArray<FInoChatterboxDownloadFile>& Queue,
+        const FString&                      Base,
+        const FString&                      TargetDir)
+    {
+        using FFile = FInoChatterboxDownloadFile;
+
+        static const TCHAR* const RequiredConfigs[] = {
             TEXT("tokenizer.json"),
             TEXT("config.json"),
             TEXT("generation_config.json"),
         };
-        for (const TCHAR* Cfg : ConfigFiles)
+        for (const TCHAR* Cfg : RequiredConfigs)
         {
-            Queue.Add(FFile{
-                /*Url*/        FString::Printf(TEXT("%s/%s"), *Base, Cfg),
-                /*TargetPath*/ FPaths::Combine(TargetDir, Cfg),
-                /*bRequired*/  true,
-            });
+            const FString TargetPath = FPaths::Combine(TargetDir, Cfg);
+            if (!ChatterboxFileOkNonEmpty(TargetPath))
+            {
+                Queue.Add(FFile{
+                    /*Url*/        FString::Printf(TEXT("%s/%s"), *Base, Cfg),
+                    /*TargetPath*/ TargetPath,
+                    /*bRequired*/  true,
+                });
+            }
         }
 
-        // Default reference voice for SynthesizeAsync's "no voice
-        // specified" fallback. Only 714 KB, MIT-licensed, 24 kHz mono.
-        //
-        // ResembleAI's turbo repo doesn't ship one — the sibling
-        // non-turbo export (onnx-community/chatterbox-ONNX) does, and
-        // the speaker-embedding interface is architecturally identical
-        // between regular and turbo (same x-vector 192-dim
-        // conditioning), so the same clip primes either encoder. Same
-        // cross-borrow the dev-time setup-chatterbox.ps1 does under
-        // -IncludeDefaultVoice.
-        //
-        // bRequired=false: the subsystem still loads fine without it;
-        // callers who always pass their own FInoChatterboxVoice
-        // (WavFilePath or ReferenceSamples) never need this file, so
-        // a 404 or skipped download shouldn't fail the whole load.
-        // SynthesizeAsync will error at synth time if the caller
-        // provided no voice AND the default file is missing.
-        Queue.Add(FFile{
-            /*Url*/        TEXT("https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/main/default_voice.wav"),
-            /*TargetPath*/ FPaths::Combine(TargetDir, TEXT("default_voice.wav")),
-            /*bRequired*/  false,
-        });
+        // Default reference voice. Not required — callers supplying
+        // their own WavFilePath / ReferenceSamples never touch it, so
+        // a 404 or skipped download is fine.
+        const FString VoicePath = FPaths::Combine(TargetDir, TEXT("default_voice.wav"));
+        if (!ChatterboxFileOkNonEmpty(VoicePath))
+        {
+            Queue.Add(FFile{
+                /*Url*/        TEXT("https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/main/default_voice.wav"),
+                /*TargetPath*/ VoicePath,
+                /*bRequired*/  false,
+            });
+        }
+    }
+
+    /** Build a download queue that covers every file needed by the
+     *  config's per-session variants.
+     *
+     *  Simple case (bUsePerSessionVariants=false): all 4 sessions
+     *  resolve to the same variant, so we queue only that variant's
+     *  files in one directory.
+     *
+     *  Per-session case: for each UNIQUE variant used across the 4
+     *  sessions, queue only the session files that use that variant.
+     *  Variant-agnostic files (tokenizer, configs, voice) land in ONE
+     *  dir — the speech_encoder's — since they're identical across
+     *  variants. */
+    TArray<FInoChatterboxDownloadFile> BuildDownloadQueue(
+        const UInoAgentsSettings*        Settings,
+        const FInoChatterboxModelConfig& Config)
+    {
+        TArray<FInoChatterboxDownloadFile> Queue;
+        if (Settings == nullptr)
+        {
+            return Queue;
+        }
+
+        EInoChatterboxVariant EncV, EmbedV, LMV, DecV;
+        ChatterboxResolveSessionVariants(Config, EncV, EmbedV, LMV, DecV);
+
+        struct FSessionSpec
+        {
+            const TCHAR*          Component;
+            EInoChatterboxVariant Variant;
+        };
+        const FSessionSpec Sessions[] = {
+            { TEXT("speech_encoder"),      EncV   },
+            { TEXT("embed_tokens"),        EmbedV },
+            { TEXT("language_model"),      LMV    },
+            { TEXT("conditional_decoder"), DecV   },
+        };
+
+        for (const FSessionSpec& S : Sessions)
+        {
+            const FInoChatterboxModelEntry* Entry =
+                Settings->FindChatterboxModel(S.Variant);
+            if (Entry == nullptr)
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("Chatterbox BuildDownloadQueue: no settings entry for ")
+                       TEXT("%s's variant '%s' — skipping. LoadModelsAsync will ")
+                       TEXT("fail with a clearer error at session load."),
+                       S.Component,
+                       *ChatterboxVariantToString(S.Variant));
+                continue;
+            }
+
+            FString Base;
+            BuildRepoBaseUrl(*Entry, Base);
+            const FString TargetDir = ChatterboxResolveVariantDir(S.Variant);
+
+            IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/ true);
+
+            AppendSessionFiles(Queue, Base, S.Component, S.Variant, TargetDir);
+        }
+
+        // Shared files go in the speech_encoder's dir. If that dir is
+        // missing a settings entry, fall back to the first session that
+        // has one.
+        const FInoChatterboxModelEntry* SharedEntry =
+            Settings->FindChatterboxModel(EncV);
+        EInoChatterboxVariant SharedVariant = EncV;
+        if (SharedEntry == nullptr)
+        {
+            for (const FSessionSpec& S : Sessions)
+            {
+                if (const FInoChatterboxModelEntry* E =
+                        Settings->FindChatterboxModel(S.Variant))
+                {
+                    SharedEntry   = E;
+                    SharedVariant = S.Variant;
+                    break;
+                }
+            }
+        }
+        if (SharedEntry != nullptr)
+        {
+            FString SharedBase;
+            BuildRepoBaseUrl(*SharedEntry, SharedBase);
+            const FString SharedDir = ChatterboxResolveVariantDir(SharedVariant);
+            IFileManager::Get().MakeDirectory(*SharedDir, /*Tree=*/ true);
+            AppendSharedFiles(Queue, SharedBase, SharedDir);
+        }
 
         return Queue;
     }
@@ -796,39 +1013,70 @@ void UInoChatterboxTtsSubsystem::StartDownload()
     check(IsInGameThread());
     check(bLoadInFlight);
 
-    // Look up the settings entry so we have a repo URL + revision to
-    // compose per-file URLs from. FindChatterboxModel matches by
-    // variant (unlike LiteRT-LM's match-by-filename), so multiple
-    // entries for the same variant aren't a thing — the first match
-    // wins and the user's expected to not double up.
+    // BuildDownloadQueue handles both simple (Config.Variant for all 4
+    // sessions) and per-session cases. It looks up the settings entry
+    // per variant, builds per-session + shared file URLs, and skips
+    // files already cached on disk.
     const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
-    const FInoChatterboxModelEntry* Entry = Settings
-        ? Settings->FindChatterboxModel(PendingConfig.Variant)
-        : nullptr;
-    if (Entry == nullptr)
+    if (Settings == nullptr)
     {
-        FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox download: no Project Settings entry for variant '%s'. ")
-            TEXT("Add one under Project Settings → Plugins → InoAgents → Chatterbox → Models."),
-            *ChatterboxVariantToString(PendingConfig.Variant)));
+        FinishDownloadError(
+            TEXT("Chatterbox download: UInoAgentsSettings unavailable."));
         return;
     }
 
-    const FString TargetDir = ChatterboxResolveVariantDir(PendingConfig.Variant);
+    // Pre-flight: ensure we have a settings entry for at least one of
+    // the variants we're about to load. Without any entry we have no
+    // HF repo URL to fetch from and the queue will be empty.
+    EInoChatterboxVariant EncV, EmbedV, LMV, DecV;
+    ChatterboxResolveSessionVariants(PendingConfig, EncV, EmbedV, LMV, DecV);
+    const EInoChatterboxVariant ProbeVariants[] = { EncV, EmbedV, LMV, DecV };
+    bool bAnyEntry = false;
+    for (const EInoChatterboxVariant V : ProbeVariants)
+    {
+        if (Settings->FindChatterboxModel(V) != nullptr)
+        {
+            bAnyEntry = true;
+            break;
+        }
+    }
+    if (!bAnyEntry)
+    {
+        FinishDownloadError(FString::Printf(
+            TEXT("Chatterbox download: no Project Settings entries for any of the ")
+            TEXT("requested variants (enc=%s embed=%s lm=%s dec=%s). Add entries ")
+            TEXT("under Project Settings → Plugins → InoAgents → Chatterbox → Models."),
+            *ChatterboxVariantToString(EncV),
+            *ChatterboxVariantToString(EmbedV),
+            *ChatterboxVariantToString(LMV),
+            *ChatterboxVariantToString(DecV)));
+        return;
+    }
 
-    // Ensure the target directory exists. FFileHelper won't create
-    // intermediate dirs on its own.
-    IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/ true);
-
-    DownloadQueue   = BuildDownloadQueue(*Entry, PendingConfig.Variant, TargetDir);
-    DownloadCursor  = 0;
+    DownloadQueue    = BuildDownloadQueue(Settings, PendingConfig);
+    DownloadCursor   = 0;
     bDownloadProbing = true;
 
+    if (DownloadQueue.Num() == 0)
+    {
+        // Every file was already present — skip straight into the
+        // load. IsConfigDownloaded should've caught this upstream, but
+        // if a file landed between the check and here (unusual) we
+        // handle it cleanly.
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox StartDownload: nothing to download, all files cached"));
+        FinishDownloadSuccess();
+        return;
+    }
+
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox StartDownload: variant=%s, %d files (repo=%s, rev=%s)"),
-           *ChatterboxVariantToString(PendingConfig.Variant),
+           TEXT("Chatterbox StartDownload: %d files to fetch (enc=%s embed=%s ")
+           TEXT("lm=%s dec=%s)"),
            DownloadQueue.Num(),
-           *Entry->HuggingFaceRepoUrl, *Entry->Revision);
+           *ChatterboxVariantToString(EncV),
+           *ChatterboxVariantToString(EmbedV),
+           *ChatterboxVariantToString(LMV),
+           *ChatterboxVariantToString(DecV));
 
     StartHeadProbe();
 }
@@ -1282,18 +1530,19 @@ void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
 
     const int32 NumFiles = DownloadQueue.Num();
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox download complete — %d files staged for variant=%s"),
-           NumFiles, *ChatterboxVariantToString(PendingConfig.Variant));
+           TEXT("Chatterbox download complete — %d files staged"), NumFiles);
 
-    const EInoChatterboxVariant VariantEnum = PendingConfig.Variant;
-    const FString               Dir         = ChatterboxResolveVariantDir(VariantEnum);
+    // Snapshot the config before CleanupDownload (which doesn't clear
+    // PendingConfig, but keeping it explicit) so the chained
+    // DispatchLoadWorker has a stable value.
+    const FInoChatterboxModelConfig Config = PendingConfig;
 
     CleanupDownload();
 
     // Chain into the load flow. bLoadInFlight stays true across the
     // transition — DispatchLoadWorker's hop-back clears it when the
     // ThreadPool worker finishes.
-    DispatchLoadWorker(VariantEnum, Dir);
+    DispatchLoadWorker(Config);
 }
 
 void UInoChatterboxTtsSubsystem::FinishDownloadError(const FString& Err)

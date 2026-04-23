@@ -35,12 +35,40 @@
 UENUM(BlueprintType)
 enum class EInoChatterboxVariant : uint8
 {
-    Q4F16    UMETA(DisplayName = "q4f16 (default — smallest + fastest)"),
-    FP16     UMETA(DisplayName = "fp16 (desktop quality)"),
-    Q4       UMETA(DisplayName = "q4 (x86 without AVX-512 FP16)"),
-    FP32     UMETA(DisplayName = "fp32 (benchmark)"),
-    Quantized UMETA(DisplayName = "quantized (int8)"),
+    // DisplayNames include the activation dtype suffix so the BP
+    // dropdown makes cross-session dtype compatibility visible at a
+    // glance. Two "groups" based on activation dtype:
+    //   fp16 group:  Q4F16, FP16       (tensors between sessions are fp16)
+    //   fp32 group:  Q4, FP32, Quantized (tensors between sessions are fp32)
+    // Mixing sessions across groups fails at synth time with a dtype
+    // mismatch (ORT won't automatically cast tensors crossing session
+    // boundaries). Stay within one group when using per-session
+    // variants.
+    Q4F16     UMETA(DisplayName = "q4f16 — activations=fp16 (default, smallest)"),
+    FP16      UMETA(DisplayName = "fp16 — activations=fp16 (desktop quality)"),
+    Q4        UMETA(DisplayName = "q4 — activations=fp32 (small, wider kernel support)"),
+    FP32      UMETA(DisplayName = "fp32 — activations=fp32 (benchmark)"),
+    Quantized UMETA(DisplayName = "quantized — activations=fp32 (int8 weights)"),
 };
+
+/**
+ * Returns true if two variants have matching activation dtypes and can
+ * be safely combined across session boundaries without an explicit
+ * dtype cast. Use when validating per-session variant selections.
+ *
+ *   q4f16 ↔ fp16              : compatible (both fp16)
+ *   q4 ↔ fp32 ↔ quantized     : compatible (all fp32)
+ *   q4f16/fp16  vs  q4/fp32/quantized : INCOMPATIBLE — synth will fail
+ */
+INOAGENTS_API bool ChatterboxVariantsAreDtypeCompatible(
+    EInoChatterboxVariant A, EInoChatterboxVariant B);
+
+/**
+ * Returns true when the variant's activation tensors are fp16 (i.e.
+ * the value would appear in the "fp16 group" — Q4F16 or FP16). Useful
+ * to classify before mixing sessions.
+ */
+INOAGENTS_API bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V);
 
 /** Convert a variant enum to its canonical lowercase string
  *  ("q4f16", "fp16", "q4", "fp32", "quantized"). The returned value
@@ -272,22 +300,93 @@ struct FInoChatterboxPerformanceOptions
 
 /**
  * What UInoChatterboxTtsSubsystem::LoadModelsAsync needs to resolve
- * which files to download / load from disk. Plain struct — create one
- * in Blueprint, set Variant, pass it in.
+ * which files to download / load from disk.
  *
- * Only one variant can be resident in RAM at a time. Switching variants
- * means UnloadModels → LoadModelsAsync with a new Variant. Each variant
- * loads independently (no shared cache) and may need a fresh download
- * if the player hasn't used that variant before.
+ * Simple case (default): set Variant to your chosen quantization and
+ * leave bUsePerSessionVariants=false. All four Chatterbox sessions
+ * (speech_encoder, embed_tokens, language_model, conditional_decoder)
+ * load the same variant. This is equivalent to the pre-per-session
+ * behavior and is what you want unless you have a specific reason to
+ * mix.
+ *
+ * Advanced case: set bUsePerSessionVariants=true and pick a variant
+ * per session. Useful for working around kernel-coverage gaps on
+ * specific platforms — e.g. decoder on Q4 (fp32 activations) to dodge
+ * fp16 BiasGelu kernel misses on Android while keeping the backbone
+ * at Q4F16 to stay small.
+ *
+ * IMPORTANT — activation dtype compatibility:
+ *   Cross-session tensor dtypes MUST match at session boundaries.
+ *   Variants split into two groups by activation dtype:
+ *
+ *     fp16 group:  Q4F16, FP16
+ *     fp32 group:  Q4, FP32, Quantized
+ *
+ *   You can mix freely WITHIN a group. Mixing ACROSS groups (e.g.
+ *   Q4F16 encoder feeding into Q4 language_model) will fail at the
+ *   first Run() with a dtype mismatch — ORT does NOT automatically
+ *   cast tensors that cross session boundaries.
+ *
+ *   ChatterboxVariantsAreDtypeCompatible() classifies any pair. The
+ *   subsystem logs a warning at load time if it detects a cross-group
+ *   combination, so check the log if synth immediately errors.
+ *
+ * Lifecycle: only one load is resident in RAM at a time. Switch via
+ * UnloadModels → LoadModelsAsync with a new config. Each session
+ * loads independently and may need a fresh download if that session's
+ * variant files aren't cached yet.
  */
 USTRUCT(BlueprintType)
 struct FInoChatterboxModelConfig
 {
     GENERATED_BODY()
 
-    /** Which quantization variant to load. */
+    /** Default variant applied to all 4 sessions when
+     *  bUsePerSessionVariants=false. Simplest option for typical use —
+     *  set this, leave the per-session fields alone. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
     EInoChatterboxVariant Variant = EInoChatterboxVariant::Q4F16;
+
+    /** When false (default), the Variant above applies to all 4
+     *  sessions. When true, the per-session fields below take over
+     *  and Variant is ignored at load time.
+     *
+     *  Advanced: only enable if you actually need different variants
+     *  for different sessions. See the struct-level comment for dtype
+     *  compatibility rules — cross-group mixing fails at synth time. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
+    bool bUsePerSessionVariants = false;
+
+    /** speech_encoder variant. Only consulted when
+     *  bUsePerSessionVariants=true. Produces speaker conditioning
+     *  tensors consumed by language_model (via concat with embed) and
+     *  by conditional_decoder. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (EditCondition = "bUsePerSessionVariants"))
+    EInoChatterboxVariant SpeechEncoderVariant = EInoChatterboxVariant::Q4F16;
+
+    /** embed_tokens variant. Only consulted when
+     *  bUsePerSessionVariants=true. Tiny session (a lookup table); its
+     *  output dtype must match language_model's input dtype. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (EditCondition = "bUsePerSessionVariants"))
+    EInoChatterboxVariant EmbedTokensVariant = EInoChatterboxVariant::Q4F16;
+
+    /** language_model variant. Only consulted when
+     *  bUsePerSessionVariants=true. Biggest session (~150-300 MB
+     *  depending on variant). Expects fp16 or fp32 inputs matching the
+     *  speech_encoder + embed_tokens outputs. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (EditCondition = "bUsePerSessionVariants"))
+    EInoChatterboxVariant LanguageModelVariant = EInoChatterboxVariant::Q4F16;
+
+    /** conditional_decoder variant. Only consulted when
+     *  bUsePerSessionVariants=true. Attention-heavy, the biggest
+     *  wallclock contributor. Expects tensors matching the
+     *  speech_encoder's speaker-conditioning output dtype. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox",
+              meta = (EditCondition = "bUsePerSessionVariants"))
+    EInoChatterboxVariant ConditionalDecoderVariant = EInoChatterboxVariant::Q4F16;
 
     /** Per-session ORT tuning — thread counts, profiling toggle. See
      *  FInoChatterboxPerformanceOptions for the full doc on each field.
@@ -296,6 +395,23 @@ struct FInoChatterboxModelConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Chatterbox")
     FInoChatterboxPerformanceOptions Performance;
 };
+
+/**
+ * Resolve the 4 per-session variants from a config. Honors the
+ * bUsePerSessionVariants toggle:
+ *   false → all 4 outputs = Config.Variant (simple case)
+ *   true  → each output = its corresponding per-session field.
+ *
+ * Always fills all 4 outputs; never returns an error. The loader
+ * calls this once at LoadModelsAsync time and threads the resolved
+ * variants through download + load + subsystem state.
+ */
+INOAGENTS_API void ChatterboxResolveSessionVariants(
+    const FInoChatterboxModelConfig& Config,
+    EInoChatterboxVariant&           OutSpeechEncoder,
+    EInoChatterboxVariant&           OutEmbedTokens,
+    EInoChatterboxVariant&           OutLanguageModel,
+    EInoChatterboxVariant&           OutConditionalDecoder);
 
 // ============================================================================
 // Per-utterance synthesis options

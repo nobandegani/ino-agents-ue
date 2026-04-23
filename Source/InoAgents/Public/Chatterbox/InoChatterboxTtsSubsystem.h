@@ -203,9 +203,9 @@ public:
     bool IsModelsLoaded() const;
 
     /**
-     * True if the required on-disk files for the given variant are
-     * present and non-empty — i.e. LoadModelsAsync would NOT need to
-     * download anything before loading.
+     * Single-variant shorthand: every required file for one variant is
+     * present + non-empty on disk. Enough for the non-per-session case
+     * where all 4 sessions share the same variant.
      *
      * Required set:
      *   speech_encoder_<v>.onnx
@@ -214,20 +214,28 @@ public:
      *   conditional_decoder_<v>.onnx
      *   tokenizer.json
      *
-     * The .onnx_data companion files are NOT required — some variants
-     * inline weights into the .onnx and don't produce a _data sidecar.
-     * config.json / generation_config.json are downloaded for
-     * completeness but the runtime pipeline doesn't read them, so
-     * their absence doesn't block a load either.
+     * .onnx_data companions are not required (some variants inline
+     * weights); config.json / generation_config.json aren't either.
      *
-     * Does NOT verify file contents (no SHA check) — cheap file-stat
-     * only, safe to call every frame from a UMG widget polling for
-     * "should I show the download button".
-     *
-     * Pure — can be called from any thread, any context.
+     * Cheap file-stat only — safe to poll every frame from UMG.
      */
     UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
     bool IsModelDownloaded(EInoChatterboxVariant Variant) const;
+
+    /**
+     * Per-session check: true iff each of the 4 session files is
+     * present under its resolved variant directory AND a tokenizer.json
+     * exists under at least ONE of the referenced variant directories.
+     *
+     * Use this when you've set bUsePerSessionVariants=true — the
+     * single-variant IsModelDownloaded() doesn't know about the other
+     * three sessions' variants. For the non-per-session case (default)
+     * this returns the same result as IsModelDownloaded(Config.Variant).
+     *
+     * Same cheap-file-stat semantics. Pure, any-thread-safe.
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
+    bool IsConfigDownloaded(const FInoChatterboxModelConfig& Config) const;
 
     /**
      * Returns the variant that's currently loaded, or the default
@@ -467,8 +475,13 @@ private:
 
     /** Shared ThreadPool dispatch — files are on disk, now load them.
      *  Called both from LoadModelsAsync's files-present fast path and
-     *  from FinishDownloadSuccess after an auto-download. */
-    void DispatchLoadWorker(EInoChatterboxVariant Variant, const FString& Dir);
+     *  from FinishDownloadSuccess after an auto-download.
+     *
+     *  Takes the full config so the worker can resolve per-session
+     *  variants and their respective directories. For the simple (non-
+     *  per-session) case, all four sessions resolve to the same variant
+     *  + directory. */
+    void DispatchLoadWorker(const FInoChatterboxModelConfig& Config);
 
     /** Shared worker-enqueue path used by both SynthesizeAsync (streaming
      *  off) and SynthesizeStreamAsync (streaming on). Validates inputs,
