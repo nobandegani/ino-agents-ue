@@ -290,7 +290,12 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
     FInoChatterboxSynthesisResult BpResult;
     InoChatterbox::Float32ToInt16PcmBytesMono(
         MakeArrayView(NativeResult.AudioSamples), BpResult.AudioSamples);
-    BpResult.SampleRate         = NativeResult.SampleRate;
+    // SampleRate is not a field on BpResult — consumers pull it from
+    // UInoChatterboxTtsSubsystem::GetOutputSampleRate() instead (single
+    // source of truth, always 24000 for Turbo). DurationSeconds still
+    // lives on the struct as a BP convenience; it's computed from the
+    // runner's internal NativeResult.SampleRate, which is 24 kHz fixed
+    // in the runner's Chatterbox Turbo constants.
     BpResult.DurationSeconds    =
         (NativeResult.SampleRate > 0)
             ? (float)NativeResult.AudioSamples.Num() / (float)NativeResult.SampleRate

@@ -156,12 +156,13 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
             }
         }
 
+        const int32 SampleRate = Subsystem ? Subsystem->GetOutputSampleRate() : 24000;
         UE_LOG(LogInoAgents, Log,
                TEXT("SubsystemSynthTest: SynthesizeAsync SUCCESS in %.1f ms. ")
                TEXT("Bytes=%d (%d samples, %.2f s @ %d Hz), tokens=%d, stop=%s. ")
                TEXT("aligned=%s int16 min=%d max=%d."),
                ElapsedMs, NumBytes, NumSamples, Result.DurationSeconds,
-               Result.SampleRate, Result.NumGeneratedTokens,
+               SampleRate, Result.NumGeneratedTokens,
                Result.bHitStopToken ? TEXT("yes") : TEXT("no"),
                bAligned ? TEXT("yes") : TEXT("NO"),
                (int32)MinS, (int32)MaxS);
@@ -185,7 +186,7 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
             const bool bWrote = InoChatterbox::WriteInt16PcmBytesAsWav(
                 OutputWavPath,
                 MakeArrayView(Result.AudioSamples),
-                Result.SampleRate);
+                Subsystem ? Subsystem->GetOutputSampleRate() : 24000);
 
             if (bWrote)
             {

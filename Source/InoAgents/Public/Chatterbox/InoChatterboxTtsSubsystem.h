@@ -246,6 +246,23 @@ public:
     UFUNCTION(BlueprintPure, Category = "InoAgents|Chatterbox")
     EInoChatterboxVariant GetLoadedVariant() const;
 
+    /**
+     * Output sample rate for all Chatterbox Turbo synthesis. ALWAYS
+     * returns 24000 — fixed by the conditional_decoder's HiFi-GAN
+     * vocoder (trained at 24 kHz) and not configurable at runtime.
+     *
+     * Use this when constructing a USoundWaveProcedural, feeding bytes
+     * into UStreamingSoundWave::AppendAudioDataFromRAW, writing a WAV
+     * header via UInoAudioFunctionLibrary::SaveInt16PcmAsWav, or
+     * anywhere else you'd otherwise hardcode 24000 — routing through
+     * this getter keeps the rate authoritative in one place.
+     *
+     * Blueprint-pure so it's free to call from a widget Tick or a
+     * const-qualified getter.
+     */
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|Chatterbox")
+    int32 GetOutputSampleRate() const { return 24000; }
+
     // ------------------------------------------------------------------
     // Synthesis
     // ------------------------------------------------------------------

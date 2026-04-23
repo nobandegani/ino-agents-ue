@@ -251,7 +251,7 @@ void UInoChatterboxStreamSynthTestObserver::HandleComplete(
         const bool bWrote = InoChatterbox::WriteInt16PcmBytesAsWav(
             OutputWavPath,
             MakeArrayView(AccumulatedBytes),
-            Result.SampleRate);
+            Subsystem ? Subsystem->GetOutputSampleRate() : 24000);
         UE_LOG(LogInoAgents, Log,
                TEXT("StreamSynthTest: %s wrote %s"),
                bWrote ? TEXT("") : TEXT("FAILED to"),

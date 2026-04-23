@@ -579,18 +579,16 @@ struct FInoChatterboxSynthesisResult
      *  network unmodified.
      *
      *  To get the sample count: AudioSamples.Num() / 2
+     *  To get the sample rate:  UInoChatterboxTtsSubsystem::
+     *                           GetOutputSampleRate() (single source
+     *                           of truth; always 24000 for Turbo).
      *  To get seconds:          use DurationSeconds below. */
     UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
     TArray<uint8> AudioSamples;
 
-    /** Always 24000 for Chatterbox Turbo. Included so callers passing
-     *  AudioSamples to an audio pipeline don't have to hardcode the rate. */
-    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
-    int32 SampleRate = 24000;
-
     /** Duration of AudioSamples in seconds, pre-computed by the
      *  subsystem. Cheaper / more ergonomic than dividing
-     *  AudioSamples.Num()/2 by SampleRate in every Blueprint. */
+     *  AudioSamples.Num()/2 by the sample rate in every Blueprint. */
     UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Chatterbox")
     float DurationSeconds = 0.0f;
 
