@@ -185,6 +185,173 @@ struct INOAGENTS_API FInoBlinkState
     int32 Seed = 0;
 };
 
+// ============================================================================
+// Head-look (CalculateHeadLookRotation)
+// ============================================================================
+
+/**
+ * Configuration for the head-look rotation function.
+ *
+ * Tune to taste per character. The defaults describe a generic attentive
+ * NPC engaged in conversation — holds eye contact in bursts with occasional
+ * brief glance-aways. Change GlanceAwayChance + hold-duration bounds to
+ * shift personality:
+ *
+ *   - Focused / stoic (assassin, interrogator): GlanceAwayChance ~ 0.2,
+ *       MinHoldDuration ~ 8.
+ *   - Default NPC (engaged, social): keep defaults.
+ *   - Shy / nervous: GlanceAwayChance ~ 0.85, MinHoldDuration ~ 2.
+ *   - Disengaged / distracted: GlanceAwayChance ~ 0.95, MinHoldDuration ~ 1.
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoHeadLookConfig
+{
+    GENERATED_BODY()
+
+    // ---- Rotation limits ---------------------------------------------------
+
+    /** Maximum yaw (left-right head rotation), degrees. Human neck maxes
+     *  at ~70-80 degrees; beyond that the shoulders + torso have to turn. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0", ClampMax = "180.0"))
+    float MaxYawDegrees = 70.f;
+
+    /** Maximum pitch (up-down head rotation), degrees. Vertical neck range
+     *  is smaller than horizontal — ~45 degrees realistic, 60 for stylized. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0", ClampMax = "90.0"))
+    float MaxPitchDegrees = 45.f;
+
+    /** Interpolation speed (units/sec). Higher = faster tracking. Head is
+     *  heavier than eyes (eye default is 10), so 6-10 feels natural. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0"))
+    float InterpSpeed = 8.f;
+
+    /** Dead zone cone around the forward direction (degrees). Targets
+     *  within this cone do not trigger head rotation — real humans don't
+     *  micro-adjust head position for things straight ahead; the eyes
+     *  handle that. 3-8 is a good range. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0", ClampMax = "45.0"))
+    float DeadZoneDegrees = 5.f;
+
+    // ---- Glance-away behaviour --------------------------------------------
+
+    /** Minimum seconds to hold gaze on target before possibly glancing away.
+     *  Real humans hold eye contact in 3-10 s bursts. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.1"))
+    float MinHoldDuration = 4.f;
+
+    /** Maximum seconds to hold gaze on target. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.1"))
+    float MaxHoldDuration = 12.f;
+
+    /** Minimum seconds a single glance-away lasts. Real glances are brief
+     *  — 300 ms to 2 s typical. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0"))
+    float MinGlanceAwayDuration = 0.5f;
+
+    /** Maximum seconds a single glance-away lasts. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0"))
+    float MaxGlanceAwayDuration = 2.f;
+
+    /** Probability that a completed hold-duration transitions into a
+     *  glance-away instead of rolling into another hold (0-1).
+     *    0.0 = always tracks, never looks away (creepy locked-on gaze).
+     *    0.6 = default attentive NPC — glances sometimes, looks mostly.
+     *    1.0 = glances away after every hold (twitchy / anxious character). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|Animation",
+              meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float GlanceAwayChance = 0.6f;
+};
+
+/**
+ * Result of CalculateHeadLookRotation. Drive your head bone from
+ * HeadLookRotation (when applicable), feed the whole struct back next
+ * frame as PreviousResult for smooth interpolation + glance state.
+ */
+USTRUCT(BlueprintType)
+struct INOAGENTS_API FInoHeadLookResult
+{
+    GENERATED_BODY()
+
+    // ---- Outputs the caller uses ------------------------------------------
+
+    /**
+     * Target head rotation, local-space (relative to the character's
+     * neutral head orientation). Roll is always 0; only Yaw and Pitch
+     * are used. Typical use: additive aim-offset or a manual bone
+     * rotation applied on top of the neck's animation rotation.
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    FRotator HeadLookRotation = FRotator::ZeroRotator;
+
+    /**
+     * Simple on/off flag: TRUE  → use HeadLookRotation this frame.
+     *                     FALSE → ignore HeadLookRotation; let the
+     *                             character's base animation drive
+     *                             the head (the character is briefly
+     *                             glancing away OR the target is in
+     *                             the dead zone).
+     *
+     * If you want smooth transitions between these states rather than
+     * a hard cut, use BlendWeight instead (see below).
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    bool bShouldApply = true;
+
+    /**
+     * Smoothed 0-1 version of bShouldApply. Ramps over ~150 ms when the
+     * glance state flips. Use for a crossfade:
+     *   FinalRotation = Lerp(AnimRotation, HeadLookRotation, BlendWeight)
+     * which hides the small pop you'd see with a hard bShouldApply branch.
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float BlendWeight = 1.f;
+
+    /** How far the head is turned, normalised [0, 1] against the max
+     *  angle. Useful for driving secondary animation (shoulder turn,
+     *  spine twist) at fractional values of head rotation. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float Magnitude = 0.f;
+
+    /** True if the target was inside the dead-zone cone (head stays put). */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    bool bInDeadZone = false;
+
+    // ---- Smoothed angles (also feed back) --------------------------------
+
+    /** Smoothed yaw angle, degrees. Left-negative, right-positive. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float Yaw = 0.f;
+
+    /** Smoothed pitch angle, degrees. Up-positive, down-negative. */
+    UPROPERTY(BlueprintReadOnly, Category = "InoAgents|Animation")
+    float Pitch = 0.f;
+
+    // ---- Internal state (feed back via PreviousResult, don't modify) ----
+
+    UPROPERTY()
+    float GlanceTimer = 0.f;
+
+    UPROPERTY()
+    float NextGlanceChangeTime = 0.f;
+
+    UPROPERTY()
+    bool bIsGlancingAway = false;
+
+    UPROPERTY()
+    bool bSeeded = false;
+
+    UPROPERTY()
+    int32 Seed = 0;
+};
+
 /**
  * Animation helper functions exposed to Blueprint.
  */
@@ -277,4 +444,56 @@ public:
         const FInoBlinkConfig& Config,
         UPARAM(meta = (ClampMin = "0.0", ClampMax = "1.0"))
         float SpeakingIntensity = 0.0f);
+
+    /**
+     * Calculate head-look rotation toward a world-space target, with
+     * frame-rate-independent smoothing, realistic angle clamping, a
+     * dead-zone cone for targets directly ahead, and a random
+     * glance-away behaviour so the character doesn't hold eye contact
+     * mechanically forever.
+     *
+     * Output is local-space (Yaw/Pitch in degrees relative to the
+     * supplied HeadForwardVector). Plug HeadLookRotation into your
+     * AnimBP's aim-offset or add it on top of the neck's animation
+     * rotation in a post-process slot.
+     *
+     * Pass the previous frame's result back as PreviousResult. On the
+     * first frame, pass a default-constructed FInoHeadLookResult.
+     *
+     * @param LookAtTarget        World-space point to aim at (usually
+     *                            another character's head bone position,
+     *                            or the player camera location).
+     * @param HeadWorldLocation   World position of this character's head
+     *                            socket / bone.
+     * @param HeadForwardVector   Neutral-gaze forward direction, world
+     *                            space. For upright humanoids, the actor's
+     *                            forward vector is usually correct.
+     * @param HeadUpVector        Neutral "up" direction, world space.
+     *                            FVector::UpVector for upright characters;
+     *                            pass the actor's up for tilted states.
+     * @param DeltaTime           Frame delta time (seconds).
+     * @param PreviousResult      Output from the previous frame — carries
+     *                            smoothed angles + glance-away state.
+     * @param Config              Rotation limits + glance-away timing.
+     * @return                    Rotation to apply + state fields.
+     *
+     * Using bShouldApply (simple): branch on it. If false, don't override
+     * the head rotation at all — the character is in the middle of a
+     * glance-away or the target is dead-centre already.
+     *
+     * Using BlendWeight (smooth): cross-fade between anim and result:
+     *     Final = Lerp(AnimRotation, HeadLookRotation, BlendWeight)
+     * BlendWeight ramps over ~150 ms when the glance state flips, hiding
+     * the pop you'd see with a hard branch.
+     */
+    UFUNCTION(BlueprintPure, Category = "InoAgents|Animation",
+              meta = (DisplayName = "Calculate Head Look Rotation"))
+    static FInoHeadLookResult CalculateHeadLookRotation(
+        FVector LookAtTarget,
+        FVector HeadWorldLocation,
+        FVector HeadForwardVector,
+        FVector HeadUpVector,
+        float   DeltaTime,
+        const FInoHeadLookResult& PreviousResult,
+        const FInoHeadLookConfig& Config);
 };
