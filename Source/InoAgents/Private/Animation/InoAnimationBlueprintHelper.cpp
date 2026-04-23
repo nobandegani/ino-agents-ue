@@ -116,105 +116,6 @@ namespace
     }
 }
 
-FInoEyeLookWeights UInoAnimationBlueprintHelper::CalculateEyeLookWeights(
-    FVector LookAtTarget,
-    FVector LeftEyeWorldPos,
-    FVector RightEyeWorldPos,
-    FVector HeadForwardVector,
-    FVector HeadUpVector,
-    float DeltaTime,
-    const FInoEyeLookWeights& PreviousWeights,
-    float MaxAngleDegrees,
-    float InterpSpeed)
-{
-    MaxAngleDegrees = FMath::Clamp(MaxAngleDegrees, 1.f, 90.f);
-    const float MaxAngleRad = FMath::DegreesToRadians(MaxAngleDegrees);
-
-    // Build an orthonormal head-local basis.
-    const FVector Forward = HeadForwardVector.GetSafeNormal();
-    if (Forward.IsNearlyZero())
-    {
-        return PreviousWeights;
-    }
-
-    FVector Up = HeadUpVector.GetSafeNormal();
-    if (Up.IsNearlyZero())
-    {
-        Up = FVector::UpVector;
-    }
-
-    // UE left-handed: Right = Up x Forward, Up = Forward x Right.
-    const FVector Right = FVector::CrossProduct(Up, Forward).GetSafeNormal();
-    Up = FVector::CrossProduct(Forward, Right).GetSafeNormal();
-
-    // Compute target yaw/pitch per eye.
-    float TargetLYaw = 0.f, TargetLPitch = 0.f;
-    float TargetRYaw = 0.f, TargetRPitch = 0.f;
-
-    {
-        const FVector GazeDir = (LookAtTarget - LeftEyeWorldPos).GetSafeNormal();
-        if (!GazeDir.IsNearlyZero())
-        {
-            DecomposeGaze(GazeDir, Forward, Up, Right, TargetLYaw, TargetLPitch);
-        }
-    }
-    {
-        const FVector GazeDir = (LookAtTarget - RightEyeWorldPos).GetSafeNormal();
-        if (!GazeDir.IsNearlyZero())
-        {
-            DecomposeGaze(GazeDir, Forward, Up, Right, TargetRYaw, TargetRPitch);
-        }
-    }
-
-    // Interpolate in angle space (smooth, no jitter at direction crossings).
-    float SmoothedLYaw   = TargetLYaw;
-    float SmoothedLPitch = TargetLPitch;
-    float SmoothedRYaw   = TargetRYaw;
-    float SmoothedRPitch = TargetRPitch;
-
-    if (InterpSpeed > 0.f && DeltaTime > 0.f)
-    {
-        const float Alpha = FMath::Clamp(DeltaTime * InterpSpeed, 0.f, 1.f);
-        SmoothedLYaw   = FMath::Lerp(PreviousWeights.LeftEyeYaw,   TargetLYaw,   Alpha);
-        SmoothedLPitch = FMath::Lerp(PreviousWeights.LeftEyePitch,  TargetLPitch,  Alpha);
-        SmoothedRYaw   = FMath::Lerp(PreviousWeights.RightEyeYaw,  TargetRYaw,   Alpha);
-        SmoothedRPitch = FMath::Lerp(PreviousWeights.RightEyePitch, TargetRPitch, Alpha);
-    }
-
-    // Convert smoothed angles to blend shape weights.
-    FInoEyeLookWeights Result;
-
-    // Store angles for next frame's interpolation.
-    Result.LeftEyeYaw    = SmoothedLYaw;
-    Result.LeftEyePitch  = SmoothedLPitch;
-    Result.RightEyeYaw   = SmoothedRYaw;
-    Result.RightEyePitch = SmoothedRPitch;
-
-    // Left eye weights.
-    if (SmoothedLYaw < 0.f)
-        Result.EyeLookLeftL  = AngleToWeight(SmoothedLYaw, MaxAngleRad);
-    else
-        Result.EyeLookRightL = AngleToWeight(SmoothedLYaw, MaxAngleRad);
-
-    if (SmoothedLPitch > 0.f)
-        Result.EyeLookUpL   = AngleToWeight(SmoothedLPitch, MaxAngleRad);
-    else
-        Result.EyeLookDownL = AngleToWeight(SmoothedLPitch, MaxAngleRad);
-
-    // Right eye weights.
-    if (SmoothedRYaw < 0.f)
-        Result.EyeLookLeftR  = AngleToWeight(SmoothedRYaw, MaxAngleRad);
-    else
-        Result.EyeLookRightR = AngleToWeight(SmoothedRYaw, MaxAngleRad);
-
-    if (SmoothedRPitch > 0.f)
-        Result.EyeLookUpR   = AngleToWeight(SmoothedRPitch, MaxAngleRad);
-    else
-        Result.EyeLookDownR = AngleToWeight(SmoothedRPitch, MaxAngleRad);
-
-    return Result;
-}
-
 FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
     float DeltaTime,
     const FInoBlinkState& PreviousState,
@@ -428,57 +329,79 @@ FInoBlinkState UInoAnimationBlueprintHelper::CalculateBlinkWeight(
 }
 
 // ============================================================================
-// CalculateHeadLookRotation
+// CalculateGaze
 // ============================================================================
 //
-// Algorithm:
-//   1. Build an orthonormal basis (Forward, Right, Up) from the supplied
-//      head frame (same as CalculateEyeLookWeights).
-//   2. Compute the gaze direction (target - head) and decompose into
-//      yaw / pitch in that basis.
-//   3. Compute total angle from forward to test the dead zone.
-//   4. Clamp yaw / pitch to MaxYawDegrees / MaxPitchDegrees.
-//   5. Interpolate the smoothed yaw / pitch toward the target
-//      (framerate-independent Lerp with InterpSpeed).
-//   6. Drive a "hold ↔ glance-away" state machine on GlanceTimer +
-//      NextGlanceChangeTime. When the state flips, pick a new random
-//      duration for the next change.
-//   7. Set bShouldApply = not glancing-away AND not in dead zone.
-//   8. Smoothly ramp BlendWeight toward bShouldApply ? 1.0 : 0.0 for
-//      callers that prefer a crossfade.
-//   9. Compose HeadLookRotation = FRotator(Pitch, Yaw, 0) in local
-//      space.
+// Merged eye + head tracking. Replaces the older separate
+// CalculateEyeLookWeights + CalculateHeadLookRotation functions.
+//
+// Flow:
+//   1. First-call init: seed RNG, pick a hold duration.
+//   2. Build head-local orthonormal basis (Forward / Right / Up) so we
+//      can decompose world-space gaze into local yaw / pitch.
+//   3. Compute target yaw/pitch for each eye (using its own world
+//      position) and for the head (using HeadWorldLocation). Clamp each
+//      to its configured max angle.
+//   4. Advance the attention state machine (Tracking / EyeGlance /
+//      FullGlance). When the current state's timer expires, roll for
+//      transition with the configured probabilities.
+//   5. Decide per-frame "goal" angles based on the state. Tracking →
+//      aim at target. EyeGlance → eyes to neutral, head to target.
+//      FullGlance → both to neutral. Smooth toward the goal at the
+//      configured InterpSpeed (eye + head independently).
+//   6. Head dead-zone: if the target is within ±DeadZoneDegrees of
+//      forward, the head stays put.
+//   7. Fill the output struct: eye blend shape weights from smoothed
+//      eye angles; head FRotator from smoothed head angles; apply
+//      flags from the state + dead-zone; blend weights ramped toward
+//      bApply* for crossfade-style callers.
 // ============================================================================
 
-FInoHeadLookResult UInoAnimationBlueprintHelper::CalculateHeadLookRotation(
-    FVector                       LookAtTarget,
-    FVector                       HeadWorldLocation,
-    FVector                       HeadForwardVector,
-    FVector                       HeadUpVector,
-    float                         DeltaTime,
-    const FInoHeadLookResult&     PreviousResult,
-    const FInoHeadLookConfig&     Config)
+namespace
 {
-    FInoHeadLookResult R = PreviousResult;
+    /** Three-state gaze attention machine. */
+    enum class EGazeState : uint8
+    {
+        Tracking   = 0,
+        EyeGlance  = 1,
+        FullGlance = 2,
+    };
+}
 
-    // ---- First-call init: seed the RNG, pick the first hold duration. ----
+FInoGazeResult UInoAnimationBlueprintHelper::CalculateGaze(
+    FVector                 LookAtTarget,
+    FVector                 HeadWorldLocation,
+    FVector                 LeftEyeWorldPos,
+    FVector                 RightEyeWorldPos,
+    FVector                 HeadForwardVector,
+    FVector                 HeadUpVector,
+    float                   DeltaTime,
+    const FInoGazeResult&   PreviousResult,
+    const FInoGazeConfig&   Config)
+{
+    FInoGazeResult R = PreviousResult;
+
+    // ---- First-call init ---------------------------------------------------
     if (!R.bSeeded)
     {
         R.Seed    = FMath::Rand();
         R.bSeeded = true;
+
         FRandomStream InitRng(R.Seed);
         R.NextGlanceChangeTime = RandRange(InitRng,
             Config.MinHoldDuration, Config.MaxHoldDuration);
         R.Seed = InitRng.RandHelper(MAX_int32);
 
-        R.GlanceTimer     = 0.f;
-        R.bIsGlancingAway = false;
-        R.bShouldApply    = true;
-        R.BlendWeight     = 1.f;
-        // Fall through so the first frame still computes a rotation.
+        R.GlanceState      = static_cast<uint8>(EGazeState::Tracking);
+        R.GlanceTimer      = 0.f;
+        R.bApplyEyes       = true;
+        R.bApplyHead       = true;
+        R.EyeBlendWeight   = 1.f;
+        R.HeadBlendWeight  = 1.f;
+        // Fall through — still compute a rotation this frame.
     }
 
-    // ---- Build orthonormal head basis. -------------------------------------
+    // ---- Build head-local orthonormal basis -------------------------------
     const FVector Forward = HeadForwardVector.GetSafeNormal();
     if (Forward.IsNearlyZero())
     {
@@ -490,69 +413,67 @@ FInoHeadLookResult UInoAnimationBlueprintHelper::CalculateHeadLookRotation(
     {
         Up = FVector::UpVector;
     }
-    // UE left-handed: Right = Up × Forward, Up = Forward × Right.
-    const FVector Right = FVector::CrossProduct(Up,       Forward).GetSafeNormal();
-    Up                  = FVector::CrossProduct(Forward,  Right  ).GetSafeNormal();
+    const FVector Right = FVector::CrossProduct(Up,      Forward).GetSafeNormal();
+    Up                  = FVector::CrossProduct(Forward, Right  ).GetSafeNormal();
 
-    // ---- Decompose gaze into yaw / pitch (radians). ----------------------
-    float TargetYawRad   = 0.f;
-    float TargetPitchRad = 0.f;
-    bool  bValidTarget   = false;
+    // ---- Per-eye target yaw/pitch (radians) -------------------------------
+    // Each eye has its own world position, so each has a slightly different
+    // gaze direction to the same target (convergence / divergence). At
+    // typical distances this is tiny, but doing it per-eye is correct and
+    // free.
+    const float MaxEyeAngleDeg =
+        FMath::Clamp(Config.MaxEyeAngleDegrees, 1.f, 90.f);
+    const float MaxEyeAngleRad = FMath::DegreesToRadians(MaxEyeAngleDeg);
 
-    const FVector GazeDir = (LookAtTarget - HeadWorldLocation).GetSafeNormal();
-    if (!GazeDir.IsNearlyZero())
+    float TargetLYawRad   = 0.f, TargetLPitchRad = 0.f;
+    float TargetRYawRad   = 0.f, TargetRPitchRad = 0.f;
     {
-        DecomposeGaze(GazeDir, Forward, Up, Right, TargetYawRad, TargetPitchRad);
-        bValidTarget = true;
+        const FVector GazeDirL = (LookAtTarget - LeftEyeWorldPos).GetSafeNormal();
+        if (!GazeDirL.IsNearlyZero())
+        {
+            DecomposeGaze(GazeDirL, Forward, Up, Right,
+                          TargetLYawRad, TargetLPitchRad);
+        }
+        const FVector GazeDirR = (LookAtTarget - RightEyeWorldPos).GetSafeNormal();
+        if (!GazeDirR.IsNearlyZero())
+        {
+            DecomposeGaze(GazeDirR, Forward, Up, Right,
+                          TargetRYawRad, TargetRPitchRad);
+        }
     }
+    TargetLYawRad   = FMath::Clamp(TargetLYawRad,   -MaxEyeAngleRad, MaxEyeAngleRad);
+    TargetLPitchRad = FMath::Clamp(TargetLPitchRad, -MaxEyeAngleRad, MaxEyeAngleRad);
+    TargetRYawRad   = FMath::Clamp(TargetRYawRad,   -MaxEyeAngleRad, MaxEyeAngleRad);
+    TargetRPitchRad = FMath::Clamp(TargetRPitchRad, -MaxEyeAngleRad, MaxEyeAngleRad);
 
-    // ---- Clamp to the configured rotation envelope. -----------------------
-    const float MaxYawRad =
-        FMath::DegreesToRadians(FMath::Max(Config.MaxYawDegrees, 0.f));
-    const float MaxPitchRad =
-        FMath::DegreesToRadians(FMath::Max(Config.MaxPitchDegrees, 0.f));
-    TargetYawRad   = FMath::Clamp(TargetYawRad,   -MaxYawRad,   MaxYawRad);
-    TargetPitchRad = FMath::Clamp(TargetPitchRad, -MaxPitchRad, MaxPitchRad);
-
-    // ---- Dead-zone test on the pre-clamp raw angle.  ----------------------
-    // Total off-forward angle = acos(dot(Gaze, Forward)). We use the clamped
-    // yaw/pitch to approximate (cheaper than acos) — if either dimension is
-    // outside the dead zone the total angle must be too.
+    // ---- Head target yaw/pitch + dead-zone ------------------------------
+    const float MaxHeadYawRad =
+        FMath::DegreesToRadians(FMath::Max(Config.MaxHeadYawDegrees, 0.f));
+    const float MaxHeadPitchRad =
+        FMath::DegreesToRadians(FMath::Max(Config.MaxHeadPitchDegrees, 0.f));
     const float DeadZoneRad =
-        FMath::DegreesToRadians(FMath::Max(Config.DeadZoneDegrees, 0.f));
-    R.bInDeadZone = bValidTarget
-        && FMath::Abs(TargetYawRad)   < DeadZoneRad
-        && FMath::Abs(TargetPitchRad) < DeadZoneRad;
+        FMath::DegreesToRadians(FMath::Max(Config.HeadDeadZoneDegrees, 0.f));
 
-    // ---- Smoothed yaw / pitch (angle-space Lerp, matches eye helper). ----
-    // During glance-away, we interpolate the smoothed angles toward zero —
-    // so when bShouldApply flips back true the head is already near-neutral
-    // and re-engaging with the target looks like a natural return, not a
-    // teleport. The caller ignores our rotation during glance-away anyway.
-    const float GoalYawRad   = R.bIsGlancingAway ? 0.f : TargetYawRad;
-    const float GoalPitchRad = R.bIsGlancingAway ? 0.f : TargetPitchRad;
-
-    // Store as degrees for friendlier Blueprint UX + direct FRotator use.
-    const float PrevYawRad   = FMath::DegreesToRadians(R.Yaw);
-    const float PrevPitchRad = FMath::DegreesToRadians(R.Pitch);
-
-    float SmoothedYawRad   = GoalYawRad;
-    float SmoothedPitchRad = GoalPitchRad;
-    if (Config.InterpSpeed > 0.f && DeltaTime > 0.f)
+    float TargetHeadYawRad   = 0.f;
+    float TargetHeadPitchRad = 0.f;
+    bool  bValidHeadGaze     = false;
     {
-        const float Alpha =
-            FMath::Clamp(DeltaTime * Config.InterpSpeed, 0.f, 1.f);
-        SmoothedYawRad   = FMath::Lerp(PrevYawRad,   GoalYawRad,   Alpha);
-        SmoothedPitchRad = FMath::Lerp(PrevPitchRad, GoalPitchRad, Alpha);
+        const FVector GazeDir = (LookAtTarget - HeadWorldLocation).GetSafeNormal();
+        if (!GazeDir.IsNearlyZero())
+        {
+            DecomposeGaze(GazeDir, Forward, Up, Right,
+                          TargetHeadYawRad, TargetHeadPitchRad);
+            bValidHeadGaze = true;
+        }
     }
+    TargetHeadYawRad   = FMath::Clamp(TargetHeadYawRad,   -MaxHeadYawRad,   MaxHeadYawRad);
+    TargetHeadPitchRad = FMath::Clamp(TargetHeadPitchRad, -MaxHeadPitchRad, MaxHeadPitchRad);
 
-    R.Yaw   = FMath::RadiansToDegrees(SmoothedYawRad);
-    R.Pitch = FMath::RadiansToDegrees(SmoothedPitchRad);
+    R.bInHeadDeadZone = bValidHeadGaze
+        && FMath::Abs(TargetHeadYawRad)   < DeadZoneRad
+        && FMath::Abs(TargetHeadPitchRad) < DeadZoneRad;
 
-    // ---- Glance-away state machine. ---------------------------------------
-    // Only advance if we have positive DeltaTime. Paused game / zero frames
-    // freeze the state so pausing + resuming doesn't trigger a spurious
-    // transition.
+    // ---- Attention state machine ----------------------------------------
     FRandomStream Rng(R.Seed);
     if (DeltaTime > 0.f)
     {
@@ -560,62 +481,158 @@ FInoHeadLookResult UInoAnimationBlueprintHelper::CalculateHeadLookRotation(
         if (R.GlanceTimer >= R.NextGlanceChangeTime)
         {
             R.GlanceTimer = 0.f;
+            const EGazeState Current = static_cast<EGazeState>(R.GlanceState);
 
-            if (R.bIsGlancingAway)
+            if (Current == EGazeState::Tracking)
             {
-                // End of a glance-away — return to tracking.
-                R.bIsGlancingAway = false;
-                R.NextGlanceChangeTime = RandRange(Rng,
-                    Config.MinHoldDuration, Config.MaxHoldDuration);
-            }
-            else
-            {
-                // End of a hold — roll for whether to glance away now.
-                const float Chance = FMath::Clamp(Config.GlanceAwayChance, 0.f, 1.f);
-                if (Chance > 0.f && Rng.FRand() < Chance)
+                // Roll for transition: eye glance / full disengage / continue.
+                const float EyeChance =
+                    FMath::Clamp(Config.EyeGlanceChance, 0.f, 1.f);
+                const float FullChance =
+                    FMath::Clamp(Config.FullGlanceChance, 0.f, 1.f - EyeChance);
+
+                const float Roll = Rng.FRand();
+                if (Roll < EyeChance)
                 {
-                    R.bIsGlancingAway = true;
+                    R.GlanceState = static_cast<uint8>(EGazeState::EyeGlance);
                     R.NextGlanceChangeTime = RandRange(Rng,
-                        Config.MinGlanceAwayDuration,
-                        Config.MaxGlanceAwayDuration);
+                        Config.MinEyeGlanceDuration,
+                        Config.MaxEyeGlanceDuration);
+                }
+                else if (Roll < EyeChance + FullChance)
+                {
+                    R.GlanceState = static_cast<uint8>(EGazeState::FullGlance);
+                    R.NextGlanceChangeTime = RandRange(Rng,
+                        Config.MinFullGlanceDuration,
+                        Config.MaxFullGlanceDuration);
                 }
                 else
                 {
-                    // Rolled to stay engaged — pick another hold duration.
+                    // Roll for continued tracking — just pick another hold.
                     R.NextGlanceChangeTime = RandRange(Rng,
                         Config.MinHoldDuration, Config.MaxHoldDuration);
                 }
+            }
+            else
+            {
+                // Coming back from any glance state → resume tracking.
+                R.GlanceState = static_cast<uint8>(EGazeState::Tracking);
+                R.NextGlanceChangeTime = RandRange(Rng,
+                    Config.MinHoldDuration, Config.MaxHoldDuration);
             }
         }
     }
     R.Seed = Rng.RandHelper(MAX_int32);
 
-    // ---- Compute output flags + blend. ------------------------------------
-    R.bShouldApply = !R.bIsGlancingAway && !R.bInDeadZone;
+    const EGazeState State = static_cast<EGazeState>(R.GlanceState);
+    const bool bHeadTracks = (State != EGazeState::FullGlance);
+    const bool bEyesTrack  = (State == EGazeState::Tracking);
 
-    // Smooth 0↔1 ramp over ~150 ms (InterpSpeed=7 → ~95% in 430 ms; we use
-    // slightly faster 10 for a snappier reveal/hide).
-    const float BlendTarget = R.bShouldApply ? 1.f : 0.f;
+    // ---- Smooth per-eye angles toward per-state goal ---------------------
+    // When a component isn't tracking, interpolate its smoothed angle
+    // toward zero (neutral) so re-engage doesn't snap.
+    const float EyeGoalLYaw   = bEyesTrack ? TargetLYawRad   : 0.f;
+    const float EyeGoalLPitch = bEyesTrack ? TargetLPitchRad : 0.f;
+    const float EyeGoalRYaw   = bEyesTrack ? TargetRYawRad   : 0.f;
+    const float EyeGoalRPitch = bEyesTrack ? TargetRPitchRad : 0.f;
+
+    const float PrevLYawRad   = FMath::DegreesToRadians(R.LeftEyeYaw);
+    const float PrevLPitchRad = FMath::DegreesToRadians(R.LeftEyePitch);
+    const float PrevRYawRad   = FMath::DegreesToRadians(R.RightEyeYaw);
+    const float PrevRPitchRad = FMath::DegreesToRadians(R.RightEyePitch);
+
+    float SmoothedLYawRad   = EyeGoalLYaw;
+    float SmoothedLPitchRad = EyeGoalLPitch;
+    float SmoothedRYawRad   = EyeGoalRYaw;
+    float SmoothedRPitchRad = EyeGoalRPitch;
+    if (Config.EyeInterpSpeed > 0.f && DeltaTime > 0.f)
+    {
+        const float Alpha = FMath::Clamp(DeltaTime * Config.EyeInterpSpeed, 0.f, 1.f);
+        SmoothedLYawRad   = FMath::Lerp(PrevLYawRad,   EyeGoalLYaw,   Alpha);
+        SmoothedLPitchRad = FMath::Lerp(PrevLPitchRad, EyeGoalLPitch, Alpha);
+        SmoothedRYawRad   = FMath::Lerp(PrevRYawRad,   EyeGoalRYaw,   Alpha);
+        SmoothedRPitchRad = FMath::Lerp(PrevRPitchRad, EyeGoalRPitch, Alpha);
+    }
+
+    R.LeftEyeYaw    = FMath::RadiansToDegrees(SmoothedLYawRad);
+    R.LeftEyePitch  = FMath::RadiansToDegrees(SmoothedLPitchRad);
+    R.RightEyeYaw   = FMath::RadiansToDegrees(SmoothedRYawRad);
+    R.RightEyePitch = FMath::RadiansToDegrees(SmoothedRPitchRad);
+
+    // ---- Derive per-eye blend shape weights ------------------------------
+    auto ZeroEyeWeights = [](FInoGazeResult& X)
+    {
+        X.EyeLookLeftL = X.EyeLookRightL = X.EyeLookUpL = X.EyeLookDownL = 0.f;
+        X.EyeLookLeftR = X.EyeLookRightR = X.EyeLookUpR = X.EyeLookDownR = 0.f;
+    };
+    ZeroEyeWeights(R);
+
+    if (SmoothedLYawRad < 0.f)
+        R.EyeLookLeftL  = AngleToWeight(SmoothedLYawRad, MaxEyeAngleRad);
+    else
+        R.EyeLookRightL = AngleToWeight(SmoothedLYawRad, MaxEyeAngleRad);
+    if (SmoothedLPitchRad > 0.f)
+        R.EyeLookUpL    = AngleToWeight(SmoothedLPitchRad, MaxEyeAngleRad);
+    else
+        R.EyeLookDownL  = AngleToWeight(SmoothedLPitchRad, MaxEyeAngleRad);
+
+    if (SmoothedRYawRad < 0.f)
+        R.EyeLookLeftR  = AngleToWeight(SmoothedRYawRad, MaxEyeAngleRad);
+    else
+        R.EyeLookRightR = AngleToWeight(SmoothedRYawRad, MaxEyeAngleRad);
+    if (SmoothedRPitchRad > 0.f)
+        R.EyeLookUpR    = AngleToWeight(SmoothedRPitchRad, MaxEyeAngleRad);
+    else
+        R.EyeLookDownR  = AngleToWeight(SmoothedRPitchRad, MaxEyeAngleRad);
+
+    // ---- Smooth head angles toward per-state goal ------------------------
+    const float HeadGoalYawRad   = bHeadTracks ? TargetHeadYawRad   : 0.f;
+    const float HeadGoalPitchRad = bHeadTracks ? TargetHeadPitchRad : 0.f;
+
+    const float PrevHeadYawRad   = FMath::DegreesToRadians(R.HeadYaw);
+    const float PrevHeadPitchRad = FMath::DegreesToRadians(R.HeadPitch);
+
+    float SmoothedHeadYawRad   = HeadGoalYawRad;
+    float SmoothedHeadPitchRad = HeadGoalPitchRad;
+    if (Config.HeadInterpSpeed > 0.f && DeltaTime > 0.f)
+    {
+        const float Alpha = FMath::Clamp(DeltaTime * Config.HeadInterpSpeed, 0.f, 1.f);
+        SmoothedHeadYawRad   = FMath::Lerp(PrevHeadYawRad,   HeadGoalYawRad,   Alpha);
+        SmoothedHeadPitchRad = FMath::Lerp(PrevHeadPitchRad, HeadGoalPitchRad, Alpha);
+    }
+
+    R.HeadYaw   = FMath::RadiansToDegrees(SmoothedHeadYawRad);
+    R.HeadPitch = FMath::RadiansToDegrees(SmoothedHeadPitchRad);
+
+    // ---- Apply flags + blend weights -------------------------------------
+    R.bApplyEyes = bEyesTrack;
+    R.bApplyHead = bHeadTracks && !R.bInHeadDeadZone;
+
+    const float EyeBlendTarget  = R.bApplyEyes ? 1.f : 0.f;
+    const float HeadBlendTarget = R.bApplyHead ? 1.f : 0.f;
     if (DeltaTime > 0.f)
     {
-        R.BlendWeight = FMath::FInterpTo(R.BlendWeight, BlendTarget,
-                                         DeltaTime, /*InterpSpeed=*/ 10.f);
+        R.EyeBlendWeight  = FMath::FInterpTo(R.EyeBlendWeight,
+                                             EyeBlendTarget,
+                                             DeltaTime, /*InterpSpeed=*/ 10.f);
+        R.HeadBlendWeight = FMath::FInterpTo(R.HeadBlendWeight,
+                                             HeadBlendTarget,
+                                             DeltaTime, /*InterpSpeed=*/ 10.f);
     }
     else
     {
-        R.BlendWeight = BlendTarget;
+        R.EyeBlendWeight  = EyeBlendTarget;
+        R.HeadBlendWeight = HeadBlendTarget;
     }
 
-    // ---- Magnitude — how far off-centre we're rotated (for secondary anim). -
-    // Ratio of current rotation magnitude to the max envelope, clamped [0,1].
-    const float YawMag   = (MaxYawRad   > KINDA_SMALL_NUMBER)
-        ? FMath::Abs(SmoothedYawRad)   / MaxYawRad   : 0.f;
-    const float PitchMag = (MaxPitchRad > KINDA_SMALL_NUMBER)
-        ? FMath::Abs(SmoothedPitchRad) / MaxPitchRad : 0.f;
-    R.Magnitude = FMath::Clamp(FMath::Max(YawMag, PitchMag), 0.f, 1.f);
+    // ---- Head magnitude + output rotation --------------------------------
+    const float YawMag   = (MaxHeadYawRad   > KINDA_SMALL_NUMBER)
+        ? FMath::Abs(SmoothedHeadYawRad)   / MaxHeadYawRad   : 0.f;
+    const float PitchMag = (MaxHeadPitchRad > KINDA_SMALL_NUMBER)
+        ? FMath::Abs(SmoothedHeadPitchRad) / MaxHeadPitchRad : 0.f;
+    R.HeadMagnitude = FMath::Clamp(FMath::Max(YawMag, PitchMag), 0.f, 1.f);
 
-    // ---- Compose the final FRotator (local-space; roll = 0). --------------
-    R.HeadLookRotation = FRotator(R.Pitch, R.Yaw, 0.f);
+    R.HeadLookRotation = FRotator(R.HeadPitch, R.HeadYaw, 0.f);
 
     return R;
 }

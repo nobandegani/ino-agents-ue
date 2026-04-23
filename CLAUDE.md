@@ -873,12 +873,22 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │
                  ├─ UInoAnimationBlueprintHelper    (UBlueprintFunctionLibrary)
                  │     Stateless animation helpers exposed for the demo
-                 │     character: CalculateEyeLookWeights (ARKit-style
-                 │     blendshape weights from a world-space look-at point,
-                 │     angle-space smoothing) and CalculateBlinkWeight
-                 │     (procedural blink state machine — random intervals,
-                 │     asymmetric close/open timing, occasional double blinks).
-                 │     Pass the previous frame's output back as PreviousState.
+                 │     character:
+                 │       CalculateGaze — merged eye + head tracking. Returns
+                 │         ARKit-style eye blend shape weights AND a local-space
+                 │         head FRotator, with a three-state attention machine
+                 │         (Tracking / EyeGlance / FullGlance) for natural
+                 │         periodic look-away behaviour. Two bApply* flags let
+                 │         the caller decide whether to use the outputs or fall
+                 │         back to the base animation for eyes and head
+                 │         independently.
+                 │       CalculateBlinkWeight — procedural blink state machine:
+                 │         random intervals with occasional long "stare" pauses,
+                 │         asymmetric ease-in close / ease-out open, double
+                 │         blinks, SpeakingIntensity input to accelerate rate
+                 │         during speech.
+                 │     Pass the previous frame's output back as PreviousState /
+                 │     PreviousResult for frame-rate-independent smoothing.
                  │
                  └─ UInoAudioFunctionLibrary        (UBlueprintFunctionLibrary)
                      GenerateEmptyRawAudio (silent PCM in any
