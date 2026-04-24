@@ -33,7 +33,7 @@ FString UInoLiteRtLmToolBase::ExecuteFromString(const FString& ArgumentsJson)
         else
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("UInoLiteRtLmToolBase::ExecuteFromString: failed to parse arguments "
+                   TEXT("LiteRtLm: Tool: ExecuteFromString failed to parse arguments "
                         "JSON for tool '%s': %s"),
                    *ToolName.ToString(), *ArgumentsJson);
         }

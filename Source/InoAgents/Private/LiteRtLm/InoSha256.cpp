@@ -195,7 +195,7 @@ FString ComputeFileSha256(const FString& Path)
     if (!Handle.IsValid())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("ComputeFileSha256: failed to open %s"), *Path);
+               TEXT("LiteRtLm: Subsystem: ComputeFileSha256 failed to open %s"), *Path);
         return FString();
     }
 
@@ -211,7 +211,7 @@ FString ComputeFileSha256(const FString& Path)
         if (!Handle->Read(Buffer.GetData(), ToRead))
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("ComputeFileSha256: read failed at offset %lld of %s"),
+                   TEXT("LiteRtLm: Subsystem: ComputeFileSha256 read failed at offset %lld of %s"),
                    Handle->Size() - Remaining, *Path);
             return FString();
         }

@@ -73,11 +73,17 @@ FInoLiteRtLmConversationWorker::FInoLiteRtLmConversationWorker(
         TPri_Normal));
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("FInoLiteRtLmConversationWorker: thread started"));
+           TEXT("LiteRtLm: Worker: thread started (native_conversation=%s, native_config=%s)"),
+           NativeConversation != nullptr ? TEXT("present") : TEXT("null"),
+           NativeConversationConfig != nullptr ? TEXT("present") : TEXT("null"));
 }
 
 FInoLiteRtLmConversationWorker::~FInoLiteRtLmConversationWorker()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Worker: ~Worker — teardown starting (stream_in_flight=%s)"),
+           bStreamInFlight.Load() ? TEXT("yes") : TEXT("no"));
+
     // Signal the worker to exit its Run() loop. This is the path for a
     // graceful shutdown from the game thread.
     bStopRequested = true;
@@ -96,6 +102,8 @@ FInoLiteRtLmConversationWorker::~FInoLiteRtLmConversationWorker()
     // has already been GC'd, the broadcast is skipped.
     if (bStreamInFlight.Load())
     {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Worker: ~Worker cancelling in-flight stream before join"));
         bStreamCancelled = true;
         if (NativeConversation != nullptr)
         {
@@ -160,11 +168,15 @@ FInoLiteRtLmConversationWorker::~FInoLiteRtLmConversationWorker()
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("FInoLiteRtLmConversationWorker: destroyed"));
+           TEXT("LiteRtLm: Worker: destroyed (thread joined, native resources freed)"));
 }
 
 void FInoLiteRtLmConversationWorker::EnqueueMessage(FString UserText, FString ExtraContext)
 {
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Worker: EnqueueMessage (user_text_len=%d, extra_context_len=%d)"),
+           UserText.Len(), ExtraContext.Len());
+
     MessageQueue.Enqueue({ MoveTemp(UserText), MoveTemp(ExtraContext) });
     if (QueueEvent)
     {
@@ -181,8 +193,13 @@ void FInoLiteRtLmConversationWorker::Cancel()
     // with nothing to cancel" gracefully per the C API docs).
     if (!bStreamInFlight.Load())
     {
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LiteRtLm: Worker: Cancel — no stream in flight, no-op"));
         return;
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Worker: Cancel — invoking litert_lm_conversation_cancel_process"));
 
     // Mark the stream as cancelled. The worker thread reads this after
     // StreamEvent unblocks and dispatches OnError("Cancelled by caller")
@@ -200,11 +217,16 @@ void FInoLiteRtLmConversationWorker::Cancel()
 
 uint32 FInoLiteRtLmConversationWorker::Run()
 {
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Worker: Run — entering main loop"));
+
     while (!bStopRequested)
     {
         FPendingMessage Msg;
         if (MessageQueue.Dequeue(Msg))
         {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LiteRtLm: Worker: dequeued message (user_text_len=%d, extra_context_len=%d); dispatching to ProcessMessage"),
+                   Msg.UserText.Len(), Msg.ExtraContext.Len());
             ProcessMessage(Msg.UserText, Msg.ExtraContext);
         }
         else
@@ -217,11 +239,15 @@ uint32 FInoLiteRtLmConversationWorker::Run()
             }
         }
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Worker: Run — exiting main loop (stop observed)"));
     return 0;
 }
 
 void FInoLiteRtLmConversationWorker::Stop()
 {
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Worker: Stop called"));
     bStopRequested = true;
     if (QueueEvent)
     {
@@ -266,6 +292,10 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
 
     for (int32 Round = 0; Round < kMaxAgentLoopRounds; ++Round)
     {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Worker: agent loop round %d/%d starting (message_json_len=%d)"),
+               Round, kMaxAgentLoopRounds, CurrentMessageJson.Len());
+
         // --- Run the stream for this round ---
         // Pass ExtraContext only on round 0 (the user's message).
         // Subsequent rounds are tool-result messages where extra
@@ -275,13 +305,24 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
         {
             // RunOneStreamRound populates StreamError on failure
             // (stream failed to start). Dispatch and bail.
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("LiteRtLm: Worker: round %d RunOneStreamRound returned false; dispatching error"),
+                   Round);
             DispatchErrorOnGameThread(StreamError);
             return;
         }
 
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Worker: round %d stream finished (accumulated_chars=%d, pending_tool_calls=%d, cancelled=%s, error=%s)"),
+               Round, StreamAccumulated.Len(), StreamPendingToolCalls.Num(),
+               bStreamCancelled.Load() ? TEXT("yes") : TEXT("no"),
+               StreamError.IsEmpty() ? TEXT("<none>") : *StreamError);
+
         // --- Handle terminal conditions ---
         if (bStreamCancelled.Load())
         {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LiteRtLm: Worker: round %d cancelled by caller"), Round);
             DispatchErrorOnGameThread(TEXT("Cancelled by caller"));
             return;
         }
@@ -295,6 +336,10 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
         // --- Handle the round's output ---
         if (StreamPendingToolCalls.Num() > 0)
         {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LiteRtLm: Worker: round %d produced %d tool call(s); executing on game thread"),
+                   Round, StreamPendingToolCalls.Num());
+
             // The model asked to call tools. Execute each on the game
             // thread (synchronously from this worker's perspective),
             // broadcast OnToolCalled for visibility, and build a
@@ -311,7 +356,17 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
             {
                 const FPendingToolCall& Call = StreamPendingToolCalls[CallIdx];
 
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("LiteRtLm: Tool: invoke \"%s\" (args %d bytes): %s"),
+                       *Call.Name.ToString(), Call.ArgumentsJson.Len(), *Call.ArgumentsJson);
+
+                const double TStart = FPlatformTime::Seconds();
                 const FString ResultJson = ExecuteToolSynchronously(Call);
+                const double Elapsed = FPlatformTime::Seconds() - TStart;
+
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("LiteRtLm: Tool: result for \"%s\" (%d bytes, %.2f ms): %s"),
+                       *Call.Name.ToString(), ResultJson.Len(), Elapsed * 1000.0, *ResultJson);
 
                 DispatchToolCalledOnGameThread(
                     Call.Name, Call.ArgumentsJson, ResultJson);
@@ -352,16 +407,25 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
         {
             // Empty text with no tool calls is pathological. Match
             // D.3 semantics: treat as error rather than OnComplete("").
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("LiteRtLm: Worker: round %d empty terminal response (no text, no tool calls)"),
+                   Round);
             DispatchErrorOnGameThread(
                 TEXT("Stream finished with no text content and no tool calls"));
             return;
         }
 
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Worker: agent loop terminated at round %d with final text (%d chars); dispatching OnComplete"),
+               Round, StreamAccumulated.Len());
         DispatchCompleteOnGameThread(StreamAccumulated);
         return;
     }
 
     // Safety cap exceeded.
+    UE_LOG(LogInoAgents, Error,
+           TEXT("LiteRtLm: Worker: agent loop safety cap exceeded (%d rounds)"),
+           kMaxAgentLoopRounds);
     DispatchErrorOnGameThread(FString::Printf(
         TEXT("Agent loop exceeded %d rounds without reaching a final answer"),
         kMaxAgentLoopRounds));
@@ -396,7 +460,7 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         ExtraContextForRound.IsEmpty() ? nullptr : ExtraContextUtf8.Get();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("RunOneStreamRound: sending message (%d chars), extra_context=%s"),
+           TEXT("LiteRtLm: Worker: RunOneStreamRound sending message (%d chars, extra_context=%s)"),
            MessageJson.Len(),
            ExtraContextCStr ? TEXT("<set>") : TEXT("<null>"));
 
@@ -453,7 +517,7 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
     if (!CapturedStderr.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("LiteRT-LM stderr during send_message_stream: %s"),
+               TEXT("LiteRtLm: Worker: LiteRT-LM stderr during send_message_stream: %s"),
                *CapturedStderr.TrimEnd());
     }
 #endif
@@ -464,8 +528,14 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         StreamError = FString::Printf(
             TEXT("litert_lm_conversation_send_message_stream returned non-zero (%d) — stream did not start"),
             StartRc);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("LiteRtLm: Worker: send_message_stream failed to start (rc=%d)"),
+               StartRc);
         return false;
     }
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Worker: send_message_stream dispatched, waiting on StreamEvent"));
 
     if (StreamEvent)
     {
@@ -568,7 +638,7 @@ FString FInoLiteRtLmConversationWorker::ExecuteToolSynchronously(
                     if (!bIsValidJson)
                     {
                         UE_LOG(LogInoAgents, Warning,
-                               TEXT("Tool '%s' returned invalid JSON: \"%s\". "
+                               TEXT("LiteRtLm: Tool: \"%s\" returned invalid JSON: \"%s\". "
                                     "Wrapping in quotes to produce a valid JSON string. "
                                     "Tool implementations should return valid JSON "
                                     "(bare number, quoted string, object, or array)."),
@@ -582,6 +652,9 @@ FString FInoLiteRtLmConversationWorker::ExecuteToolSynchronously(
             }
             else
             {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("LiteRtLm: Tool: \"%s\" not registered at dispatch time"),
+                       *ToolName.ToString());
                 ToolResult = FString::Printf(
                     TEXT("\"ERROR: tool '%s' is not registered\""),
                     *ToolName.ToString());
@@ -589,6 +662,9 @@ FString FInoLiteRtLmConversationWorker::ExecuteToolSynchronously(
         }
         else
         {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Tool: subsystem was destroyed before tool \"%s\" could run"),
+                   *ToolName.ToString());
             ToolResult = FString(TEXT("\"ERROR: subsystem has been destroyed\""));
         }
 
@@ -711,6 +787,8 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
 
             if (!ChunkText.IsEmpty())
             {
+                UE_LOG(LogInoAgents, Verbose,
+                       TEXT("LiteRtLm: Worker: token chunk (%d chars)"), ChunkText.Len());
                 StreamAccumulated += ChunkText;
                 DispatchTokenOnGameThread(ChunkText);
                 bChunkHadAnyContent = true;
@@ -752,7 +830,7 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
                         || ToolNameStr.IsEmpty())
                     {
                         UE_LOG(LogInoAgents, Warning,
-                               TEXT("FInoLiteRtLmConversationWorker: tool_call entry has no function.name field, dropping: %s"),
+                               TEXT("LiteRtLm: Worker: tool_call entry has no function.name field, dropping: %s"),
                                *ChunkJson);
                         continue;
                     }
@@ -777,6 +855,10 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
                         FJsonSerializer::Serialize(ArgsObjPtr->ToSharedRef(), ArgsWriter);
                     }
 
+                    UE_LOG(LogInoAgents, Verbose,
+                           TEXT("LiteRtLm: Worker: captured tool_call \"%s\" (args %d bytes)"),
+                           *ToolNameStr, ArgsJsonStr.Len());
+
                     FPendingToolCall NewCall;
                     NewCall.Name          = FName(*ToolNameStr);
                     NewCall.ArgumentsJson = MoveTemp(ArgsJsonStr);
@@ -796,7 +878,7 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
             if (!bChunkHadAnyContent && !is_final)
             {
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("FInoLiteRtLmConversationWorker: chunk had no recognised content (not text or tool_calls). Raw chunk: %s"),
+                       TEXT("LiteRtLm: Worker: chunk had no recognised content (not text or tool_calls). Raw chunk: %s"),
                        *ChunkJson);
             }
         }
@@ -808,7 +890,7 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
             // for this send. Don't abort the stream — we still want
             // the final callback to fire so the worker unblocks.
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("FInoLiteRtLmConversationWorker: failed to parse stream chunk JSON, dropping: %s"),
+                   TEXT("LiteRtLm: Worker: failed to parse stream chunk JSON, dropping: %s"),
                    *ChunkJson);
         }
     }

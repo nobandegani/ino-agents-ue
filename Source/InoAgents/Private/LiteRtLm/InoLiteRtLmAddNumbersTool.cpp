@@ -33,7 +33,7 @@ FString UInoLiteRtLmAddNumbersTool::Execute_Implementation(const FJsonObjectWrap
     if (!Arguments.JsonObject.IsValid())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("add_numbers: arguments object is null"));
+               TEXT("LiteRtLm: Tool: add_numbers — arguments object is null"));
         return FString(TEXT("\"ERROR: failed to parse arguments\""));
     }
 
@@ -72,7 +72,7 @@ FString UInoLiteRtLmAddNumbersTool::Execute_Implementation(const FJsonObjectWrap
 
     const int64 Sum = A + B;
     UE_LOG(LogInoAgents, Log,
-           TEXT("add_numbers: %lld + %lld = %lld"), A, B, Sum);
+           TEXT("LiteRtLm: Tool: add_numbers(%lld, %lld) = %lld"), A, B, Sum);
 
     return FString::Printf(TEXT("%lld"), Sum);
 }

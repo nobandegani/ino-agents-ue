@@ -33,16 +33,22 @@ void UInoLiteRtLmConversation::Initialize(
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Conversation: Initialize called (engine=%s, model=%s, initial_history=%d)"),
+           InEngine != nullptr ? TEXT("present") : TEXT("null"),
+           *InConfig.ModelFileName,
+           InInitialMessages.Num());
+
     if (InEngine == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoLiteRtLmConversation::Initialize: engine is null"));
+               TEXT("LiteRtLm: Conversation: Initialize FAILED — engine is null"));
         return;
     }
     if (InConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoLiteRtLmConversation::Initialize: config is null"));
+               TEXT("LiteRtLm: Conversation: Initialize FAILED — config is null"));
         return;
     }
 
@@ -105,7 +111,7 @@ void UInoLiteRtLmConversation::Initialize(
             bEnableConstrainedDecoding = true;
 
             UE_LOG(LogInoAgents, Log,
-                   TEXT("UInoLiteRtLmConversation::Initialize: tools registered, "
+                   TEXT("LiteRtLm: Conversation: Initialize — tools registered, "
                         "constrained decoding ENABLED (%d bytes of tools_json)"),
                    ToolsJson.Len());
         }
@@ -209,18 +215,20 @@ void UInoLiteRtLmConversation::Initialize(
     {
         if (SessionConfig != nullptr) litert_lm_session_config_delete(SessionConfig);
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoLiteRtLmConversation::Initialize: "
+               TEXT("LiteRtLm: Conversation: Initialize FAILED — "
                     "litert_lm_conversation_config_create returned NULL"));
         return;
     }
 
     // Create the native conversation.
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Conversation: calling native litert_lm_conversation_create"));
     LiteRtLmConversation* NativeConv = litert_lm_conversation_create(InEngine, NativeConvConfig);
 
     if (NativeConv == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoLiteRtLmConversation::Initialize: "
+               TEXT("LiteRtLm: Conversation: Initialize FAILED — "
                     "litert_lm_conversation_create returned NULL"));
         litert_lm_conversation_config_delete(NativeConvConfig);
         return;
@@ -242,9 +250,10 @@ void UInoLiteRtLmConversation::Initialize(
     History = InInitialMessages;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoLiteRtLmConversation: initialized (system_message=%s, history=%d msgs)"),
+           TEXT("LiteRtLm: Conversation: initialized (system_message=%s, history=%d msgs, tools_enabled=%s)"),
            InConfig.SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"),
-           History.Num());
+           History.Num(),
+           bEnableConstrainedDecoding ? TEXT("yes") : TEXT("no"));
 
     // Log the first 200 chars of the system message so we can verify
     // the right prompt is reaching the native layer. Truncated to
@@ -253,7 +262,7 @@ void UInoLiteRtLmConversation::Initialize(
     {
         const FString Preview = InConfig.SystemMessage.Left(200);
         UE_LOG(LogInoAgents, Log,
-               TEXT("UInoLiteRtLmConversation: system_message preview: \"%s%s\""),
+               TEXT("LiteRtLm: Conversation: system_message preview: \"%s%s\""),
                *Preview,
                InConfig.SystemMessage.Len() > 200 ? TEXT("...") : TEXT(""));
     }
@@ -262,6 +271,10 @@ void UInoLiteRtLmConversation::Initialize(
 void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
 {
     check(IsInGameThread());
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Conversation: SendMessageAsync called (user_text_len=%d, history_before=%d, worker=%s)"),
+           UserText.Len(), History.Num(), Worker.IsValid() ? TEXT("present") : TEXT("null"));
 
     // Broadcast the user's text synchronously BEFORE any validation so
     // chat UIs echo every submitted message regardless of whether the
@@ -272,8 +285,8 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
     if (!Worker.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("UInoLiteRtLmConversation::SendMessageAsync: worker is null — "
-                    "conversation was not initialized"));
+               TEXT("LiteRtLm: Conversation: SendMessageAsync FAILED — worker is null "
+                    "(conversation was not initialized)"));
         OnError.Broadcast(TEXT("Conversation not initialized"));
         return;
     }
@@ -308,6 +321,8 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
     const FString ContextBlock = BuildMergedContext();
     if (ContextBlock.IsEmpty())
     {
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LiteRtLm: Conversation: SendMessageAsync enqueueing user message (no context)"));
         Worker->EnqueueMessage(UserText);
     }
     else
@@ -315,6 +330,9 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
         const FString AugmentedText = FString::Printf(
             TEXT("[Context]\n%s[/Context]\n\n%s"),
             *ContextBlock, *UserText);
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LiteRtLm: Conversation: SendMessageAsync enqueueing user message with context (context %d bytes)"),
+               ContextBlock.Len());
         Worker->EnqueueMessage(AugmentedText);
     }
 }
@@ -322,6 +340,11 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
 void UInoLiteRtLmConversation::Cancel()
 {
     check(IsInGameThread());
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Conversation: Cancel called (worker=%s, streaming=%s)"),
+           Worker.IsValid() ? TEXT("present") : TEXT("null"),
+           (Worker.IsValid() && Worker->IsStreamInFlight()) ? TEXT("yes") : TEXT("no"));
 
     if (!Worker.IsValid())
     {
@@ -347,6 +370,10 @@ void UInoLiteRtLmConversation::Shutdown()
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Conversation: Shutdown called (worker=%s)"),
+           Worker.IsValid() ? TEXT("present") : TEXT("null"));
+
     // Resetting the TUniquePtr invokes ~FInoLiteRtLmConversationWorker,
     // which cancels any in-flight stream, joins the worker thread,
     // and destroys the native LiteRT-LM resources. No delegate
@@ -357,6 +384,8 @@ void UInoLiteRtLmConversation::Shutdown()
     // null pointer does nothing. BeginDestroy calls the same
     // Worker.Reset() again, which also becomes a no-op after Shutdown.
     Worker.Reset();
+
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Conversation: Shutdown complete"));
 }
 
 void UInoLiteRtLmConversation::SubmitDeferredToolResult(
@@ -369,7 +398,7 @@ void UInoLiteRtLmConversation::SubmitDeferredToolResult(
     // ToolCallId to look up a pending TPromise stored on the worker
     // and fulfil it with ResultJson.
     UE_LOG(LogInoAgents, Warning,
-           TEXT("SubmitDeferredToolResult(%s): ignored — deferred tool "
+           TEXT("LiteRtLm: Conversation: SubmitDeferredToolResult(%s) ignored — deferred tool "
                 "results are not yet implemented. All tools currently "
                 "execute synchronously on the game thread from inside "
                 "the worker's agent loop. (ResultJson length: %d)"),
@@ -378,6 +407,11 @@ void UInoLiteRtLmConversation::SubmitDeferredToolResult(
 
 void UInoLiteRtLmConversation::BeginDestroy()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Conversation: BeginDestroy (worker=%s, history=%d)"),
+           Worker.IsValid() ? TEXT("present") : TEXT("null"),
+           History.Num());
+
     // Resetting the TUniquePtr invokes ~FInoLiteRtLmConversationWorker,
     // which:
     //   1. Signals the worker thread to stop

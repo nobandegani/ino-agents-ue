@@ -50,12 +50,15 @@ void UInoLiteRtLmSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     LoadedConfig = FInoLiteRtLmModelConfig();
     bLoadInFlight = false;
 
-    UE_LOG(LogInoAgents, Log, TEXT("UInoLiteRtLmSubsystem: Initialize"));
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Subsystem: Initialize — subsystem ready (engine not yet loaded)"));
 }
 
 void UInoLiteRtLmSubsystem::Deinitialize()
 {
-    UE_LOG(LogInoAgents, Log, TEXT("UInoLiteRtLmSubsystem: Deinitialize"));
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Subsystem: Deinitialize — tearing down (load_in_flight=%s, engine=%s, tools=%d)"),
+           bLoadInFlight ? TEXT("yes") : TEXT("no"),
+           Engine != nullptr ? TEXT("present") : TEXT("null"),
+           Tools.Num());
 
     // Note: if a load is in flight at shutdown, the ThreadPool worker is
     // still running. We do NOT block waiting for it — instead, the worker's
@@ -68,6 +71,8 @@ void UInoLiteRtLmSubsystem::Deinitialize()
     // the subsystem is gone.
     if (DownloadRequest.IsValid())
     {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Download: Deinitialize — cancelling in-flight download request"));
         DownloadRequest->CancelRequest();
         DownloadRequest.Reset();
     }
@@ -92,10 +97,18 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: LoadModelAsync called (model=%s, backend=%s, max_tokens=%d, system_message=%s, activation=%d)"),
+           *Config.ModelFileName,
+           ANSI_TO_TCHAR(LiteRtLmBackendToString(Config.Backend)),
+           Config.MaxNumTokens,
+           Config.SystemMessage.IsEmpty() ? TEXT("<none>") : TEXT("<set>"),
+           static_cast<int32>(Config.ActivationType));
+
     if (bLoadInFlight)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("LoadModelAsync: another load is already in flight; rejecting"));
+               TEXT("LiteRtLm: Subsystem: LoadModelAsync rejected — another load is already in flight"));
         OnLoaded.ExecuteIfBound(false, TEXT("A model load is already in flight"));
         return;
     }
@@ -103,7 +116,7 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
     if (Engine != nullptr)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("LoadModelAsync: a model is already loaded; call UnloadModel first"));
+               TEXT("LiteRtLm: Subsystem: LoadModelAsync rejected — a model is already loaded; call UnloadModel first"));
         OnLoaded.ExecuteIfBound(false, TEXT("A model is already loaded; call UnloadModel first"));
         return;
     }
@@ -131,7 +144,7 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
         !ResolvedConfig.ModelFileName.Equals(Entry->ModelFileName, ESearchCase::IgnoreCase))
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("LoadModelAsync: resolved '%s' via display-name match → file name '%s'"),
+               TEXT("LiteRtLm: Subsystem: LoadModelAsync resolved '%s' via display-name match → file name '%s'"),
                *ResolvedConfig.ModelFileName, *Entry->ModelFileName);
         ResolvedConfig.ModelFileName = Entry->ModelFileName;
     }
@@ -144,7 +157,12 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
     {
         // Found on disk — verify SHA-256 first (if the entry has one configured),
         // then either proceed to load or delete+redownload on mismatch.
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Subsystem: LoadModelAsync found cached model on disk (path=%s); proceeding to verify+load"),
+               *ModelPath);
         bLoadInFlight = true;
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LiteRtLm: Subsystem: bLoadInFlight → true (cached path)"));
         LoadedConfig  = ResolvedConfig;
         VerifyAndLoad(ModelPath, Entry, OnLoaded, /*bAllowRedownloadOnMismatch=*/ true);
         return;
@@ -159,13 +177,15 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
                  "LiteRT-LM → Models (match either the Display Name or the "
                  "Model File Name)."),
             *ResolvedConfig.ModelFileName);
-        UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Err);
+        UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;
     }
 
     // Download, then load.
     bLoadInFlight = true;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Subsystem: bLoadInFlight → true (download path)"));
     LoadedConfig  = ResolvedConfig;
 
     const FString TargetDir = FPaths::Combine(
@@ -176,8 +196,8 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
     const FString TargetPath = FPaths::Combine(TargetDir, ResolvedConfig.ModelFileName);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: model not found locally, downloading from %s"),
-           *Entry->DownloadUrl);
+           TEXT("LiteRtLm: Subsystem: LoadModelAsync model not found locally, downloading from %s → %s"),
+           *Entry->DownloadUrl, *TargetPath);
 
     StartDownload(Entry->DownloadUrl, TargetPath, OnLoaded);
 }
@@ -194,9 +214,9 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
     const double                        TStart          = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: dispatching async load of %s (backend=%s, activation=%d)"),
+           TEXT("LiteRtLm: Engine: dispatching async engine_create of %s (backend=%s, activation=%d, max_tokens=%d)"),
            *ModelPathCopy, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)),
-           static_cast<int32>(ActivationType));
+           static_cast<int32>(ActivationType), MaxNumTokens);
 
     Async(EAsyncExecution::ThreadPool,
         [ModelPathCopy, BackendCopy, MaxNumTokens, ActivationType,
@@ -268,7 +288,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
             if (!WeakThis.IsValid())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("LoadModelAsync completion: subsystem is gone; freeing engine and giving up"));
+                       TEXT("LiteRtLm: Engine: engine_create completion — subsystem is gone; freeing engine and giving up"));
                 if (NewEngine)   litert_lm_engine_delete(NewEngine);
                 if (NewSettings) litert_lm_engine_settings_delete(NewSettings);
                 return;
@@ -276,6 +296,8 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
 
             UInoLiteRtLmSubsystem* Subsys = WeakThis.Get();
             Subsys->bLoadInFlight = false;
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (engine_create returned)"));
 
             if (NewEngine == nullptr)
             {
@@ -283,7 +305,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
                 // retry can succeed.
                 Subsys->LoadedConfig = FInoLiteRtLmModelConfig();
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("LoadModelAsync: FAILED after %.2f s: %s"),
+                       TEXT("LiteRtLm: Engine: engine_create FAILED after %.2f s: %s"),
                        Elapsed, *LocalError);
                 OnLoaded.ExecuteIfBound(false, LocalError);
                 return;
@@ -293,7 +315,8 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
             Subsys->Engine   = NewEngine;
             Subsys->Settings = NewSettings;
             UE_LOG(LogInoAgents, Log,
-                   TEXT("LoadModelAsync: SUCCESS in %.2f s"), Elapsed);
+                   TEXT("LiteRtLm: Engine: engine_create SUCCESS in %.2f s (backend=%s)"),
+                   Elapsed, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)));
             OnLoaded.ExecuteIfBound(true, FString());
         });
     });
@@ -344,6 +367,11 @@ void UInoLiteRtLmSubsystem::UnloadModel()
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: UnloadModel called (engine=%s, active_conversation=%s)"),
+           Engine != nullptr ? TEXT("present") : TEXT("null"),
+           ActiveConversation.IsValid() ? TEXT("yes") : TEXT("no"));
+
     // Tear down the active conversation (if any) BEFORE the engine. LiteRT-LM
     // sessions hold raw pointers into the engine's LlmExecutor; deleting the
     // engine first and the conversation later causes ~SessionBasic to AV when
@@ -351,13 +379,15 @@ void UInoLiteRtLmSubsystem::UnloadModel()
     if (UInoLiteRtLmConversation* Conv = ActiveConversation.Get())
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("UnloadModel: shutting down active conversation before engine teardown"));
+               TEXT("LiteRtLm: Subsystem: UnloadModel shutting down active conversation before engine teardown"));
         Conv->Shutdown();
     }
     ActiveConversation.Reset();
 
     if (Engine != nullptr)
     {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Engine: engine_delete — destroying native engine"));
         litert_lm_engine_delete(Engine);
         Engine = nullptr;
     }
@@ -368,7 +398,7 @@ void UInoLiteRtLmSubsystem::UnloadModel()
     }
     LoadedConfig = FInoLiteRtLmModelConfig();
 
-    UE_LOG(LogInoAgents, Log, TEXT("UInoLiteRtLmSubsystem: UnloadModel complete"));
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Subsystem: UnloadModel complete"));
 }
 
 UInoLiteRtLmConversation* UInoLiteRtLmSubsystem::CreateConversation()
@@ -381,18 +411,22 @@ UInoLiteRtLmConversation* UInoLiteRtLmSubsystem::CreateConversationWithHistory(
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: CreateConversation called (initial_messages=%d, tools_registered=%d)"),
+           InitialMessages.Num(), Tools.Num());
+
     if (Engine == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("CreateConversation: no model loaded — call LoadModelAsync first"));
+               TEXT("LiteRtLm: Subsystem: CreateConversation FAILED — no model loaded; call LoadModelAsync first"));
         return nullptr;
     }
 
     if (LoadedConfig.ModelFileName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("CreateConversation: LoadedConfig is null despite Engine being "
-                    "set — this should be impossible"));
+               TEXT("LiteRtLm: Subsystem: CreateConversation FAILED — LoadedConfig is null despite Engine being "
+                    "set (this should be impossible)"));
         return nullptr;
     }
 
@@ -404,7 +438,7 @@ UInoLiteRtLmConversation* UInoLiteRtLmSubsystem::CreateConversationWithHistory(
     if (UInoLiteRtLmConversation* Prior = ActiveConversation.Get())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("CreateConversation: a prior conversation is still active; "
+               TEXT("LiteRtLm: Subsystem: CreateConversation — a prior conversation is still active; "
                     "shutting it down to honour the single-conversation-per-engine "
                     "invariant. Callers holding a reference to it will see "
                     "SendMessageAsync error out."));
@@ -415,6 +449,9 @@ UInoLiteRtLmConversation* UInoLiteRtLmSubsystem::CreateConversationWithHistory(
     UInoLiteRtLmConversation* Conv = NewObject<UInoLiteRtLmConversation>();
     Conv->Initialize(this, Engine, LoadedConfig, InitialMessages);
     ActiveConversation = Conv;
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: CreateConversation done (conversation=%s)"),
+           *Conv->GetName());
     return Conv;
 }
 
@@ -426,10 +463,14 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Tool: RegisterTool called (tool_object=%s)"),
+           Tool != nullptr ? *Tool->GetName() : TEXT("<null>"));
+
     if (Tool == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: the supplied Tool is null"));
+               TEXT("LiteRtLm: Tool: RegisterTool FAILED — the supplied Tool is null"));
         return;
     }
 
@@ -437,8 +478,8 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
     if (DeclaredName == NAME_None)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s has an empty ToolName — "
-                    "every tool must have a unique non-empty name"),
+               TEXT("LiteRtLm: Tool: RegisterTool FAILED — tool %s has an empty ToolName "
+                    "(every tool must have a unique non-empty name)"),
                *Tool->GetName());
         return;
     }
@@ -449,7 +490,7 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
     if (SchemaJson.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s produced an empty schema from BuildSchemaJson"),
+               TEXT("LiteRtLm: Tool: RegisterTool FAILED — tool %s produced an empty schema from BuildSchemaJson"),
                *DeclaredName.ToString());
         return;
     }
@@ -459,7 +500,7 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
     if (!FJsonSerializer::Deserialize(SchemaReader, SchemaObj) || !SchemaObj.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("RegisterTool: tool %s schema does not parse as JSON. Schema was: %s"),
+               TEXT("LiteRtLm: Tool: RegisterTool FAILED — tool %s schema does not parse as JSON. Schema was: %s"),
                *DeclaredName.ToString(), *SchemaJson);
         return;
     }
@@ -476,7 +517,7 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
             if (FName(*SchemaName) != DeclaredName)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("RegisterTool: tool %s schema name mismatch: "
+                       TEXT("LiteRtLm: Tool: RegisterTool FAILED — tool %s schema name mismatch: "
                             "ToolName==%s but schema function.name==%s. Refusing to register."),
                        *Tool->GetName(), *DeclaredName.ToString(), *SchemaName);
                 return;
@@ -487,33 +528,37 @@ void UInoLiteRtLmSubsystem::RegisterTool(UInoLiteRtLmToolBase* Tool)
     if (Tools.Contains(DeclaredName))
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("RegisterTool: replacing existing registration for tool \"%s\""),
+               TEXT("LiteRtLm: Tool: RegisterTool replacing existing registration for tool \"%s\""),
                *DeclaredName.ToString());
     }
 
     Tools.Add(DeclaredName, Tool);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("RegisterTool: registered tool \"%s\""),
-           *DeclaredName.ToString());
+           TEXT("LiteRtLm: Tool: registered \"%s\" (schema %d bytes, params=%d, total_tools=%d)"),
+           *DeclaredName.ToString(), SchemaJson.Len(), Tool->Parameters.Num(), Tools.Num());
 }
 
 void UInoLiteRtLmSubsystem::UnregisterTool(FName ToolName)
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Tool: UnregisterTool called (name=\"%s\")"),
+           *ToolName.ToString());
+
     const int32 NumRemoved = Tools.Remove(ToolName);
     if (NumRemoved == 0)
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("UnregisterTool: no tool registered under name \"%s\" — no-op"),
+               TEXT("LiteRtLm: Tool: UnregisterTool no-op — no tool registered under name \"%s\""),
                *ToolName.ToString());
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UnregisterTool: removed tool \"%s\""),
-           *ToolName.ToString());
+           TEXT("LiteRtLm: Tool: unregistered \"%s\" (total_tools=%d)"),
+           *ToolName.ToString(), Tools.Num());
 }
 
 UInoLiteRtLmToolBase* UInoLiteRtLmSubsystem::FindTool(FName ToolName) const
@@ -552,7 +597,7 @@ FString UInoLiteRtLmSubsystem::BuildToolsJsonForConversation() const
         if (!FJsonSerializer::Deserialize(Reader, SchemaObj) || !SchemaObj.IsValid())
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("BuildToolsJsonForConversation: tool \"%s\" schema does not parse; dropping"),
+                   TEXT("LiteRtLm: Tool: BuildToolsJsonForConversation — tool \"%s\" schema does not parse; dropping"),
                    *Pair.Key.ToString());
             continue;
         }
@@ -587,6 +632,10 @@ void UInoLiteRtLmSubsystem::StartDownload(
     DownloadBytesWritten      = 0;
     DownloadTotalBytes        = -1;  // learned from the first response
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Download: StartDownload (url=%s, target=%s, chunk_size=%lld bytes)"),
+           *Url, *TargetPath, kDownloadChunkSize);
+
     // Open .partial temp file. A crash mid-download won't leave a
     // corrupt file that ResolveModelPath would find.
     const FString PartialPath = TargetPath + TEXT(".partial");
@@ -600,8 +649,8 @@ void UInoLiteRtLmSubsystem::StartDownload(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: starting chunked download (%lld-byte chunks)"),
-           kDownloadChunkSize);
+           TEXT("LiteRtLm: Download: starting chunked download (%lld-byte chunks, partial=%s)"),
+           kDownloadChunkSize, *PartialPath);
 
     DownloadNextChunk();
 }
@@ -610,6 +659,10 @@ void UInoLiteRtLmSubsystem::DownloadNextChunk()
 {
     const int64 RangeStart = DownloadBytesWritten;
     const int64 RangeEnd   = RangeStart + kDownloadChunkSize - 1;
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Download: requesting chunk bytes=%lld-%lld"),
+           RangeStart, RangeEnd);
 
     DownloadRequest = FHttpModule::Get().CreateRequest();
     DownloadRequest->SetURL(DownloadUrl);
@@ -701,7 +754,7 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
         if (DownloadTotalBytes > 0)
         {
             UE_LOG(LogInoAgents, Log,
-                   TEXT("LoadModelAsync: full download size is %lld bytes (%.1f MB)"),
+                   TEXT("LiteRtLm: Download: full download size advertised as %lld bytes (%.1f MB)"),
                    DownloadTotalBytes, DownloadTotalBytes / (1024.0 * 1024.0));
         }
     }
@@ -728,7 +781,7 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
     if (DownloadTotalBytes > 0)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("LoadModelAsync: downloaded %lld / %lld MB (%.1f%%)"),
+               TEXT("LiteRtLm: Download: progress %lld / %lld MB (%.1f%%)"),
                DownloadBytesWritten / (1024 * 1024),
                DownloadTotalBytes   / (1024 * 1024),
                Percent);
@@ -736,7 +789,7 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
     else
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("LoadModelAsync: downloaded %lld MB so far (total unknown)"),
+               TEXT("LiteRtLm: Download: progress %lld MB so far (total unknown)"),
                DownloadBytesWritten / (1024 * 1024));
     }
 
@@ -768,8 +821,9 @@ void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: model downloaded and saved to %s (%lld bytes)"),
-           *PendingDownloadTargetPath, DownloadBytesWritten);
+           TEXT("LiteRtLm: Download: FinishDownloadSuccess — saved to %s (%lld bytes; %.1f MB)"),
+           *PendingDownloadTargetPath, DownloadBytesWritten,
+           DownloadBytesWritten / (1024.0 * 1024.0));
 
     // Terminal download-progress tick — bCompleted=true. Fires
     // exactly once per successful download, AFTER the .partial has
@@ -802,8 +856,10 @@ void UInoLiteRtLmSubsystem::FinishDownloadError(const FString& Error)
     CleanupDownload();
     IFileManager::Get().Delete(*(PendingDownloadTargetPath + TEXT(".partial")));
     bLoadInFlight = false;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (FinishDownloadError)"));
     LoadedConfig  = FInoLiteRtLmModelConfig();
-    UE_LOG(LogInoAgents, Error, TEXT("LoadModelAsync: %s"), *Error);
+    UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Download: FinishDownloadError: %s"), *Error);
     PendingOnLoaded.ExecuteIfBound(false, Error);
 }
 
@@ -833,7 +889,7 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
         if (Entry != nullptr)
         {
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("VerifyAndLoad: no ExpectedSha256 configured for '%s' — skipping verification"),
+                   TEXT("LiteRtLm: Subsystem: VerifyAndLoad — no ExpectedSha256 configured for '%s'; skipping verification"),
                    *Entry->ModelFileName);
         }
         ProceedWithLoad(ModelPath, OnLoaded);
@@ -851,8 +907,8 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
     const double                         TStart        = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("VerifyAndLoad: computing SHA-256 of %s (this may take several seconds for multi-GB files)"),
-           *PathCopy);
+           TEXT("LiteRtLm: Subsystem: VerifyAndLoad computing SHA-256 of %s (expected=%s; may take several seconds for multi-GB files)"),
+           *PathCopy, *ExpectedHash);
 
     Async(EAsyncExecution::ThreadPool,
         [PathCopy, ExpectedHash, RedownloadUrl, ModelFileName, WeakThis,
@@ -878,8 +934,8 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
             if (!ActualHash.IsEmpty() && ActualHash == ExpectedHash)
             {
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("VerifyAndLoad: SHA-256 OK for %s (%.1f s)"),
-                       *ModelFileName, Elapsed);
+                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad SHA-256 OK for %s (%.1f s, hash=%s)"),
+                       *ModelFileName, Elapsed, *ActualHash);
                 Self->ProceedWithLoad(PathCopy, OnLoaded);
                 return;
             }
@@ -889,14 +945,14 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
             if (ActualHash.IsEmpty())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("VerifyAndLoad: failed to compute SHA-256 of %s (file unreadable or gone); "
+                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad failed to compute SHA-256 of %s (file unreadable or gone); "
                             "treating as verification failure"),
                        *PathCopy);
             }
             else
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("VerifyAndLoad: SHA-256 mismatch for %s. Expected %s, got %s."),
+                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad SHA-256 mismatch for %s. Expected %s, got %s."),
                        *ModelFileName, *ExpectedHash, *ActualHash);
             }
 
@@ -906,7 +962,7 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
                                             /*EvenReadOnly=*/ true))
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("VerifyAndLoad: also failed to delete %s — "
+                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad also failed to delete %s — "
                             "manual cleanup may be required"),
                        *PathCopy);
             }
@@ -915,6 +971,8 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
             {
                 // Post-download verification failure — do NOT loop.
                 Self->bLoadInFlight = false;
+                UE_LOG(LogInoAgents, Verbose,
+                       TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (post-download SHA mismatch)"));
                 Self->LoadedConfig  = FInoLiteRtLmModelConfig();
                 const FString Err = FString::Printf(
                     TEXT("Model '%s' failed SHA-256 verification immediately after download "
@@ -922,7 +980,7 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
                          "hash may be wrong."),
                     *ModelFileName, *ExpectedHash,
                     ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
-                UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+                UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: VerifyAndLoad FAILED: %s"), *Err);
                 OnLoaded.ExecuteIfBound(false, Err);
                 return;
             }
@@ -931,19 +989,21 @@ void UInoLiteRtLmSubsystem::VerifyAndLoad(
             if (RedownloadUrl.IsEmpty())
             {
                 Self->bLoadInFlight = false;
+                UE_LOG(LogInoAgents, Verbose,
+                       TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (cached SHA mismatch, no URL)"));
                 Self->LoadedConfig  = FInoLiteRtLmModelConfig();
                 const FString Err = FString::Printf(
                     TEXT("Cached model '%s' failed SHA-256 verification and no DownloadUrl is "
                          "configured — cannot recover. Expected %s, got %s."),
                     *ModelFileName, *ExpectedHash,
                     ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
-                UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+                UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: VerifyAndLoad FAILED: %s"), *Err);
                 OnLoaded.ExecuteIfBound(false, Err);
                 return;
             }
 
             UE_LOG(LogInoAgents, Log,
-                   TEXT("VerifyAndLoad: re-downloading %s from %s"),
+                   TEXT("LiteRtLm: Subsystem: VerifyAndLoad re-downloading %s from %s"),
                    *ModelFileName, *RedownloadUrl);
             Self->StartDownload(RedownloadUrl, PathCopy, OnLoaded);
         });
@@ -990,6 +1050,10 @@ static UGameViewportClient* FindGameViewportForChatPanel()
 
 void UInoLiteRtLmSubsystem::HideChatPanel()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: HideChatPanel called (panel_active=%s)"),
+           ChatPanelState::Panel.IsValid() ? TEXT("yes") : TEXT("no"));
+
 #if WITH_EDITOR
     if (ChatPanelState::PrePIEEndedHandle.IsValid())
     {
@@ -1015,11 +1079,15 @@ void UInoLiteRtLmSubsystem::HideChatPanel()
     ChatPanelState::Panel.Reset();
     ChatPanelState::Bridge.Reset();
 
-    UE_LOG(LogInoAgents, Log, TEXT("UInoLiteRtLmSubsystem::HideChatPanel: done"));
+    UE_LOG(LogInoAgents, Log, TEXT("LiteRtLm: Subsystem: HideChatPanel done"));
 }
 
 void UInoLiteRtLmSubsystem::ShowChatPanel(UInoLiteRtLmConversation* InConversation)
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Subsystem: ShowChatPanel called (external_conversation=%s)"),
+           InConversation != nullptr ? TEXT("yes") : TEXT("no"));
+
     // Tear down any prior panel first.
     HideChatPanel();
 
@@ -1028,7 +1096,7 @@ void UInoLiteRtLmSubsystem::ShowChatPanel(UInoLiteRtLmConversation* InConversati
     if (VC == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("ShowChatPanel: no GameViewport — start PIE first."));
+               TEXT("LiteRtLm: Subsystem: ShowChatPanel FAILED — no GameViewport; start PIE first"));
         return;
     }
 
@@ -1040,15 +1108,15 @@ void UInoLiteRtLmSubsystem::ShowChatPanel(UInoLiteRtLmConversation* InConversati
         if (!IsModelLoaded())
         {
             UE_LOG(LogInoAgents, Error,
-                   TEXT("ShowChatPanel: no conversation provided and no model loaded — "
-                        "either pass a conversation or load a model first."));
+                   TEXT("LiteRtLm: Subsystem: ShowChatPanel FAILED — no conversation provided and no model loaded; "
+                        "either pass a conversation or load a model first"));
             return;
         }
         Conv = CreateConversation();
         if (Conv == nullptr)
         {
             UE_LOG(LogInoAgents, Error,
-                   TEXT("ShowChatPanel: CreateConversation returned null."));
+                   TEXT("LiteRtLm: Subsystem: ShowChatPanel FAILED — CreateConversation returned null"));
             return;
         }
     }
@@ -1115,7 +1183,7 @@ void UInoLiteRtLmSubsystem::ShowChatPanel(UInoLiteRtLmConversation* InConversati
 #endif
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("ShowChatPanel: ready (conversation=%s, external=%s)"),
+           TEXT("LiteRtLm: Subsystem: ShowChatPanel ready (conversation=%s, external=%s)"),
            *Conv->GetName(),
            InConversation != nullptr ? TEXT("yes") : TEXT("no"));
 }
