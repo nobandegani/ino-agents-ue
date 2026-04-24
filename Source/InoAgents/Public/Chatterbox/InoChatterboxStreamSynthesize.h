@@ -217,4 +217,9 @@ private:
     /** Set once any terminal delegate fires so Cancel() / late callbacks
      *  are no-ops. */
     bool bFinished = false;
+
+    /** Monotonic counter of chunks observed, purely for diagnostic
+     *  logging (each HandleChunk logs "chunk #N ..." at Verbose). Not
+     *  consulted by any control-flow path. */
+    int32 ChunkCount = 0;
 };

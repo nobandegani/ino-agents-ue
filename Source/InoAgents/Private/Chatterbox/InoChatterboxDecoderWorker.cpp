@@ -4,6 +4,7 @@
 
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "HAL/RunnableThread.h"
 
 #include "InoAgentsLog.h"
@@ -40,13 +41,21 @@ FInoChatterboxDecoderWorker::FInoChatterboxDecoderWorker(FDecodeTask InTask)
     if (!Thread.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("FInoChatterboxDecoderWorker: FRunnableThread::Create returned null — ")
+               TEXT("Chatterbox: Decoder: FRunnableThread::Create returned null -- ")
                TEXT("streaming decoder path will not make progress"));
+    }
+    else
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Decoder: thread started"));
     }
 }
 
 FInoChatterboxDecoderWorker::~FInoChatterboxDecoderWorker()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Decoder: shutting down (destructor)"));
+
     // 1. Signal stop.
     {
         FScopeLock Lock(&StateLock);
@@ -69,6 +78,9 @@ FInoChatterboxDecoderWorker::~FInoChatterboxDecoderWorker()
         Thread.Reset();
     }
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Decoder: thread exited"));
+
     // 4. Return events to the pool.
     if (WakeEvent)
     {
@@ -89,6 +101,11 @@ FInoChatterboxDecoderWorker::~FInoChatterboxDecoderWorker()
 void FInoChatterboxDecoderWorker::Publish(
     TArray<int64>&& Tokens, int32 NumGenTokens)
 {
+    const int32 TokenCount = Tokens.Num();
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Decoder: request published (tokens=%d, num_gen_tokens=%d)"),
+           TokenCount, NumGenTokens);
+
     // Defensive: if the worker thread failed to spawn in the
     // constructor, Publish is a no-op + record an error so the AR
     // thread sees it at the next HasError() check. Without this,
@@ -133,6 +150,10 @@ void FInoChatterboxDecoderWorker::Publish(
 
 void FInoChatterboxDecoderWorker::WaitForIdle()
 {
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Decoder: WaitForIdle begin"));
+    const double WaitT0 = FPlatformTime::Seconds();
+
     // Fast path: already idle. Checking under the lock avoids a stale
     // read where Publish() has set bRequestPending but hasn't Reset
     // IdleEvent yet (not possible with the current impl — both are
@@ -143,6 +164,8 @@ void FInoChatterboxDecoderWorker::WaitForIdle()
         FScopeLock Lock(&StateLock);
         if (!bRequestPending && !bDecoderWorking)
         {
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("Chatterbox: Decoder: WaitForIdle complete (waited=0.0 ms, fast_path)"));
             return;
         }
     }
@@ -156,6 +179,10 @@ void FInoChatterboxDecoderWorker::WaitForIdle()
     {
         IdleEvent->Wait();
     }
+    const double WaitedMs = (FPlatformTime::Seconds() - WaitT0) * 1000.0;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Decoder: WaitForIdle complete (waited=%.1f ms)"),
+           WaitedMs);
 }
 
 bool FInoChatterboxDecoderWorker::HasError(FString& OutError)
@@ -246,8 +273,26 @@ uint32 FInoChatterboxDecoderWorker::Run()
             // decoder Run + EmitDeltaChunk; it's the hot path of the
             // worker (tens to hundreds of ms). Holding StateLock here
             // would pointlessly block Publish() on the AR thread.
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Chatterbox: Decoder: Task begin (tokens=%d, num_gen_tokens=%d)"),
+                   LocalTokens.Num(), LocalNumGen);
+            const double TaskT0 = FPlatformTime::Seconds();
             FString LocalErr;
             const bool bOK = Task(LocalTokens, LocalNumGen, LocalErr);
+            const double TaskMs = (FPlatformTime::Seconds() - TaskT0) * 1000.0;
+
+            if (bOK)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("Chatterbox: Decoder: Task complete in %.1f ms"),
+                       TaskMs);
+            }
+            else
+            {
+                UE_LOG(LogInoAgents, Error,
+                       TEXT("Chatterbox: Decoder: Task FAILED in %.1f ms: %s"),
+                       TaskMs, *LocalErr);
+            }
 
             {
                 FScopeLock Lock(&StateLock);

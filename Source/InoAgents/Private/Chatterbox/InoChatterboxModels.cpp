@@ -212,16 +212,45 @@ namespace
         if (!IFileManager::Get().FileExists(*FullPath))
         {
             const FString Err = FString::Printf(
-                TEXT("Chatterbox %s model not found at %s. ")
+                TEXT("%s model not found at %s. ")
                 TEXT("Run Plugins/InoAgents/Chatterbox/scripts/setup-chatterbox.ps1 ")
                 TEXT("(or trigger the runtime downloader once Phase D lands)."),
                 Component, *FullPath);
             if (OutError) *OutError = Err;
-            UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+            UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Session: %s"), *Err);
             return nullptr;
         }
 
         const FInoOnnxSessionOptions Options = MakeChatterboxOptions(Performance, bForceCpu);
+
+        // Log the session options we're about to apply — useful for
+        // diagnosing "which provider is this session actually on" at a
+        // glance, separately from the post-load success log. Kept at
+        // Verbose because it's four lines per load and the post-load
+        // strategy= summary covers the common-case need.
+        FString ProviderList;
+        for (int32 i = 0; i < Options.ExecutionProviders.Num(); ++i)
+        {
+            if (i > 0) { ProviderList += TEXT(","); }
+            switch (Options.ExecutionProviders[i])
+            {
+                case EInoOnnxProvider::Cpu:       ProviderList += TEXT("cpu"); break;
+                case EInoOnnxProvider::Xnnpack:   ProviderList += TEXT("xnnpack"); break;
+                case EInoOnnxProvider::Nnapi:     ProviderList += TEXT("nnapi"); break;
+                case EInoOnnxProvider::WebGpu:    ProviderList += TEXT("webgpu"); break;
+                case EInoOnnxProvider::DirectMl:  ProviderList += TEXT("dml"); break;
+                case EInoOnnxProvider::Cuda:      ProviderList += TEXT("cuda"); break;
+                case EInoOnnxProvider::TensorRt:  ProviderList += TEXT("tensorrt"); break;
+                default:                          ProviderList += TEXT("?"); break;
+            }
+        }
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox: Session: MakeChatterboxOptions for '%s' ")
+               TEXT("(providers=[%s], force_cpu=%s, graph_opt=%d)"),
+               Component, *ProviderList,
+               bForceCpu ? TEXT("yes") : TEXT("no"),
+               (int32)Options.GraphOptimization);
+
         const double TStart = FPlatformTime::Seconds();
 
         FString SessionError;
@@ -257,7 +286,7 @@ namespace
 #endif
 
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox: loaded %s (%s, strategy=%s) in %.1f ms — %d inputs, %d outputs"),
+               TEXT("Chatterbox: Session: loaded %s (%s, strategy=%s) in %.1f ms -- %d inputs, %d outputs"),
                Component, *Variant, StrategyLabel, ElapsedMs,
                Session->GetInputCount(), Session->GetOutputCount());
 
@@ -277,25 +306,25 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
 {
     if (BaseDir.IsEmpty() || Variant.IsEmpty())
     {
-        const FString Err(TEXT("FInoChatterboxModels::LoadFromDir: BaseDir or Variant is empty."));
+        const FString Err(TEXT("LoadFromDir: BaseDir or Variant is empty."));
         if (OutError) *OutError = Err;
-        UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+        UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Session: %s"), *Err);
         return nullptr;
     }
 
     if (!FPaths::DirectoryExists(BaseDir))
     {
         const FString Err = FString::Printf(
-            TEXT("FInoChatterboxModels::LoadFromDir: directory does not exist: %s. ")
+            TEXT("LoadFromDir: directory does not exist: %s. ")
             TEXT("Run setup-chatterbox.ps1 first or let the runtime downloader populate it."),
             *BaseDir);
         if (OutError) *OutError = Err;
-        UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+        UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Session: %s"), *Err);
         return nullptr;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s, dml=%s, adapter=%d, ")
+           TEXT("Chatterbox: Session: loading models from %s (variant=%s, intra=%d, inter=%d, profiling=%s, dml=%s, adapter=%d, ")
            TEXT("cpu-overrides: enc=%s embed=%s lm=%s dec=%s)..."),
            *BaseDir, *Variant,
            Performance.IntraOpThreadCount,
@@ -354,7 +383,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadFromDir(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: all four %s sessions loaded successfully."),
+           TEXT("Chatterbox: Session: all four %s sessions loaded successfully."),
            *Variant);
 
     return Bundle;
@@ -381,7 +410,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadPerSession(
                     Component);
             }
             UE_LOG(LogInoAgents, Error,
-                   TEXT("LoadPerSession: %s spec invalid (Dir='%s', Variant='%s')"),
+                   TEXT("Chatterbox: Session: LoadPerSession -- %s spec invalid (Dir='%s', Variant='%s')"),
                    Component, *Spec.Dir, *Spec.Variant);
             return false;
         }
@@ -394,7 +423,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadPerSession(
                     Component, *Spec.Dir);
             }
             UE_LOG(LogInoAgents, Error,
-                   TEXT("LoadPerSession: %s directory missing: %s"),
+                   TEXT("Chatterbox: Session: LoadPerSession -- %s directory missing: %s"),
                    Component, *Spec.Dir);
             return false;
         }
@@ -407,7 +436,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadPerSession(
     if (!ValidateSpec(Dec,   TEXT("conditional_decoder"), OutError)) return nullptr;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: per-session load — enc=%s embed=%s lm=%s dec=%s, ")
+           TEXT("Chatterbox: Session: per-session load -- enc=%s embed=%s lm=%s dec=%s, ")
            TEXT("intra=%d inter=%d profiling=%s dml=%s adapter=%d ")
            TEXT("cpu-overrides: enc=%s embed=%s lm=%s dec=%s"),
            *Enc.Variant, *Embed.Variant, *LM.Variant, *Dec.Variant,
@@ -463,7 +492,7 @@ TUniquePtr<FInoChatterboxModels> FInoChatterboxModels::LoadPerSession(
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox: all four sessions loaded (per-session)."));
+           TEXT("Chatterbox: Session: all four sessions loaded (per-session)."));
 
     return Bundle;
 }
@@ -474,29 +503,25 @@ void FInoChatterboxModels::LogMetadata() const
         || !LanguageModel.IsValid() || !ConditionalDecoder.IsValid())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("FInoChatterboxModels::LogMetadata: bundle is incomplete."));
+               TEXT("Chatterbox: Session: LogMetadata -- bundle is incomplete."));
         return;
     }
 
-    UE_LOG(LogInoAgents, Log, TEXT("========================================"));
-    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox (%s) model metadata"), *Variant);
-    UE_LOG(LogInoAgents, Log, TEXT("========================================"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: ======================================"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: (%s) model metadata"), *Variant);
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: ======================================"));
 
-    UE_LOG(LogInoAgents, Log, TEXT(""));
-    UE_LOG(LogInoAgents, Log, TEXT("--- speech_encoder ---"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: --- speech_encoder ---"));
     SpeechEncoder->LogMetadata();
 
-    UE_LOG(LogInoAgents, Log, TEXT(""));
-    UE_LOG(LogInoAgents, Log, TEXT("--- embed_tokens ---"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: --- embed_tokens ---"));
     EmbedTokens->LogMetadata();
 
-    UE_LOG(LogInoAgents, Log, TEXT(""));
-    UE_LOG(LogInoAgents, Log, TEXT("--- language_model ---"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: --- language_model ---"));
     LanguageModel->LogMetadata();
 
-    UE_LOG(LogInoAgents, Log, TEXT(""));
-    UE_LOG(LogInoAgents, Log, TEXT("--- conditional_decoder ---"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: --- conditional_decoder ---"));
     ConditionalDecoder->LogMetadata();
 
-    UE_LOG(LogInoAgents, Log, TEXT("========================================"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Session: ======================================"));
 }

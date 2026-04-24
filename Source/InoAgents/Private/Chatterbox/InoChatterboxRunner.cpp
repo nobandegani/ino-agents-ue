@@ -181,7 +181,7 @@ bool FInoChatterboxRunner::SynthesizeText(
     auto Fail = [&](const FString& Msg) -> bool
     {
         if (OutError) { *OutError = Msg; }
-        UE_LOG(LogInoAgents, Error, TEXT("FInoChatterboxRunner: %s"), *Msg);
+        UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Runner: %s"), *Msg);
         return false;
     };
 
@@ -206,6 +206,16 @@ bool FInoChatterboxRunner::SynthesizeText(
     }
 
     const int32 ClampedMaxNewTokens = FMath::Clamp(Options.MaxNewTokens, 1, 1024);
+    const bool  bWillStream         = OnChunk && StreamChunkTokens > 0;
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: SynthesizeText begin ")
+           TEXT("(text_len=%d, ref_audio_samples=%d, max_new_tokens=%d, ")
+           TEXT("stream_chunk_tokens=%d, streaming=%s, rep_penalty=%.2f)"),
+           Text.Len(), ReferenceAudio.Num(), ClampedMaxNewTokens,
+           StreamChunkTokens,
+           bWillStream ? TEXT("on") : TEXT("off"),
+           Options.RepetitionPenalty);
 
     const double TStart = FPlatformTime::Seconds();
     FString InternalErr;
@@ -213,11 +223,16 @@ bool FInoChatterboxRunner::SynthesizeText(
     // ------------------------------------------------------------------
     // 1. Tokenize the user text
     // ------------------------------------------------------------------
+    const double TokT0 = FPlatformTime::Seconds();
     const TArray<int64> InputIdsInitial = Tokenizer.Encode(Text);
+    const double TokMs = (FPlatformTime::Seconds() - TokT0) * 1000.0;
     if (InputIdsInitial.Num() == 0)
     {
         return Fail(TEXT("SynthesizeText: tokenizer produced 0 tokens"));
     }
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: tokenized input -> %d tokens (%.1f ms)"),
+           InputIdsInitial.Num(), TokMs);
 
     // ------------------------------------------------------------------
     // 2. speech_encoder: reference audio → conditioning tensors (once)
@@ -262,6 +277,10 @@ bool FInoChatterboxRunner::SynthesizeText(
     const int64 CondLen   = CondEmb.GetShape()[1];
     const int64 PromptLen = PromptTokens.GetShape()[1];
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: speech_encoder done (%.1f ms) -- cond_len=%lld, prompt_len=%lld"),
+           OutResult.EncoderMs, CondLen, PromptLen);
+
     // Pin the prompt_token data pointer once; the intermediate-chunk
     // path below copies it into a per-chunk IntermediateSpan without
     // mutating the underlying tensor, and the final decode copies from
@@ -292,6 +311,12 @@ bool FInoChatterboxRunner::SynthesizeText(
             TEXT("language_model declared %d past_key_values inputs, expected %d"),
             PastKV.Num(), 2 * kNumLayers));
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: AR loop begin (max_iters=%d, stream_chunk_tokens=%d, ")
+           TEXT("initial_seq_len=%lld, num_kv_layers=%d)"),
+           ClampedMaxNewTokens, StreamChunkTokens, CurSeqLen, kNumLayers);
+    const double ARLoopT0 = FPlatformTime::Seconds();
 
     const int32 ExpectedLMOutputs = 1 + 2 * kNumLayers;
     const int32 NumLMInputs       = LMSess->GetInputCount();
@@ -422,6 +447,7 @@ bool FInoChatterboxRunner::SynthesizeText(
             return;
         }
         const int32 Total     = StreamAudioBuffer.Num();
+        const int32 PrevTotal = LastEmittedSampleCount;
 
         // Guard: if this decoder call produced fewer samples than the
         // last emit point, LastEmittedSampleCount would be > Total and
@@ -435,11 +461,11 @@ bool FInoChatterboxRunner::SynthesizeText(
         if (LastEmittedSampleCount > Total)
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("FInoChatterboxRunner: decoder %s output (%d samples) ")
+                   TEXT("Chatterbox: Runner: decoder %s output (%d samples) ")
                    TEXT("is SHORTER than already-emitted prefix (%d samples). ")
                    TEXT("%d samples from the stream won't reach the consumer. ")
                    TEXT("Listening-check the waveform; if it's correct, this is ")
-                   TEXT("harmless decoder-length drift — if it's clipped, investigate."),
+                   TEXT("harmless decoder-length drift -- if it's clipped, investigate."),
                    bFinal ? TEXT("final") : TEXT("intermediate"),
                    Total, LastEmittedSampleCount,
                    LastEmittedSampleCount - Total);
@@ -458,6 +484,13 @@ bool FInoChatterboxRunner::SynthesizeText(
                     FMath::Max(0, NewLen)),
                 NumGenTokens,
                 bFinal);
+            if (!bFinal)
+            {
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("Chatterbox: Runner: intermediate decode %d tokens -> %d total samples ")
+                       TEXT("(delta=%d samples, prev_emitted=%d)"),
+                       NumGenTokens, Total, FMath::Max(0, NewLen), PrevTotal);
+            }
             LastEmittedSampleCount = Total;
         }
     };
@@ -517,6 +550,8 @@ bool FInoChatterboxRunner::SynthesizeText(
                 // want a stray OnChunk fire after that error callback.
                 if (Cancel && Cancel->Load(EMemoryOrder::Relaxed))
                 {
+                    UE_LOG(LogInoAgents, Warning,
+                           TEXT("Chatterbox: Decoder: Cancel observed -- skipping emit"));
                     return true;
                 }
                 EmitDeltaChunk(NumGenTokensSnapshot, /*bFinal=*/ false);
@@ -533,7 +568,25 @@ bool FInoChatterboxRunner::SynthesizeText(
         // (no data is published through it).
         if (Cancel && Cancel->Load(EMemoryOrder::Relaxed))
         {
+            const double ARCancelMs = (FPlatformTime::Seconds() - ARLoopT0) * 1000.0;
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Chatterbox: Runner: AR loop CANCELLED at iter %d (%.1f ms in AR loop, ")
+                   TEXT("%d tokens generated)"),
+                   Iter, ARCancelMs, GeneratedTokens.Num() - 1);
             return Fail(TEXT("SynthesizeText: cancelled"));
+        }
+
+        // Periodic progress Log at every 20 iterations — plus a
+        // per-iteration Verbose line. The periodic log is the single
+        // most useful line for diagnosing "got stuck somewhere in the
+        // AR loop" without needing to enable Verbose.
+        if ((Iter % 20) == 0 && Iter > 0)
+        {
+            const double ARElapsedS = FPlatformTime::Seconds() - ARLoopT0;
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Chatterbox: Runner: AR iter %d/%d (tokens_since_last_chunk=%d, ")
+                   TEXT("elapsed=%.1f s)"),
+                   Iter, ClampedMaxNewTokens, TokensSinceLastChunk, ARElapsedS);
         }
 
         // --- Embed current input_ids ---
@@ -668,9 +721,21 @@ bool FInoChatterboxRunner::SynthesizeText(
 
         GeneratedTokens.Add(NextToken);
 
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox: Runner: AR iter %d -- next_token=%lld (cur_seq_len=%lld, best_score=%.3f)"),
+               Iter, NextToken, CurSeqLen, BestScore);
+
         if (NextToken == kStopSpeechToken)
         {
             OutResult.bHitStopToken = true;
+            const double ARHitStopMs = (FPlatformTime::Seconds() - ARLoopT0) * 1000.0;
+            // This is the critical diagnostic line for "voice generating
+            // but not completely" — if we never see this log, we didn't
+            // hit STOP and instead ran to MaxNewTokens (or were cancelled).
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Chatterbox: Runner: AR loop hit STOP at iter %d (%.1f ms total, ")
+                   TEXT("%d speech tokens generated)"),
+                   Iter, ARHitStopMs, GeneratedTokens.Num() - 2);
             break;
         }
 
@@ -715,6 +780,11 @@ bool FInoChatterboxRunner::SynthesizeText(
                 // would have broken out of the loop above).
                 const int32 TokensSoFar = GeneratedTokens.Num() - 1;
 
+                UE_LOG(LogInoAgents, Log,
+                       TEXT("Chatterbox: Runner: publishing intermediate decode at iter %d ")
+                       TEXT("(tokens_so_far=%d, span_len=%d)"),
+                       Iter, TokensSoFar, (int32)PromptLen + GenTailLen);
+
                 // Publish and continue — worker runs decoder + emits
                 // OnChunk on its own thread. No block here.
                 DecoderWorker->Publish(MoveTemp(IntermediateSpan), TokensSoFar);
@@ -734,6 +804,20 @@ bool FInoChatterboxRunner::SynthesizeText(
     OutResult.NumGeneratedTokens = GeneratedTokens.Num() - 1
         - (OutResult.bHitStopToken ? 1 : 0);  // exclude leading START and trailing STOP (if present)
 
+    // If we didn't hit STOP, we hit MaxNewTokens. Log distinctly — this
+    // is the other critical "voice generating but not completely" case:
+    // the utterance was truncated before the model said it was done.
+    // A caller seeing this should either raise MaxNewTokens or accept
+    // that the LM is being asked to say more than it's been trained for.
+    if (!OutResult.bHitStopToken)
+    {
+        const double ARMaxMs = (FPlatformTime::Seconds() - ARLoopT0) * 1000.0;
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Runner: AR loop hit max_new_tokens %d (%.1f ms total, did NOT hit STOP) ")
+               TEXT("-- utterance will be TRUNCATED. Raise MaxNewTokens if the audio ends abruptly."),
+               ClampedMaxNewTokens, ARMaxMs);
+    }
+
     // ------------------------------------------------------------------
     // Drain the parallel decoder before the final decode
     //
@@ -751,7 +835,12 @@ bool FInoChatterboxRunner::SynthesizeText(
     // ------------------------------------------------------------------
     if (DecoderWorker.IsValid())
     {
+        const double WaitT0 = FPlatformTime::Seconds();
         DecoderWorker->WaitForIdle();
+        const double WaitMs = (FPlatformTime::Seconds() - WaitT0) * 1000.0;
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Chatterbox: Runner: drained parallel decoder before final decode (waited %.1f ms)"),
+               WaitMs);
         FString DecErr;
         if (DecoderWorker->HasError(DecErr))
         {
@@ -797,11 +886,19 @@ bool FInoChatterboxRunner::SynthesizeText(
         for (int32 i = 0; i < 3; ++i) { FinalSpan.Add(kSilenceSpeechToken); }
     }
 
+    const double FinalDecT0 = FPlatformTime::Seconds();
+    const int32  FinalSpanLen = FinalSpan.Num();
     if (!RunDecoder(FinalSpan))
     {
         return Fail(FString::Printf(
             TEXT("conditional_decoder Run failed: %s"), *InternalErr));
     }
+    const double FinalDecMs   = (FPlatformTime::Seconds() - FinalDecT0) * 1000.0;
+    const int32  FinalSamples = StreamAudioBuffer.Num();
+    const int32  PrevEmitted  = LastEmittedSampleCount;
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: final decode %d tokens -> %d samples (%.1f ms)"),
+           FinalSpanLen, FinalSamples, FinalDecMs);
 
     // Fire the terminal chunk. When streaming was enabled this ships
     // the trailing delta; when it was disabled this ships the full
@@ -811,12 +908,33 @@ bool FInoChatterboxRunner::SynthesizeText(
     // is set (empty TFunction = no-op in the helper).
     EmitDeltaChunk(OutResult.NumGeneratedTokens, /*bFinal=*/ true);
 
+    if (OnChunk)
+    {
+        const int32 FinalDelta = FMath::Max(0, FinalSamples - PrevEmitted);
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Runner: final chunk emit: %d samples (delta from last intermediate)"),
+               FinalDelta);
+    }
+
     // Move the final waveform into OutResult. StreamAudioBuffer is no
     // longer needed after this point — move instead of copy so a
     // several-megabyte TArray<float> doesn't round-trip through memcpy.
     OutResult.AudioSamples   = MoveTemp(StreamAudioBuffer);
     OutResult.SampleRate     = kSampleRate;
     OutResult.TotalElapsedMs = (FPlatformTime::Seconds() - TStart) * 1000.0;
+
+    const double AudioSec =
+        (OutResult.SampleRate > 0)
+            ? (double)OutResult.AudioSamples.Num() / (double)OutResult.SampleRate
+            : 0.0;
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Runner: SynthesizeText complete -- %d tokens, %d samples (%.3f s audio), ")
+           TEXT("%.1f ms total (encoder=%.0f, embed=%.0f, LM=%.0f, decoder=%.0f, hit_stop=%s)"),
+           OutResult.NumGeneratedTokens, OutResult.AudioSamples.Num(), AudioSec,
+           OutResult.TotalElapsedMs,
+           OutResult.EncoderMs, OutResult.EmbedTotalMs,
+           OutResult.LanguageModelMs, OutResult.DecoderMs,
+           OutResult.bHitStopToken ? TEXT("yes") : TEXT("no"));
 
     return true;
 }

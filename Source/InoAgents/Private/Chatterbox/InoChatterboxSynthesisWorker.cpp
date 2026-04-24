@@ -58,14 +58,22 @@ FInoChatterboxSynthesisWorker::FInoChatterboxSynthesisWorker(
     if (!Thread.IsValid())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("FInoChatterboxSynthesisWorker: FRunnableThread::Create returned null ")
-               TEXT("— subsequent synthesis will fail immediately"));
+               TEXT("Chatterbox: Worker: FRunnableThread::Create returned null ")
+               TEXT("-- subsequent synthesis will fail immediately"));
+    }
+    else
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Worker: thread started"));
     }
 }
 
 FInoChatterboxSynthesisWorker::~FInoChatterboxSynthesisWorker()
 {
     check(IsInGameThread());
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Worker: shutting down (destructor)"));
 
     // 1. Tell the worker to bail ASAP.
     bStopRequested.Store(true);
@@ -88,12 +96,20 @@ FInoChatterboxSynthesisWorker::~FInoChatterboxSynthesisWorker()
     // 4. The thread is gone. Drain anything the worker didn't get to
     //    and fire "shutting down" errors so Blueprint observers don't
     //    see dangling OnComplete delegates.
+    int32 NumDrained = 0;
     FPendingSynth Item;
     while (Queue.Dequeue(Item))
     {
         DispatchFailureOnGameThread(
             Item.OnComplete,
             TEXT("Chatterbox synthesis cancelled (worker shutting down)"));
+        ++NumDrained;
+    }
+    if (NumDrained > 0)
+    {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("Chatterbox: Worker: Stop observed -- draining queue (items=%d)"),
+               NumDrained);
     }
 
     // 5. Return the event to the pool.
@@ -113,11 +129,19 @@ void FInoChatterboxSynthesisWorker::Enqueue(FPendingSynth Item)
         // Worker is shutting down; do not enqueue, fire failure
         // synchronously. This path is rare — it happens if a caller
         // races Enqueue against UnloadModels on the same frame.
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("Chatterbox: Worker: Enqueue rejected -- worker is shutting down"));
         DispatchFailureOnGameThread(
             Item.OnComplete,
             TEXT("Chatterbox synthesis rejected (worker is shutting down)"));
         return;
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Worker: Enqueue (text_len=%d, ref_audio_bytes=%d, ")
+           TEXT("max_new_tokens=%d, stream_chunk_tokens=%d)"),
+           Item.Text.Len(), Item.ReferenceAudio.Num() * (int32)sizeof(float),
+           Item.Options.MaxNewTokens, Item.StreamChunkTokens);
 
     Queue.Enqueue(MoveTemp(Item));
 
@@ -131,6 +155,9 @@ void FInoChatterboxSynthesisWorker::CancelAndFlush()
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Worker: CancelAndFlush"));
+
     // Flip cancel so any in-flight SynthesizeText exits at its next
     // AR iteration. The worker will clear bCancelCurrent at the top
     // of the next ProcessSynth if any items follow.
@@ -140,6 +167,7 @@ void FInoChatterboxSynthesisWorker::CancelAndFlush()
     // game thread (we're on the game thread right now), so these
     // delegates fire in the caller's current frame — matches Blueprint
     // expectations for "I clicked cancel; the queue is empty now".
+    int32 NumDrained = 0;
     FPendingSynth Item;
     while (Queue.Dequeue(Item))
     {
@@ -147,6 +175,13 @@ void FInoChatterboxSynthesisWorker::CancelAndFlush()
         FInoChatterboxSynthesisResult Empty;
         Item.OnComplete.ExecuteIfBound(
             false, Empty, TEXT("Chatterbox synthesis cancelled"));
+        ++NumDrained;
+    }
+    if (NumDrained > 0)
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Worker: CancelAndFlush -- drained %d queued item(s)"),
+               NumDrained);
     }
 
     // Wake the worker in case it was idle — this lets it see
@@ -165,6 +200,7 @@ uint32 FInoChatterboxSynthesisWorker::Run()
     // seconds), loops back to wait. Exits when bStopRequested is
     // observed true.
 
+    int32 NumProcessed = 0;
     while (!bStopRequested.Load())
     {
         // Idle wait. Auto-reset event → Trigger wakes exactly one Wait;
@@ -186,9 +222,17 @@ uint32 FInoChatterboxSynthesisWorker::Run()
             {
                 break;   // queue empty, go back to wait
             }
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("Chatterbox: Worker: dequeued synth item (text_len=%d)"),
+                   Item.Text.Len());
             ProcessSynth(Item);
+            ++NumProcessed;
         }
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Worker: thread exiting (processed=%d)"),
+           NumProcessed);
 
     // On shutdown, the destructor drains any leftover items and fires
     // their failure delegates — we don't need to do it here.
@@ -279,6 +323,30 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
         &bCancelCurrent,
         bStreaming ? Item.StreamChunkTokens : 0,
         StreamCb);
+
+    if (!bOK)
+    {
+        if (bCancelCurrent.Load(EMemoryOrder::Relaxed))
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Chatterbox: Worker: Cancel observed during AR loop (after %.1f ms)"),
+                   (FPlatformTime::Seconds() - TStart) * 1000.0);
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("Chatterbox: Worker: synth FAILED in %.1f ms: %s"),
+                   (FPlatformTime::Seconds() - TStart) * 1000.0, *NativeError);
+        }
+    }
+    else
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: Worker: synth complete -- %d samples, %d tokens, %.1f ms"),
+               NativeResult.AudioSamples.Num(),
+               NativeResult.NumGeneratedTokens,
+               (FPlatformTime::Seconds() - TStart) * 1000.0);
+    }
 
     // Build the Blueprint-visible result regardless of success — timings
     // are still useful on failure (e.g. "we got 500 ms in before cancel").

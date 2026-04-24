@@ -6,6 +6,7 @@
 
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -352,9 +353,14 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
     auto Fail = [OutError](FString Msg)
     {
         if (OutError) *OutError = Msg;
-        UE_LOG(LogInoAgents, Error, TEXT("FInoChatterboxTokenizer::LoadFromJson: %s"), *Msg);
+        UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Tokenizer: LoadFromJson -- %s"), *Msg);
         return TUniquePtr<FInoChatterboxTokenizer>(nullptr);
     };
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Tokenizer: LoadFromJson begin (path=%s)"),
+           *TokenizerJsonPath);
+    const double LoadT0 = FPlatformTime::Seconds();
 
     if (!IFileManager::Get().FileExists(*TokenizerJsonPath))
     {
@@ -517,14 +523,14 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
             if (Pair.Num() != 2)
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox tokenizer: merge rank %d has %d elements (expected 2); skipping"),
+                       TEXT("Chatterbox: Tokenizer: merge rank %d has %d elements (expected 2); skipping"),
                        Rank, Pair.Num());
                 continue;
             }
             if (Pair[0]->Type != EJson::String || Pair[1]->Type != EJson::String)
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox tokenizer: merge rank %d has non-string pair elements; skipping"),
+                       TEXT("Chatterbox: Tokenizer: merge rank %d has non-string pair elements; skipping"),
                        Rank);
                 continue;
             }
@@ -537,7 +543,7 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
         else
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("Chatterbox tokenizer: merge rank %d has unexpected JSON type (%d); skipping"),
+                   TEXT("Chatterbox: Tokenizer: merge rank %d has unexpected JSON type (%d); skipping"),
                    Rank, (int32)Entry->Type);
             continue;
         }
@@ -580,10 +586,12 @@ TUniquePtr<FInoChatterboxTokenizer> FInoChatterboxTokenizer::LoadFromJson(
     // Byte-level tables.
     BuildByteLevelTables(Tk->ByteToChar, Tk->CharToByte);
 
+    const double LoadMs = (FPlatformTime::Seconds() - LoadT0) * 1000.0;
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox tokenizer: loaded %d vocab entries, %d merges, %d special tokens. EOT=%lld"),
+           TEXT("Chatterbox: Tokenizer: loaded %d vocab, %d merges, %d special tokens ")
+           TEXT("(EOT=%lld, %.1f ms)"),
            Tk->VocabIdToString.Num(), Tk->MergeRanks.Num(),
-           Tk->SpecialTokenContents.Num(), Tk->EndOfTextId);
+           Tk->SpecialTokenContents.Num(), Tk->EndOfTextId, LoadMs);
 
     return Tk;
 }
@@ -682,7 +690,7 @@ TArray<int64> FInoChatterboxTokenizer::EncodeNonSpecialSegment(const FString& Se
                 // Missing from vocab (should be impossible with byte-level)
                 // — log once and skip.
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox tokenizer: sub-token %s not in vocab, skipping"), *Sub);
+                       TEXT("Chatterbox: Tokenizer: sub-token %s not in vocab, skipping"), *Sub);
             }
         }
     }
@@ -789,14 +797,14 @@ int32 FInoChatterboxTokenizer::GetTotalVocabSize() const
 void FInoChatterboxTokenizer::LogSummary() const
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox tokenizer summary: base_vocab=%d merges=%d specials=%d total=%d eot_id=%lld"),
+           TEXT("Chatterbox: Tokenizer: summary -- base_vocab=%d merges=%d specials=%d total=%d eot_id=%lld"),
            GetBaseVocabSize(), MergeRanks.Num(),
            SpecialTokenContents.Num(), GetTotalVocabSize(), EndOfTextId);
 
-    UE_LOG(LogInoAgents, Log, TEXT("Special tokens (longest-first):"));
+    UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Tokenizer: special tokens (longest-first):"));
     for (const FString& Content : SpecialTokenContents)
     {
         const int64 Id = SpecialTokenIds.FindChecked(Content);
-        UE_LOG(LogInoAgents, Log, TEXT("  %s -> %lld"), *Content, Id);
+        UE_LOG(LogInoAgents, Log, TEXT("Chatterbox: Tokenizer:   %s -> %lld"), *Content, Id);
     }
 }

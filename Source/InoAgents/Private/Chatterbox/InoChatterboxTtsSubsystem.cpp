@@ -72,7 +72,7 @@ void UInoChatterboxTtsSubsystem::Initialize(FSubsystemCollectionBase& Collection
     bPendingUnload = false;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("UInoChatterboxTtsSubsystem::Initialize — ready (no model loaded)"));
+           TEXT("Chatterbox: Subsystem: Initialize -- ready (no model loaded)"));
 }
 
 void UInoChatterboxTtsSubsystem::Deinitialize()
@@ -103,12 +103,22 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: LoadModelsAsync called (variant=%s, ")
+           TEXT("bUsePerSessionVariants=%s, dml=%s, adapter=%d, intra=%d, inter=%d)"),
+           *ChatterboxVariantToString(Config.Variant),
+           Config.bUsePerSessionVariants ? TEXT("yes") : TEXT("no"),
+           Config.Performance.bPreferDirectMl ? TEXT("yes") : TEXT("no"),
+           Config.Performance.DirectMlAdapterIndex,
+           Config.Performance.IntraOpThreadCount,
+           Config.Performance.InterOpThreadCount);
+
     // -------- Pre-flight: reject bad callers synchronously --------
 
     if (bLoadInFlight)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("Chatterbox LoadModelsAsync: a load is already in flight; rejecting"));
+               TEXT("Chatterbox: Subsystem: LoadModelsAsync -- a load is already in flight; rejecting"));
         OnLoaded.ExecuteIfBound(
             false,
             TEXT("A Chatterbox load is already in flight"));
@@ -118,7 +128,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     if (IsModelsLoaded())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("Chatterbox LoadModelsAsync: models already loaded (variant=%s); ")
+               TEXT("Chatterbox: Subsystem: LoadModelsAsync -- models already loaded (variant=%s); ")
                TEXT("call UnloadModels first"),
                *ChatterboxVariantToString(LoadedVariant));
         OnLoaded.ExecuteIfBound(
@@ -155,9 +165,9 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
         if (!bAllFp16 && !bAllFp32)
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("Chatterbox LoadModelsAsync: per-session variants mix ")
+                   TEXT("Chatterbox: Subsystem: LoadModelsAsync -- per-session variants mix ")
                    TEXT("activation dtypes (enc=%s embed=%s lm=%s dec=%s). ")
-                   TEXT("ORT will not cast tensors across session boundaries — ")
+                   TEXT("ORT will not cast tensors across session boundaries -- ")
                    TEXT("synth will fail with a dtype mismatch error at first Run. ")
                    TEXT("Stay within one activation dtype group: fp16 (Q4F16, FP16) ")
                    TEXT("or fp32 (Q4, FP32, Quantized)."),
@@ -175,12 +185,14 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     PendingConfig             = Config;
     PendingOnLoaded           = OnLoaded;
     PendingOnDownloadProgress = OnDownloadProgress;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Subsystem: bLoadInFlight -> true"));
 
     // -------- Files-present fast path --------
     if (IsConfigDownloaded(Config))
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox LoadModelsAsync: files present (enc=%s embed=%s ")
+               TEXT("Chatterbox: Subsystem: LoadModelsAsync -- files present (enc=%s embed=%s ")
                TEXT("lm=%s dec=%s), skipping download"),
                *ChatterboxVariantToString(EncV),
                *ChatterboxVariantToString(EmbedV),
@@ -196,7 +208,7 @@ void UInoChatterboxTtsSubsystem::LoadModelsAsync(
     // state machine. All subsequent state transitions happen via HTTP
     // callbacks on the game thread; LoadModelsAsync returns here.
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox LoadModelsAsync: files missing — starting download ")
+           TEXT("Chatterbox: Subsystem: LoadModelsAsync -- files missing, starting download ")
            TEXT("(enc=%s embed=%s lm=%s dec=%s)"),
            *ChatterboxVariantToString(EncV),
            *ChatterboxVariantToString(EmbedV),
@@ -251,7 +263,7 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
     const EInoChatterboxVariant RepresentativeVariant = EncV;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox DispatchLoadWorker: dispatching (enc=%s embed=%s ")
+           TEXT("Chatterbox: Subsystem: DispatchLoadWorker -- dispatching (enc=%s embed=%s ")
            TEXT("lm=%s dec=%s)"),
            *EncSpec.Variant, *EmbedSpec.Variant, *LMSpec.Variant, *DecSpec.Variant);
 
@@ -308,13 +320,15 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
             if (!WeakThis.IsValid())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox DispatchLoadWorker completion: subsystem is gone; ")
+                       TEXT("Chatterbox: Subsystem: DispatchLoadWorker completion -- subsystem is gone; ")
                        TEXT("dropping result"));
                 return;
             }
 
             UInoChatterboxTtsSubsystem* Subsys = WeakThis.Get();
             Subsys->bLoadInFlight = false;
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("Chatterbox: Subsystem: bLoadInFlight -> false"));
 
             // UnloadModels was called mid-flight. Drop the result (the
             // TUniquePtrs destruct when this lambda ends) so the
@@ -324,7 +338,7 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
             {
                 Subsys->bPendingUnload = false;
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("Chatterbox DispatchLoadWorker: result dropped after %.1f ms ")
+                       TEXT("Chatterbox: Subsystem: DispatchLoadWorker -- result dropped after %.1f ms ")
                        TEXT("because UnloadModels was called during load"),
                        ElapsedMs);
                 OnLoaded.ExecuteIfBound(
@@ -337,7 +351,7 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
             if (!bSuccess)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("Chatterbox DispatchLoadWorker: FAILED after %.1f ms: %s"),
+                       TEXT("Chatterbox: Subsystem: LoadModelsAsync FAILED in %.1f ms: %s"),
                        ElapsedMs, *LocalError);
                 OnLoaded.ExecuteIfBound(false, LocalError);
                 return;
@@ -350,6 +364,9 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
             Subsys->Tokenizer     = MoveTemp(LocalTokenizer);
             Subsys->Models        = MoveTemp(LocalModels);
             Subsys->LoadedVariant = Variant;
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("Chatterbox: Subsystem: Models reassigned (variant=%s)"),
+                   *ChatterboxVariantToString(Variant));
 
             // Spin up the synthesis worker now that its borrowed refs
             // (Models + Tokenizer) are stable. The worker's destructor
@@ -359,8 +376,8 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
                 *Subsys->Models, *Subsys->Tokenizer);
 
             UE_LOG(LogInoAgents, Log,
-                   TEXT("Chatterbox DispatchLoadWorker: SUCCESS variant=%s in %.1f ms"),
-                   *ChatterboxVariantToString(Variant), ElapsedMs);
+                   TEXT("Chatterbox: Subsystem: LoadModelsAsync SUCCESS in %.1f ms (variant=%s)"),
+                   ElapsedMs, *ChatterboxVariantToString(Variant));
             OnLoaded.ExecuteIfBound(true, FString());
         });
     });
@@ -369,6 +386,11 @@ void UInoChatterboxTtsSubsystem::DispatchLoadWorker(
 void UInoChatterboxTtsSubsystem::UnloadModels()
 {
     check(IsInGameThread());
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: UnloadModels called (was_loaded=%s, load_in_flight=%s)"),
+           IsModelsLoaded() ? TEXT("yes") : TEXT("no"),
+           bLoadInFlight    ? TEXT("yes") : TEXT("no"));
 
     // Teardown order matters: destroy the worker BEFORE the Models /
     // Tokenizer it borrows references from. The worker's destructor
@@ -391,7 +413,7 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
     if (bWasDownloading)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("UnloadModels called during download — cancelling download ")
+               TEXT("Chatterbox: Subsystem: UnloadModels called during download -- cancelling download ")
                TEXT("at cursor %d of %d"),
                DownloadCursor, DownloadQueue.Num());
 
@@ -422,14 +444,14 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
         // would blindly assign into Models/Tokenizer seconds later,
         // silently undoing the unload.
         UE_LOG(LogInoAgents, Log,
-               TEXT("UnloadModels called during in-flight load — the load's ")
+               TEXT("Chatterbox: Subsystem: UnloadModels called during in-flight load -- the load's ")
                TEXT("result will be dropped when it completes"));
         bPendingUnload = true;
     }
     else if (Worker.IsValid() || Models.IsValid() || Tokenizer.IsValid())
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("UInoChatterboxTtsSubsystem::UnloadModels — clearing variant=%s"),
+               TEXT("Chatterbox: Subsystem: UnloadModels -- clearing variant=%s"),
                *ChatterboxVariantToString(LoadedVariant));
     }
 
@@ -442,6 +464,8 @@ void UInoChatterboxTtsSubsystem::UnloadModels()
     Tokenizer.Reset();
     Models.Reset();
     LoadedVariant = EInoChatterboxVariant::Q4F16;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Subsystem: Loaded models cleared"));
 }
 
 bool UInoChatterboxTtsSubsystem::IsModelsLoaded() const
@@ -449,7 +473,11 @@ bool UInoChatterboxTtsSubsystem::IsModelsLoaded() const
     // Both must be present — a partial load (models loaded but
     // tokenizer failed) would never have gotten past LoadModelsAsync's
     // hop-back. Guarding on both here is defensive.
-    return Models.IsValid() && Tokenizer.IsValid();
+    const bool bLoaded = Models.IsValid() && Tokenizer.IsValid();
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Subsystem: IsModelsLoaded -> %s"),
+           bLoaded ? TEXT("true") : TEXT("false"));
+    return bLoaded;
 }
 
 namespace
@@ -565,6 +593,9 @@ bool UInoChatterboxTtsSubsystem::IsConfigDownloaded(
 
 EInoChatterboxVariant UInoChatterboxTtsSubsystem::GetLoadedVariant() const
 {
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: Subsystem: GetLoadedVariant -> %s"),
+           *ChatterboxVariantToString(LoadedVariant));
     return LoadedVariant;
 }
 
@@ -578,6 +609,13 @@ void UInoChatterboxTtsSubsystem::SynthesizeAsync(
     const FInoChatterboxSynthesisOptions& Options,
     const FOnInoChatterboxSynthesisComplete& OnComplete)
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: SynthesizeAsync called ")
+           TEXT("(text_len=%d, max_new_tokens=%d, voice={wav='%s', ref_bytes=%d, precomp='%s'})"),
+           Text.Len(), Options.MaxNewTokens,
+           *Voice.WavFilePath, Voice.ReferenceSamples.Num(),
+           *Voice.PrecomputedConditioningPath);
+
     // Non-streaming path — StreamChunkTokens=0 + unbound OnAudioChunk
     // is the "decoder runs once at the end" case inside EnqueueSynth.
     EnqueueSynth(Text, Voice, Options,
@@ -594,6 +632,14 @@ void UInoChatterboxTtsSubsystem::SynthesizeStreamAsync(
     const FOnInoChatterboxSynthesisComplete& OnComplete,
     int32 StreamChunkTokens)
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: SynthesizeStreamAsync called ")
+           TEXT("(text_len=%d, max_new_tokens=%d, stream_chunk_tokens=%d, ")
+           TEXT("on_chunk_bound=%s, voice={wav='%s', ref_bytes=%d})"),
+           Text.Len(), Options.MaxNewTokens, StreamChunkTokens,
+           OnAudioChunk.IsBound() ? TEXT("yes") : TEXT("no"),
+           *Voice.WavFilePath, Voice.ReferenceSamples.Num());
+
     // Streaming path — forward verbatim. StreamChunkTokens is capped
     // to [0, ...] here (FMath::Max below); zero is a legal value that
     // collapses to the single-final-chunk non-streaming path inside
@@ -621,7 +667,7 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
     // never fired on the failure path.
     auto FailNow = [&OnComplete](const FString& Msg)
     {
-        UE_LOG(LogInoAgents, Warning, TEXT("Chatterbox EnqueueSynth: %s"), *Msg);
+        UE_LOG(LogInoAgents, Warning, TEXT("Chatterbox: Subsystem: EnqueueSynth -- %s"), *Msg);
         FInoChatterboxSynthesisResult Empty;
         OnComplete.ExecuteIfBound(false, Empty, Msg);
     };
@@ -751,7 +797,7 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
         if (bUsingDefaultVoice)
         {
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("Chatterbox SynthesizeAsync: no voice supplied — using default voice at %s"),
+                   TEXT("Chatterbox: Subsystem: no voice supplied -- using default voice at %s"),
                    *ResolvedWavPath);
         }
     }
@@ -779,23 +825,33 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
     Item.OnAudioChunk      = OnAudioChunk;
 
     const bool bStreaming = OnAudioChunk.IsBound() && StreamChunkTokens > 0;
+    const TCHAR* VoiceSource =
+        !Voice.WavFilePath.IsEmpty()          ? TEXT("wav_path") :
+        (Voice.ReferenceSamples.Num() > 0)    ? TEXT("ref_samples") :
+        bUsingDefaultVoice                    ? TEXT("default") :
+                                                TEXT("none");
+
     Worker->Enqueue(MoveTemp(Item));
 
-    UE_LOG(LogInoAgents, Verbose,
-           TEXT("Chatterbox EnqueueSynth: queued (text_len=%d, max_new_tokens=%d, ")
-           TEXT("streaming=%s, chunk_tokens=%d)"),
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: EnqueueSynth -- text_len=%d, max_new_tokens=%d, ")
+           TEXT("streaming=%s, chunk_tokens=%d, voice_source=%s"),
            Text.Len(), Options.MaxNewTokens,
            bStreaming ? TEXT("on") : TEXT("off"),
-           StreamChunkTokens);
+           StreamChunkTokens,
+           VoiceSource);
 }
 
 void UInoChatterboxTtsSubsystem::CancelSynthesis()
 {
     check(IsInGameThread());
 
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: Subsystem: CancelSynthesis called (worker_valid=%s)"),
+           Worker.IsValid() ? TEXT("yes") : TEXT("no"));
+
     if (Worker.IsValid())
     {
-        UE_LOG(LogInoAgents, Log, TEXT("Chatterbox CancelSynthesis"));
         Worker->CancelAndFlush();
     }
     // No worker = nothing to cancel (either never loaded or already
@@ -974,8 +1030,8 @@ namespace
             if (Entry == nullptr)
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("Chatterbox BuildDownloadQueue: no settings entry for ")
-                       TEXT("%s's variant '%s' — skipping. LoadModelsAsync will ")
+                       TEXT("Chatterbox: Download: BuildDownloadQueue -- no settings entry for ")
+                       TEXT("%s's variant '%s', skipping. LoadModelsAsync will ")
                        TEXT("fail with a clearer error at session load."),
                        S.Component,
                        *ChatterboxVariantToString(S.Variant));
@@ -1036,7 +1092,7 @@ void UInoChatterboxTtsSubsystem::StartDownload()
     if (Settings == nullptr)
     {
         FinishDownloadError(
-            TEXT("Chatterbox download: UInoAgentsSettings unavailable."));
+            TEXT("UInoAgentsSettings unavailable."));
         return;
     }
 
@@ -1058,7 +1114,7 @@ void UInoChatterboxTtsSubsystem::StartDownload()
     if (!bAnyEntry)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox download: no Project Settings entries for any of the ")
+            TEXT("no Project Settings entries for any of the ")
             TEXT("requested variants (enc=%s embed=%s lm=%s dec=%s). Add entries ")
             TEXT("under Project Settings → Plugins → InoAgents → Chatterbox → Models."),
             *ChatterboxVariantToString(EncV),
@@ -1079,13 +1135,13 @@ void UInoChatterboxTtsSubsystem::StartDownload()
         // if a file landed between the check and here (unusual) we
         // handle it cleanly.
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox StartDownload: nothing to download, all files cached"));
+               TEXT("Chatterbox: Download: StartDownload -- nothing to download, all files cached"));
         FinishDownloadSuccess();
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox StartDownload: %d files to fetch (enc=%s embed=%s ")
+           TEXT("Chatterbox: Download: StartDownload -- %d files to fetch (enc=%s embed=%s ")
            TEXT("lm=%s dec=%s)"),
            DownloadQueue.Num(),
            *ChatterboxVariantToString(EncV),
@@ -1120,7 +1176,7 @@ void UInoChatterboxTtsSubsystem::StartHeadProbe()
             }
         }
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox HEAD phase complete — %d/%d files reported size ")
+               TEXT("Chatterbox: Download: HEAD phase complete -- %d/%d files reported size ")
                TEXT("(sum of known=%.1f MB). %s"),
                KnownSizes, DownloadQueue.Num(),
                (double)KnownTotal / (1024.0 * 1024.0),
@@ -1144,7 +1200,7 @@ void UInoChatterboxTtsSubsystem::StartHeadProbe()
         this, &UInoChatterboxTtsSubsystem::HandleHeadComplete);
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("Chatterbox HEAD %d/%d: %s"),
+           TEXT("Chatterbox: Download: HEAD %d/%d: %s"),
            DownloadCursor + 1, DownloadQueue.Num(), *File.Url);
 
     DownloadRequest->ProcessRequest();
@@ -1182,7 +1238,7 @@ void UInoChatterboxTtsSubsystem::HandleHeadComplete(
             }
         }
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("Chatterbox HEAD %d/%d: ok, ExpectedBytes=%lld"),
+               TEXT("Chatterbox: Download: HEAD %d/%d -- ok, ExpectedBytes=%lld"),
                DownloadCursor + 1, DownloadQueue.Num(), File.ExpectedBytes);
     }
     else if (bSucceeded && Code == 404 && !File.bRequired)
@@ -1191,13 +1247,13 @@ void UInoChatterboxTtsSubsystem::HandleHeadComplete(
         // weights). Mark as done so the download phase skips it.
         File.bDone = true;
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox HEAD %d/%d: 404 on optional file %s — skipping"),
+               TEXT("Chatterbox: Download: HEAD %d/%d -- 404 on optional file %s, skipping"),
                DownloadCursor + 1, DownloadQueue.Num(), *File.TargetPath);
     }
     else if (bSucceeded && Code == 404 && File.bRequired)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox download: required file 404 on HEAD: %s"),
+            TEXT("required file 404 on HEAD: %s"),
             *File.Url));
         return;
     }
@@ -1208,7 +1264,7 @@ void UInoChatterboxTtsSubsystem::HandleHeadComplete(
         // ExpectedBytes=-1; the GET will either succeed (and we report
         // progress in bytes-only mode) or fail conclusively.
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("Chatterbox HEAD %d/%d: non-fatal probe failure (code=%d); ")
+               TEXT("Chatterbox: Download: HEAD %d/%d -- non-fatal probe failure (code=%d); ")
                TEXT("continuing with unknown total size"),
                DownloadCursor + 1, DownloadQueue.Num(), Code);
     }
@@ -1252,13 +1308,13 @@ void UInoChatterboxTtsSubsystem::StartNextFileDownload()
     if (DownloadFileHandle == nullptr)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox download: failed to open %s for writing"),
+            TEXT("failed to open %s for writing"),
             *PartialPath));
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox GET %d/%d: %s (%lld bytes expected)"),
+           TEXT("Chatterbox: Download: GET %d/%d: %s (%lld bytes expected)"),
            DownloadCursor + 1, DownloadQueue.Num(),
            *File.Url, File.ExpectedBytes);
 
@@ -1338,7 +1394,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadHeader(
     if (File.ExpectedBytes <= 0)
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("Chatterbox GET %d/%d: learned Content-Length=%lld from GET response ")
+               TEXT("Chatterbox: Download: GET %d/%d -- learned Content-Length=%lld from GET response ")
                TEXT("(HEAD didn't give us one)"),
                DownloadCursor + 1, DownloadQueue.Num(), Parsed);
     }
@@ -1366,7 +1422,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
     if (bSucceeded && Code == 404 && !File.bRequired)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("Chatterbox GET %d/%d: 404 on optional %s — skipping"),
+               TEXT("Chatterbox: Download: GET %d/%d -- 404 on optional %s, skipping"),
                DownloadCursor + 1, DownloadQueue.Num(), *File.TargetPath);
         if (DownloadFileHandle)
         {
@@ -1385,7 +1441,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
     if (!bSucceeded || !Response.IsValid() || Code != 200)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox GET %d/%d failed: %s (HTTP %d)"),
+            TEXT("GET %d/%d failed: %s (HTTP %d)"),
             DownloadCursor + 1, DownloadQueue.Num(), *File.Url, Code));
         return;
     }
@@ -1394,7 +1450,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
     const TArray<uint8>& Content = Response->GetContent();
     if (DownloadFileHandle == nullptr)
     {
-        FinishDownloadError(TEXT("Chatterbox GET: file handle closed before write"));
+        FinishDownloadError(TEXT("GET: file handle closed before write"));
         return;
     }
     if (Content.Num() > 0)
@@ -1412,7 +1468,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
     {
         IFileManager::Get().Delete(*PartialPath);
         FinishDownloadError(FString::Printf(
-            TEXT("Chatterbox GET: failed to rename %s → %s"),
+            TEXT("GET: failed to rename %s -> %s"),
             *PartialPath, *File.TargetPath));
         return;
     }
@@ -1420,7 +1476,7 @@ void UInoChatterboxTtsSubsystem::HandleDownloadComplete(
     File.BytesWritten = Content.Num();
     File.bDone        = true;
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox GET %d/%d: OK, %lld bytes → %s"),
+           TEXT("Chatterbox: Download: GET %d/%d -- OK, %lld bytes -> %s"),
            DownloadCursor + 1, DownloadQueue.Num(),
            File.BytesWritten, *File.TargetPath);
 
@@ -1549,7 +1605,7 @@ void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
 
     const int32 NumFiles = DownloadQueue.Num();
     UE_LOG(LogInoAgents, Log,
-           TEXT("Chatterbox download complete — %d files staged"), NumFiles);
+           TEXT("Chatterbox: Download: complete -- %d files staged"), NumFiles);
 
     // Terminal download-progress broadcast — bCompleted=true. Fires
     // exactly once per successful download, BEFORE the ThreadPool
@@ -1593,7 +1649,7 @@ void UInoChatterboxTtsSubsystem::FinishDownloadSuccess()
 void UInoChatterboxTtsSubsystem::FinishDownloadError(const FString& Err)
 {
     check(IsInGameThread());
-    UE_LOG(LogInoAgents, Error, TEXT("%s"), *Err);
+    UE_LOG(LogInoAgents, Error, TEXT("Chatterbox: Download: %s"), *Err);
 
     // Delete any dangling .partial for the file we were working on so
     // next LoadModelsAsync doesn't pick up a stale half-file. Already-

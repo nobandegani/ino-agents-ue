@@ -49,6 +49,10 @@ UInoChatterboxStreamSynthesize* UInoChatterboxStreamSynthesize::StreamSynthesize
 
 void UInoChatterboxStreamSynthesize::Activate()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: AsyncAction: Activate (text_len=%d, stream_chunk_tokens=%d)"),
+           PendingText.Len(), PendingStreamChunkTokens);
+
     // 1. Resolve the subsystem via the captured WorldContextObject.
     UInoChatterboxTtsSubsystem* Subsystem = nullptr;
     if (UObject* Ctx = WorldContextObjectWeak.Get())
@@ -61,8 +65,8 @@ void UInoChatterboxStreamSynthesize::Activate()
     if (Subsystem == nullptr)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("UInoChatterboxStreamSynthesize::Activate: no subsystem ")
-               TEXT("(need active GameInstance — PIE or packaged)"));
+               TEXT("Chatterbox: AsyncAction: subsystem not found -- firing OnError ")
+               TEXT("(need active GameInstance: PIE or packaged)"));
         OnError.Broadcast(TEXT("No UInoChatterboxTtsSubsystem — "
                                "call from a live game instance (PIE or packaged)"));
         FinishCleanly();
@@ -81,8 +85,7 @@ void UInoChatterboxStreamSynthesize::Activate()
     OnCompleteBound.BindDynamic(this, &UInoChatterboxStreamSynthesize::HandleComplete);
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("UInoChatterboxStreamSynthesize::Activate: submitting text_len=%d ")
-           TEXT("max_tokens=%d stream_chunk_tokens=%d"),
+           TEXT("Chatterbox: AsyncAction: submitting text_len=%d max_tokens=%d stream_chunk_tokens=%d"),
            PendingText.Len(), PendingOptions.MaxNewTokens,
            PendingStreamChunkTokens);
 
@@ -106,8 +109,16 @@ void UInoChatterboxStreamSynthesize::HandleChunk(
     // Late chunks after cancel / error shouldn't re-enter.
     if (bFinished)
     {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("Chatterbox: AsyncAction: late chunk after finish (%d bytes, final=%s) -- dropping"),
+               AudioChunk.Num(), bIsFinal ? TEXT("yes") : TEXT("no"));
         return;
     }
+    ++ChunkCount;
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Chatterbox: AsyncAction: chunk #%d (%d bytes, tokens=%d, final=%s)"),
+           ChunkCount, AudioChunk.Num(), NumGeneratedTokens,
+           bIsFinal ? TEXT("yes") : TEXT("no"));
     OnAudioChunk.Broadcast(AudioChunk, bIsFinal, NumGeneratedTokens);
 }
 
@@ -123,12 +134,16 @@ void UInoChatterboxStreamSynthesize::HandleComplete(
 
     if (bSuccess)
     {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("Chatterbox: AsyncAction: synth complete -- firing OnComplete ")
+               TEXT("(chunks_observed=%d, %d sample_bytes)"),
+               ChunkCount, Result.AudioSamples.Num());
         OnComplete.Broadcast(true, Result, FString());
     }
     else
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("UInoChatterboxStreamSynthesize: synthesis failed: %s"),
+               TEXT("Chatterbox: AsyncAction: synth failed -- firing OnError: %s"),
                *ErrorMessage);
         OnError.Broadcast(ErrorMessage);
     }
@@ -141,6 +156,10 @@ void UInoChatterboxStreamSynthesize::HandleComplete(
 
 void UInoChatterboxStreamSynthesize::Cancel()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Chatterbox: AsyncAction: Cancel called (already_finished=%s)"),
+           bFinished ? TEXT("yes") : TEXT("no"));
+
     if (bFinished)
     {
         return;
