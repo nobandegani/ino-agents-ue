@@ -281,7 +281,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
 
         // ============== HOP BACK TO GAME THREAD ==============
         AsyncTask(ENamedThreads::GameThread,
-            [WeakThis, NewEngine, NewSettings, LocalError, Elapsed, OnLoaded]()
+            [WeakThis, NewEngine, NewSettings, LocalError, Elapsed, OnLoaded, BackendCopy]()
         {
             // Subsystem gone (game instance shutting down, or race with
             // Deinitialize). Clean up native resources and drop the result.
