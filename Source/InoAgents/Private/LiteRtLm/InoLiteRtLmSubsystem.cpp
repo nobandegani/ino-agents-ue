@@ -115,14 +115,6 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
     // which is fine — they failed before any download state was set up.
     PendingOnDownloadProgress = OnDownloadProgress;
 
-    // Diagnostic: is BP's Custom Event actually wired? If IsBound()
-    // returns false here, the BP graph didn't connect the delegate
-    // correctly — every downstream ExecuteIfBound will be a no-op.
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: OnDownloadProgress.IsBound()=%s, OnLoaded.IsBound()=%s"),
-           PendingOnDownloadProgress.IsBound() ? TEXT("TRUE") : TEXT("FALSE"),
-           OnLoaded.IsBound()                  ? TEXT("TRUE") : TEXT("FALSE"));
-
     // Resolve settings entry first. FindModel is permissive — it matches
     // by either ModelFileName ("gemma-4-E2B-it.litertlm") OR DisplayName
     // ("Gemma 4 E2B"). If the caller passed a display name, we transparently
@@ -730,10 +722,6 @@ void UInoLiteRtLmSubsystem::HandleChunkComplete(
     // bCompleted=true tick is fired inside FinishDownloadSuccess
     // once the last chunk has been written to disk, so UI can flip
     // state cleanly without waiting for the engine-load phase.
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LoadModelAsync: firing OnDownloadProgress (bound=%s): %.1f%% %lld/%lld"),
-           PendingOnDownloadProgress.IsBound() ? TEXT("TRUE") : TEXT("FALSE"),
-           Percent, DownloadBytesWritten, DownloadTotalBytes);
     PendingOnDownloadProgress.ExecuteIfBound(
         Percent, DownloadBytesWritten, DownloadTotalBytes, /*bCompleted=*/ false);
 
