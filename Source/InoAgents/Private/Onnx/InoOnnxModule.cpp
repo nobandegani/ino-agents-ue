@@ -126,13 +126,13 @@ namespace
         if (Normalize(ActualPath) == Normalize(ExpectedFullPath))
         {
             UE_LOG(LogInoAgents, Log,
-                   TEXT("InoAgents: verified %s is loaded from %s"),
+                   TEXT("Onnx: Module: verified %s is loaded from %s"),
                    BaseName, *ActualPath);
         }
         else
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoAgents: BASE-NAME CACHE COLLISION — %s loaded from %s, ")
+                   TEXT("Onnx: Module: BASE-NAME CACHE COLLISION — %s loaded from %s, ")
                    TEXT("but we wanted %s. Our preload didn't win the race (another plugin ")
                    TEXT("loaded a different %s first). Symptoms may include version-skew ")
                    TEXT("bugs at runtime."),
@@ -195,9 +195,13 @@ namespace
         if (BinDir.IsEmpty())
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoAgents: cannot resolve plugin bin dir; InoDml.dll preload skipped"));
+                   TEXT("Onnx: Module: cannot resolve plugin bin dir; InoDml.dll preload skipped"));
             return;
         }
+
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Onnx: Module: preloading Win64 sibling DLLs from %s"),
+               *BinDir);
 
         // Preload order doesn't matter for the two sibling DLLs — neither
         // imports the other. What matters is that both are loaded by full
@@ -214,11 +218,14 @@ namespace
         for (const FPreload& P : Preloads)
         {
             const FString FullPath = FPaths::Combine(BinDir, P.Name);
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("Onnx: Module: attempting preload of %s (full path=%s, required=%s)"),
+                   P.Name, *FullPath, P.bRequired ? TEXT("yes") : TEXT("no"));
             void* Handle = FPlatformProcess::GetDllHandle(*FullPath);
             if (Handle != nullptr)
             {
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("InoAgents: pre-loaded %s"), P.Name);
+                       TEXT("Onnx: Module: pre-loaded %s"), P.Name);
 
                 // Now verify that the base-name cache actually served
                 // OUR copy and not some earlier-loaded conflicting DLL.
@@ -238,7 +245,7 @@ namespace
             else if (P.bRequired)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("InoAgents: REQUIRED preload failed: %s (path=%s). ")
+                       TEXT("Onnx: Module: REQUIRED preload failed: %s (path=%s). ")
                        TEXT("DirectML support will not work — our ORT's static import ")
                        TEXT("of %s will fail at InoOnnxRuntime.dll load time. Run ")
                        TEXT("Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
@@ -248,7 +255,7 @@ namespace
             else
             {
                 UE_LOG(LogInoAgents, Verbose,
-                       TEXT("InoAgents: optional preload not found: %s (path=%s)"),
+                       TEXT("Onnx: Module: optional preload not found: %s (path=%s)"),
                        P.Name, *FullPath);
             }
         }
@@ -274,7 +281,7 @@ namespace
         {
             const char* ErrMsg = Api->GetErrorMessage(Status);
             UE_LOG(LogInoAgents, Error,
-                   TEXT("InoAgents: OrtApi::GetAvailableProviders failed: %s"),
+                   TEXT("Onnx: Module: OrtApi::GetAvailableProviders failed: %s"),
                    UTF8_TO_TCHAR(ErrMsg));
             Api->ReleaseStatus(Status);
             return;
@@ -294,7 +301,8 @@ namespace
         }
 
         UE_LOG(LogInoAgents, Log,
-               TEXT("InoAgents: ONNX Runtime available providers: %s"),
+               TEXT("Onnx: Module: available providers (%d): %s"),
+               NumProviders,
                Joined.IsEmpty() ? TEXT("(none)") : *Joined);
 
         // ReleaseAvailableProviders is declared with warn_unused_result
@@ -306,7 +314,7 @@ namespace
         if (OrtStatus* ReleaseStatus = Api->ReleaseAvailableProviders(ProvidersPtr, NumProviders))
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoAgents: OrtApi::ReleaseAvailableProviders returned an error (ignored): %s"),
+                   TEXT("Onnx: Module: OrtApi::ReleaseAvailableProviders returned an error (ignored): %s"),
                    UTF8_TO_TCHAR(Api->GetErrorMessage(ReleaseStatus)));
             Api->ReleaseStatus(ReleaseStatus);
         }
@@ -321,7 +329,7 @@ namespace
         if (ApiBase == nullptr)
         {
             UE_LOG(LogInoAgents, Error,
-                   TEXT("InoAgents: OrtGetApiBase returned nullptr. The loaded ONNX Runtime is broken."));
+                   TEXT("Onnx: Module: OrtGetApiBase returned nullptr. The loaded ONNX Runtime is broken."));
             return nullptr;
         }
 
@@ -336,19 +344,26 @@ namespace
             // something is wrong with the staged binary or a stale copy
             // is lingering.
             UE_LOG(LogInoAgents, Error,
-                   TEXT("InoAgents: OrtApiBase::GetApi(ORT_API_VERSION=%u) returned nullptr — ")
+                   TEXT("Onnx: Module: OrtApiBase::GetApi(ORT_API_VERSION=%u) returned nullptr — ")
                    TEXT("the loaded ONNX Runtime does not implement this API version. ")
                    TEXT("Expected our pinned build (see Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION)."),
                    (uint32)ORT_API_VERSION);
             return nullptr;
         }
 
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Onnx: Module: OrtApiBase::GetApi(ORT_API_VERSION=%u) resolved OrtApi vtable"),
+               (uint32)ORT_API_VERSION);
         return Api;
     }
 }
 
 void* Init()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Onnx: Module: Init — loading ONNX Runtime DLLs (compiled-against ORT_API_VERSION=%u)"),
+           (uint32)ORT_API_VERSION);
+
 #if PLATFORM_WINDOWS || PLATFORM_ANDROID
     // Unified dlopen + dlsym path. We deliberately DO NOT link libUnreal
     // against our ORT .so on either platform — doing so on Android caused
@@ -378,15 +393,19 @@ void* Init()
     if (LibName.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("InoAgents: could not resolve ONNX Runtime library name (IPluginManager failed?)."));
+               TEXT("Onnx: Module: could not resolve ONNX Runtime library name (IPluginManager failed?)."));
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Onnx: Module: resolved library path: %s"),
+           *LibName);
 
     void* Handle = FPlatformProcess::GetDllHandle(*LibName);
     if (Handle == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: failed to load %s. ")
+               TEXT("Onnx: Module: failed to load %s. ")
                TEXT("Did you run Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1 ")
                TEXT("and re-package?"),
                *LibName);
@@ -394,7 +413,7 @@ void* Init()
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("InoAgents: loaded %s"),
+           TEXT("Onnx: Module: loaded %s"),
            *LibName);
 
 #if PLATFORM_WINDOWS
@@ -413,12 +432,16 @@ void* Init()
     if (EntryPoint == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: %s does not export OrtGetApiBase. ")
+               TEXT("Onnx: Module: %s does not export OrtGetApiBase. ")
                TEXT("The library is malformed or the setup script picked up the wrong file."),
                *LibName);
         FPlatformProcess::FreeDllHandle(Handle);
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Onnx: Module: GetDllExport(\"OrtGetApiBase\") resolved at %p"),
+           EntryPoint);
 
     const OrtApiBase* ApiBase = reinterpret_cast<OrtGetApiBaseFn>(EntryPoint)();
     if (ApiBase != nullptr && ApiBase->GetVersionString != nullptr)
@@ -431,7 +454,7 @@ void* Init()
         // setup script staged a wrong-version DLL."
         const char* RuntimeVer = ApiBase->GetVersionString();
         UE_LOG(LogInoAgents, Log,
-               TEXT("InoAgents: ORT runtime version: %s (compiled-against ORT_API_VERSION=%u)"),
+               TEXT("Onnx: Module: ORT runtime version: %s (compiled-against ORT_API_VERSION=%u)"),
                UTF8_TO_TCHAR(RuntimeVer != nullptr ? RuntimeVer : "<null>"),
                (uint32)ORT_API_VERSION);
     }
@@ -444,6 +467,9 @@ void* Init()
     }
 
     LogAvailableProviders(GOrtApi);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Onnx: Module: Init complete"));
     return Handle;
 
 #else
@@ -451,13 +477,16 @@ void* Init()
     // yet, so the .so/.dylib isn't staged. Any GetApi() caller will see
     // nullptr and handle it gracefully.
     UE_LOG(LogInoAgents, Warning,
-           TEXT("InoAgents: ONNX Runtime is not yet available on this platform."));
+           TEXT("Onnx: Module: ONNX Runtime is not yet available on this platform."));
     return nullptr;
 #endif
 }
 
 void Shutdown(void* Handle)
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("Onnx: Module: Shutdown — releasing OrtEnv and unloading DLL"));
+
     // Release the global OrtEnv (if any) BEFORE clearing GOrtApi — the
     // release calls Api->ReleaseEnv, which needs a valid API pointer.
     // ReleaseGlobalOrtEnv is a no-op if the env was never lazy-created.
@@ -479,6 +508,8 @@ void Shutdown(void* Handle)
     if (Handle != nullptr)
     {
         FPlatformProcess::FreeDllHandle(Handle);
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Onnx: Module: FreeDllHandle released ONNX Runtime handle"));
     }
 #else
     // iOS / Linux / macOS: nothing to free — Init() returned nullptr

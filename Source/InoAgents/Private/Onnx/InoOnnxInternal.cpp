@@ -29,7 +29,7 @@ bool CheckOrtStatus(OrtStatus* Status, const TCHAR* OpDescription, FString* OutE
         // can't get the error message. Log and leak (one-time, on
         // teardown path).
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoOnnx: ORT %s failed but GetApi() is null; cannot extract / release error status."),
+               TEXT("Onnx: Internal: %s FAILED but GetApi() is null; cannot extract / release error status."),
                OpDescription ? OpDescription : TEXT("<unknown op>"));
         return false;
     }
@@ -43,7 +43,7 @@ bool CheckOrtStatus(OrtStatus* Status, const TCHAR* OpDescription, FString* OutE
     }
 
     UE_LOG(LogInoAgents, Error,
-           TEXT("InoOnnx: ORT %s failed: %s"),
+           TEXT("Onnx: Internal: %s FAILED: %s"),
            OpDescription ? OpDescription : TEXT("<unknown op>"),
            *ErrorStr);
 
@@ -92,6 +92,9 @@ EInoOnnxDtype OrtToDtype(ONNXTensorElementDataType Ort)
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:   return EInoOnnxDtype::UInt64;
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:     return EInoOnnxDtype::Bool;
         default:
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("Onnx: Internal: OrtToDtype unknown ONNXTensorElementDataType=%d; returning Undefined"),
+                   (int32)Ort);
             return EInoOnnxDtype::Undefined;
     }
 }
@@ -173,8 +176,13 @@ OrtEnv* GetGlobalOrtEnv()
     {
         // ORT never initialized (e.g. the DLL failed to load). No point
         // trying to make an env without a vtable.
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("Onnx: Internal: GetGlobalOrtEnv called but OrtApi is null; returning nullptr"));
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("Onnx: Internal: creating global OrtEnv (log-level=WARNING, logid=\"InoAgents\")"));
 
     // Log level: WARNING is the right default for production. ORT emits
     // a fair amount of INFO output at startup (graph-opt decisions,
@@ -192,7 +200,7 @@ OrtEnv* GetGlobalOrtEnv()
         return nullptr;
     }
 
-    UE_LOG(LogInoAgents, Log, TEXT("InoOnnx: created global OrtEnv"));
+    UE_LOG(LogInoAgents, Log, TEXT("Onnx: Internal: created global OrtEnv"));
     return GOrtEnv;
 }
 
@@ -215,11 +223,11 @@ void ReleaseGlobalOrtEnv()
         // only happens if ShutdownModule order is pathological; the
         // process is about to exit anyway.
         UE_LOG(LogInoAgents, Warning,
-               TEXT("InoOnnx: OrtApi gone during ReleaseGlobalOrtEnv; leaking OrtEnv (process exiting)."));
+               TEXT("Onnx: Internal: OrtApi gone during ReleaseGlobalOrtEnv; leaking OrtEnv (process exiting)."));
     }
 
     GOrtEnv = nullptr;
-    UE_LOG(LogInoAgents, Log, TEXT("InoOnnx: released global OrtEnv"));
+    UE_LOG(LogInoAgents, Log, TEXT("Onnx: Internal: released global OrtEnv"));
 }
 
 } // namespace InoAgents::Onnx::Internal

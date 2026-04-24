@@ -35,7 +35,7 @@ namespace InoAgents::Onnx::Internal
      * return false. If Status is null, return true (success). Passes
      * OpDescription through to the log as context — something like
      * TEXT("CreateSession") so the log line reads
-     *     InoAgents: ORT CreateSession failed: <message>
+     *     Onnx: Internal: CreateSession FAILED: <message>
      *
      * Must be called from any path that invokes an ORT C API function
      * returning OrtStatus*. Leaking an OrtStatus is a real memory leak

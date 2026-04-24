@@ -114,7 +114,7 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
     if (Dtype == EInoOnnxDtype::Undefined)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("FInoOnnxTensor::Create: Dtype == Undefined; returning invalid tensor."));
+               TEXT("Onnx: Tensor: Create FAILED — Dtype == Undefined; returning invalid tensor"));
         return FInoOnnxTensor{};
     }
 
@@ -122,7 +122,7 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
     if (Api == nullptr)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("FInoOnnxTensor::Create: ONNX Runtime is not initialized."));
+               TEXT("Onnx: Tensor: Create FAILED — ONNX Runtime is not initialized"));
         return FInoOnnxTensor{};
     }
 
@@ -133,8 +133,8 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
         if (Shape[i] < 0)
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("FInoOnnxTensor::Create: negative dim at index %d (value %lld). ")
-                   TEXT("Concrete tensors require all-positive shapes."),
+                   TEXT("Onnx: Tensor: Create FAILED — negative dim at index %d (value %lld); ")
+                   TEXT("concrete tensors require all-positive shapes"),
                    i, Shape[i]);
             return FInoOnnxTensor{};
         }
@@ -143,7 +143,22 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
     OrtAllocator* Allocator = GetCpuAllocator();
     if (Allocator == nullptr)
     {
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("Onnx: Tensor: Create FAILED — CPU allocator is null"));
         return FInoOnnxTensor{};
+    }
+
+    {
+        FString ShapeStr = TEXT("[");
+        for (int32 i = 0; i < Shape.Num(); ++i)
+        {
+            if (i > 0) ShapeStr += TEXT(", ");
+            ShapeStr += FString::Printf(TEXT("%lld"), Shape[i]);
+        }
+        ShapeStr += TEXT("]");
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("Onnx: Tensor: Create — dtype=%d shape=%s"),
+               (int32)Dtype, *ShapeStr);
     }
 
     OrtValue* Native = nullptr;
@@ -163,6 +178,9 @@ FInoOnnxTensor FInoOnnxTensor::Create(EInoOnnxDtype Dtype, const TArray<int64>& 
 
     if (!CheckTensorStatus(Status, TEXT("CreateTensorAsOrtValue")))
     {
+        UE_LOG(LogInoAgents, Error,
+               TEXT("Onnx: Tensor: CreateTensorAsOrtValue FAILED (dtype=%d)"),
+               (int32)Dtype);
         return FInoOnnxTensor{};
     }
 
@@ -306,8 +324,8 @@ void* FInoOnnxTensor::GetDataPtrRaw(SIZE_T TypeSizeCheck, const TCHAR* TypeName)
     if (ElemSize != TypeSizeCheck)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("%s: template T size (%llu) does not match tensor dtype element size (%llu). ")
-               TEXT("Tensor dtype=%d. Returning nullptr."),
+               TEXT("Onnx: Tensor: %s — template T size (%llu) does not match tensor dtype element size (%llu) ")
+               TEXT("(tensor dtype=%d); returning nullptr"),
                TypeName, (uint64)TypeSizeCheck, (uint64)ElemSize, (int32)Dtype);
         return nullptr;
     }
