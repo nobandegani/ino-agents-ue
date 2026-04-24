@@ -2,6 +2,8 @@
 
 #include "InoNeuTtsNanoPromptBuilder.h"
 
+#include "InoAgentsLog.h"
+
 namespace InoNeuTtsNano
 {
 
@@ -10,6 +12,11 @@ FString BuildPrompt(
     const TArray<int32>& RefCodes,
     const FString&       InputPhonemes)
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: PromptBuilder: BuildPrompt entry "
+                "(input_phonemes=%d chars, ref_phones=%d chars, ref_codes=%d)"),
+           InputPhonemes.Len(), RefPhones.Len(), RefCodes.Num());
+
     // First: build the reference-codes section. Each code maps to one
     // <|speech_N|> control token — the Qwen2 tokenizer (as extended by
     // Neuphonic) will turn each one into a single token id when
@@ -28,12 +35,21 @@ FString BuildPrompt(
     //   "\nassistant:" before <|SPEECH_GENERATION_START|>
     // One space between ref_phones and input_phonemes (NeuTTS expects
     // exactly one).
-    return FString::Printf(
+    FString Prompt = FString::Printf(
         TEXT("user: Convert the text to speech:<|TEXT_PROMPT_START|>%s %s<|TEXT_PROMPT_END|>\n")
         TEXT("assistant:<|SPEECH_GENERATION_START|>%s"),
         *RefPhones,
         *InputPhonemes,
         *CodesSection);
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: PromptBuilder: BuildPrompt done (prompt=%d chars, codes_section=%d chars)"),
+           Prompt.Len(), CodesSection.Len());
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("NeuTtsNano: PromptBuilder: full prompt (first 400 chars): %s"),
+           *Prompt.Left(400));
+
+    return Prompt;
 }
 
 } // namespace InoNeuTtsNano

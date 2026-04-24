@@ -9,6 +9,7 @@
 
 #include "Containers/StringConv.h"          // FTCHARToUTF8
 #include "HAL/PlatformFileManager.h"        // file-stat for friendly error
+#include "HAL/PlatformTime.h"               // FPlatformTime::Seconds for per-stage timing
 
 // ============================================================================
 // Local helpers
@@ -132,12 +133,20 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     const FInoNeuTtsNanoModelConfig& Config,
     FString& OutError)
 {
+    const double CreateStartTime = FPlatformTime::Seconds();
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: Runner: Create begin (variant=%s, backbone=%s, codec=%s)"),
+           *NeuTtsNanoVariantToString(Config.Variant),
+           *BackboneGgufPath, *CodecOnnxPath);
+
     const InoAgents::LlamaCpp::FLlamaCppApi* Api = InoAgents::LlamaCpp::GetApi();
     if (Api == nullptr)
     {
         OutError = TEXT("llama.cpp runtime is not initialised — "
                         "InoAgents::LlamaCpp::GetApi() returned nullptr. "
                         "Check module startup logs.");
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: Create FAILED: %s"), *OutError);
         return nullptr;
     }
 
@@ -147,14 +156,22 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     {
         OutError = FString::Printf(
             TEXT("Backbone GGUF missing or empty: %s"), *BackboneGgufPath);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: Create FAILED: %s"), *OutError);
         return nullptr;
     }
     if (!PF.FileExists(*CodecOnnxPath) || PF.FileSize(*CodecOnnxPath) <= 0)
     {
         OutError = FString::Printf(
             TEXT("Codec ONNX missing or empty: %s"), *CodecOnnxPath);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: Create FAILED: %s"), *OutError);
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("NeuTtsNano: Runner: pre-check ok — backbone=%lld bytes, codec=%lld bytes"),
+           PF.FileSize(*BackboneGgufPath), PF.FileSize(*CodecOnnxPath));
 
     // -----------------------------------------------------------------
     // 1. Load the backbone GGUF.
@@ -169,15 +186,20 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     ModelParams.use_mmap     = Config.Performance.bUseMmap;
     ModelParams.use_mlock    = Config.Performance.bUseMlock;
 
+    const double BackboneStart = FPlatformTime::Seconds();
     const FTCHARToUTF8 BackboneUtf8(*BackboneGgufPath);
     struct llama_model* NewModel =
         Api->llama_model_load_from_file(BackboneUtf8.Get(), ModelParams);
+    const double BackboneMs = (FPlatformTime::Seconds() - BackboneStart) * 1000.0;
     if (NewModel == nullptr)
     {
         OutError = FString::Printf(
             TEXT("llama_model_load_from_file failed for %s "
                  "(check log above for llama.cpp diagnostic)."),
             *BackboneGgufPath);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: Create FAILED (after %.0f ms): %s"),
+               BackboneMs, *OutError);
         return nullptr;
     }
 
@@ -188,8 +210,14 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
         if (DescLen > 0 && DescLen < (int32)sizeof(Desc))
         {
             UE_LOG(LogInoAgents, Log,
-                   TEXT("NeuTTS Nano backbone loaded: %s"),
-                   UTF8_TO_TCHAR(Desc));
+                   TEXT("NeuTtsNano: Runner: backbone loaded in %.0f ms — %s"),
+                   BackboneMs, UTF8_TO_TCHAR(Desc));
+        }
+        else
+        {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("NeuTtsNano: Runner: backbone loaded in %.0f ms"),
+                   BackboneMs);
         }
     }
 
@@ -219,15 +247,23 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
         ? LLAMA_FLASH_ATTN_TYPE_AUTO
         : LLAMA_FLASH_ATTN_TYPE_DISABLED;
 
+    const double CtxStart = FPlatformTime::Seconds();
     struct llama_context* NewCtx = Api->llama_init_from_model(NewModel, CtxParams);
+    const double CtxMs = (FPlatformTime::Seconds() - CtxStart) * 1000.0;
     if (NewCtx == nullptr)
     {
         Api->llama_model_free(NewModel);
         OutError = FString::Printf(
             TEXT("llama_init_from_model failed (n_ctx=%d)."),
             Config.NumContextTokens);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: Create FAILED: %s"), *OutError);
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: Runner: llama_context initialised in %.0f ms (n_ctx=%d)"),
+           CtxMs, Config.NumContextTokens);
 
     // -----------------------------------------------------------------
     // 3. Resolve the stop-token id.
@@ -237,13 +273,13 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     if (StopId < 0)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTTS Nano: <|SPEECH_GENERATION_END|> token not found in vocab. "
-                    "Synthesis will fall back to llama_vocab_is_eog + MaxNewTokens cap."));
+               TEXT("NeuTtsNano: Runner: <|SPEECH_GENERATION_END|> token not found in vocab. "
+                    "Synthesis will fall back to llama_vocab_is_eog + MaxNewTokens cap"));
     }
     else
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTTS Nano: stop token <|SPEECH_GENERATION_END|> resolved as id=%d"),
+               TEXT("NeuTtsNano: Runner: stop token <|SPEECH_GENERATION_END|> resolved as id=%d"),
                StopId);
     }
 
@@ -255,12 +291,14 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     // execution-provider list (Cpu / DirectMl / Xnnpack), thread counts,
     // profiling + verbose-logging toggles, DirectML adapter index.
     // -----------------------------------------------------------------
+    const double CodecStart = FPlatformTime::Seconds();
     FString OrtErr;
     TUniquePtr<FInoOnnxSession> NewSession =
         FInoOnnxSession::Create(
             CodecOnnxPath,
             MakeNeuCodecOptions(Config.Performance),
             &OrtErr);
+    const double CodecMs = (FPlatformTime::Seconds() - CodecStart) * 1000.0;
     if (!NewSession)
     {
         Api->llama_free(NewCtx);
@@ -268,8 +306,15 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
         OutError = FString::Printf(
             TEXT("FInoOnnxSession::Create failed for %s: %s"),
             *CodecOnnxPath, *OrtErr);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Runner: codec session create FAILED after %.0f ms: %s"),
+               CodecMs, *OutError);
         return nullptr;
     }
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: Runner: NeuCodec ONNX session created in %.0f ms"),
+           CodecMs);
 
     // -----------------------------------------------------------------
     // 5. Package.
@@ -280,10 +325,12 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
     Runner->CodecSession = MoveTemp(NewSession);
     Runner->StopTokenId  = StopId;
 
+    const double TotalMs = (FPlatformTime::Seconds() - CreateStartTime) * 1000.0;
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTTS Nano Runner ready: n_ctx=%u, stop_token_id=%d, "
+           TEXT("NeuTtsNano: Runner: ready in %.0f ms (n_ctx=%u, stop_token_id=%d, "
                 "n_gpu_layers=%d, llm_threads=%d/%d (gen/batch), flash_attn=%s, "
-                "mmap=%s, mlock=%s"),
+                "mmap=%s, mlock=%s)"),
+           TotalMs,
            Api->llama_n_ctx(NewCtx), StopId, Config.NumGpuLayers,
            Config.Performance.LlmThreadCount,
            Config.Performance.LlmBatchThreadCount,
@@ -293,7 +340,7 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
 
 #if PLATFORM_WINDOWS
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTTS Nano decoder: providers=%s, intra/inter_op=%d/%d, "
+           TEXT("NeuTtsNano: Runner: decoder providers=%s, intra/inter_op=%d/%d, "
                 "profiling=%s, verbose_ort=%s"),
            Config.Performance.bPreferDirectMl
                ? TEXT("[DirectMl, Cpu]") : TEXT("[Cpu]"),
@@ -303,7 +350,7 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
            Config.Performance.bEnableVerboseOrtLogging ? TEXT("on") : TEXT("off"));
 #elif PLATFORM_ANDROID
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTTS Nano decoder: providers=%s, intra/inter_op=%d/%d, "
+           TEXT("NeuTtsNano: Runner: decoder providers=%s, intra/inter_op=%d/%d, "
                 "profiling=%s, verbose_ort=%s"),
            Config.Performance.bUseXnnpack
                ? TEXT("[Xnnpack, Cpu]") : TEXT("[Cpu]"),
@@ -318,6 +365,9 @@ TUniquePtr<FInoNeuTtsNanoRunner> FInoNeuTtsNanoRunner::Create(
 
 FInoNeuTtsNanoRunner::~FInoNeuTtsNanoRunner()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: Runner: dtor — releasing codec session, llama_context, llama_model"));
+
     const InoAgents::LlamaCpp::FLlamaCppApi* Api = InoAgents::LlamaCpp::GetApi();
 
     // Codec session first — purely a TUniquePtr reset, no cross-runtime
@@ -345,8 +395,8 @@ FInoNeuTtsNanoRunner::~FInoNeuTtsNanoRunner()
         // them rather than call into freed code. The process is tearing
         // down anyway; OS reclaims memory.
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTTS Nano Runner dtor: llama.cpp vtable is null "
-                    "(module shutdown in progress?). llama_model / llama_context "
-                    "intentionally leaked — OS will reclaim."));
+               TEXT("NeuTtsNano: Runner: dtor — llama.cpp vtable is null "
+                    "(module shutdown in progress?); llama_model / llama_context "
+                    "intentionally leaked — OS will reclaim"));
     }
 }

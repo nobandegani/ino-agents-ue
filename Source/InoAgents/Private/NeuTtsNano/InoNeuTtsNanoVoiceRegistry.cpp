@@ -14,9 +14,15 @@
 bool FInoNeuTtsNanoVoiceRegistry::RegisterFromJsonFile(
     const FString& JsonPath, FName RegisterAs, FString& OutError)
 {
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("NeuTtsNano: Voice: RegisterFromJsonFile (path=%s, register_as=%s)"),
+           *JsonPath, *RegisterAs.ToString());
+
     if (!FPlatformFileManager::Get().GetPlatformFile().FileExists(*JsonPath))
     {
         OutError = FString::Printf(TEXT("Voice file not found: %s"), *JsonPath);
+        UE_LOG(LogInoAgents, Warning,
+               TEXT("NeuTtsNano: Voice: %s"), *OutError);
         return false;
     }
 
@@ -24,6 +30,8 @@ bool FInoNeuTtsNanoVoiceRegistry::RegisterFromJsonFile(
     if (!FFileHelper::LoadFileToString(Raw, *JsonPath))
     {
         OutError = FString::Printf(TEXT("Failed to read %s"), *JsonPath);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Voice: %s"), *OutError);
         return false;
     }
 
@@ -32,6 +40,8 @@ bool FInoNeuTtsNanoVoiceRegistry::RegisterFromJsonFile(
     if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
     {
         OutError = FString::Printf(TEXT("Failed to parse JSON in %s"), *JsonPath);
+        UE_LOG(LogInoAgents, Error,
+               TEXT("NeuTtsNano: Voice: %s"), *OutError);
         return false;
     }
 
@@ -63,18 +73,40 @@ bool FInoNeuTtsNanoVoiceRegistry::RegisterFromJsonFile(
         Voice.DisplayName = RegisterAs.ToString();
     }
 
+    const int32 NCodes = Voice.RefCodes.Num();
+    const int32 RefTextLen = Voice.RefText.Len();
+    const int32 RefPhonesLen = Voice.RefPhones.Len();
+
     Register(RegisterAs, MoveTemp(Voice));
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("NeuTtsNano: Voice: registered \"%s\" as name=%s "
+                "(parsed %d ref codes, %d-char ref_text, %d-char ref_phones, registry_size=%d)"),
+           *Voices[RegisterAs].DisplayName, *RegisterAs.ToString(),
+           NCodes, RefTextLen, RefPhonesLen, Voices.Num());
     return true;
 }
 
 void FInoNeuTtsNanoVoiceRegistry::Register(FName Name, FInoNeuTtsNanoVoice Voice)
 {
+    const bool bReplacing = Voices.Contains(Name);
     Voices.Add(Name, MoveTemp(Voice));
+    if (bReplacing)
+    {
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("NeuTtsNano: Voice: Register replaced existing entry for name=%s"),
+               *Name.ToString());
+    }
 }
 
 const FInoNeuTtsNanoVoice* FInoNeuTtsNanoVoiceRegistry::Find(FName Name) const
 {
-    return Voices.Find(Name);
+    const FInoNeuTtsNanoVoice* Result = Voices.Find(Name);
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("NeuTtsNano: Voice: Find(name=%s) — %s"),
+           *Name.ToString(),
+           Result ? TEXT("hit") : TEXT("miss"));
+    return Result;
 }
 
 TArray<FName> FInoNeuTtsNanoVoiceRegistry::GetAvailableVoiceNames() const
