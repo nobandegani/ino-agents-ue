@@ -5,6 +5,7 @@
 #include "InoAgentsLog.h"
 
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
@@ -148,14 +149,14 @@ namespace
 
         if (Normalize(ActualPath) == Normalize(ExpectedFullPath))
         {
-            UE_LOG(LogInoAgents, Log,
-                   TEXT("InoAgents: verified %s is loaded from %s"),
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("LlamaCpp: Module: verified %s is loaded from %s"),
                    BaseName, *ActualPath);
         }
         else
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("InoAgents: BASE-NAME CACHE COLLISION — %s loaded from %s, ")
+                   TEXT("LlamaCpp: Module: BASE-NAME CACHE COLLISION — %s loaded from %s, ")
                    TEXT("but we wanted %s. Our preload didn't win the race (another plugin ")
                    TEXT("loaded a different %s first). Symptoms may include version-skew ")
                    TEXT("bugs at runtime."),
@@ -229,13 +230,13 @@ namespace
             {
                 *(P.StoreHandleAt) = Handle;
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("InoAgents: pre-loaded %s"), P.Name);
+                       TEXT("LlamaCpp: Module: pre-loaded %s"), P.Name);
                 VerifyLoadedPath(P.Name, FullPath);
             }
             else if (P.bRequired)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("InoAgents: REQUIRED preload failed: %s (path=%s). ")
+                       TEXT("LlamaCpp: Module: REQUIRED preload failed: %s (path=%s). ")
                        TEXT("llama.cpp will not initialise. Run ")
                        TEXT("Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1 ")
                        TEXT("to stage the binaries."),
@@ -245,7 +246,7 @@ namespace
             else
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("InoAgents: optional preload not found: %s (path=%s). ")
+                       TEXT("LlamaCpp: Module: optional preload not found: %s (path=%s). ")
                        TEXT("The corresponding backend (Vulkan) will be unavailable; CPU inference still works."),
                        P.Name, *FullPath);
             }
@@ -283,7 +284,7 @@ namespace
      * context to diagnose "wrong llama.cpp version" vs "we asked for a
      * symbol that the staged build doesn't ship."
      */
-    bool ResolveApi(FLlamaCppApi& OutApi, const FDllHandles& Handles)
+    bool ResolveApi(FLlamaCppApi& OutApi, const FDllHandles& Handles, int32& OutResolvedCount, int32& OutTotalCount)
     {
         // llama_* symbols live in llama.dll; ggml_* symbols live in
         // ggml.dll / ggml-base.dll. The search list covers both so the
@@ -295,19 +296,28 @@ namespace
         };
 
         bool bAllOk = true;
+        int32 ResolvedCount = 0;
+        int32 TotalCount = 0;
 
         auto ResolveOne = [&](const TCHAR* Name, void** Slot) -> bool
         {
             void* P = ResolveExport(Name, SearchList);
             *Slot = P;
+            ++TotalCount;
             if (P == nullptr)
             {
                 UE_LOG(LogInoAgents, Error,
-                       TEXT("InoAgents: llama.cpp is missing required export: %s. ")
+                       TEXT("LlamaCpp: Api: failed to resolve symbol %s. ")
                        TEXT("Staged build at LlamaCpp/LLAMACPP_VERSION may be the wrong version ")
                        TEXT("or was built with this symbol stripped."),
                        Name);
                 bAllOk = false;
+            }
+            else
+            {
+                UE_LOG(LogInoAgents, Verbose,
+                       TEXT("LlamaCpp: Api: resolved %s -> %p"), Name, P);
+                ++ResolvedCount;
             }
             return P != nullptr;
         };
@@ -323,6 +333,8 @@ namespace
             } while (0)
 
         // Milestone C — module startup + backend discovery
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving Milestone C symbols (backend lifecycle + discovery)"));
         INO_RESOLVE_LLAMA(llama_backend_init);
         INO_RESOLVE_LLAMA(llama_backend_free);
         INO_RESOLVE_LLAMA(llama_print_system_info);
@@ -332,6 +344,8 @@ namespace
         INO_RESOLVE_LLAMA(ggml_backend_reg_name);
 
         // NeuTTS prerequisite — model
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving model-lifecycle symbols"));
         INO_RESOLVE_LLAMA(llama_model_default_params);
         INO_RESOLVE_LLAMA(llama_model_load_from_file);
         INO_RESOLVE_LLAMA(llama_model_free);
@@ -340,16 +354,22 @@ namespace
         INO_RESOLVE_LLAMA(llama_model_n_ctx_train);
 
         // NeuTTS prerequisite — context
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving context-lifecycle symbols"));
         INO_RESOLVE_LLAMA(llama_context_default_params);
         INO_RESOLVE_LLAMA(llama_init_from_model);
         INO_RESOLVE_LLAMA(llama_free);
         INO_RESOLVE_LLAMA(llama_n_ctx);
 
         // NeuTTS prerequisite — memory (KV-cache)
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving memory/KV-cache symbols"));
         INO_RESOLVE_LLAMA(llama_get_memory);
         INO_RESOLVE_LLAMA(llama_memory_clear);
 
         // NeuTTS prerequisite — vocab
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving vocab-query symbols"));
         INO_RESOLVE_LLAMA(llama_vocab_n_tokens);
         INO_RESOLVE_LLAMA(llama_vocab_eos);
         INO_RESOLVE_LLAMA(llama_vocab_is_eog);
@@ -357,10 +377,14 @@ namespace
         INO_RESOLVE_LLAMA(llama_token_to_piece);
 
         // NeuTTS prerequisite — tokenize / detokenize
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving tokenize/detokenize symbols"));
         INO_RESOLVE_LLAMA(llama_tokenize);
         INO_RESOLVE_LLAMA(llama_detokenize);
 
         // NeuTTS prerequisite — batch + decode
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving batch+decode symbols"));
         INO_RESOLVE_LLAMA(llama_batch_init);
         INO_RESOLVE_LLAMA(llama_batch_free);
         INO_RESOLVE_LLAMA(llama_batch_get_one);
@@ -368,6 +392,8 @@ namespace
         INO_RESOLVE_LLAMA(llama_get_logits_ith);
 
         // NeuTTS prerequisite — sampler chain
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: resolving sampler-chain symbols"));
         INO_RESOLVE_LLAMA(llama_sampler_chain_default_params);
         INO_RESOLVE_LLAMA(llama_sampler_chain_init);
         INO_RESOLVE_LLAMA(llama_sampler_chain_add);
@@ -383,12 +409,18 @@ namespace
 
         #undef INO_RESOLVE_LLAMA
 
+        OutResolvedCount = ResolvedCount;
+        OutTotalCount = TotalCount;
         return bAllOk;
     }
 } // namespace
 
 bool Init()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: starting llama.cpp load"));
+    const double InitStartTime = FPlatformTime::Seconds();
+
 #if PLATFORM_WINDOWS || PLATFORM_ANDROID
 
 #if PLATFORM_WINDOWS
@@ -398,13 +430,17 @@ bool Init()
     if (BinDir.IsEmpty())
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: cannot resolve plugin bin dir; llama.cpp init aborted."));
+               TEXT("LlamaCpp: Module: cannot resolve plugin bin dir; llama.cpp init aborted."));
         return false;
     }
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LlamaCpp: Module: resolved Win64 bin dir = %s"), *BinDir);
     if (!PreloadWin64Deps(BinDir, GHandles))
     {
         // PreloadWin64Deps has already logged the specific failure.
         // Shutdown will free any handles that did load.
+        UE_LOG(LogInoAgents, Error,
+               TEXT("LlamaCpp: Module: Win64 dependency preload failed; init aborted."));
         return false;
     }
 #endif // PLATFORM_WINDOWS
@@ -417,21 +453,25 @@ bool Init()
     if (MainLibPath.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("InoAgents: could not resolve llama.cpp main library path (IPluginManager failed?)."));
+               TEXT("LlamaCpp: Module: could not resolve llama.cpp main library path (IPluginManager failed?)."));
         return false;
     }
+    UE_LOG(LogInoAgents, Verbose,
+           TEXT("LlamaCpp: Module: main library path = %s"), *MainLibPath);
 
     GHandles.LlamaMain = FPlatformProcess::GetDllHandle(*MainLibPath);
     if (GHandles.LlamaMain == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: failed to load %s. ")
+               TEXT("LlamaCpp: Module: failed to load %s. ")
                TEXT("Did you run Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1 ")
                TEXT("and re-package?"),
                *MainLibPath);
         return false;
     }
-    UE_LOG(LogInoAgents, Log, TEXT("InoAgents: loaded %s"), *MainLibPath);
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: GetDllHandle succeeded for %s (handle=%p)"),
+           *MainLibPath, GHandles.LlamaMain);
 
 #if PLATFORM_WINDOWS
     VerifyLoadedPath(TEXT("llama.dll"), MainLibPath);
@@ -439,12 +479,18 @@ bool Init()
 
     // Resolve every function-pointer in the vtable by searching the
     // loaded handles. Aborts if any required symbol is missing.
-    if (!ResolveApi(GApi, GHandles))
+    int32 ResolvedCount = 0;
+    int32 TotalCount = 0;
+    if (!ResolveApi(GApi, GHandles, ResolvedCount, TotalCount))
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("InoAgents: llama.cpp API resolution failed; aborting init."));
+               TEXT("LlamaCpp: Module: API resolution failed (%d/%d symbols resolved); aborting init."),
+               ResolvedCount, TotalCount);
         return false;
     }
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: resolved %d/%d API symbols"),
+           ResolvedCount, TotalCount);
 
     // Register all backends. On Windows this scans our staged bin dir
     // for ggml-*.dll (14 CPU variants + ggml-vulkan). On Android the
@@ -466,7 +512,7 @@ bool Init()
         const FTCHARToUTF8 BinDirUtf8(*BinDir);
         GApi.ggml_backend_load_all_from_path(BinDirUtf8.Get());
         UE_LOG(LogInoAgents, Log,
-               TEXT("InoAgents: ggml_backend_load_all_from_path(%s) invoked."),
+               TEXT("LlamaCpp: Module: ggml_backend_load_all_from_path(%s) invoked."),
                *BinDir);
 #else
         // Android: pass nullptr so upstream falls back to its default
@@ -474,7 +520,7 @@ bool Init()
         // nothing).
         GApi.ggml_backend_load_all_from_path(nullptr);
         UE_LOG(LogInoAgents, Log,
-               TEXT("InoAgents: ggml_backend_load_all_from_path(nullptr) invoked (Android default search)."));
+               TEXT("LlamaCpp: Module: ggml_backend_load_all_from_path(nullptr) invoked (Android default search)."));
 #endif
     }
 
@@ -484,6 +530,8 @@ bool Init()
     if (GApi.llama_backend_init != nullptr)
     {
         GApi.llama_backend_init();
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: llama_backend_init invoked"));
     }
 
     // Summary log — one line so the startup output stays readable.
@@ -491,28 +539,37 @@ bool Init()
     {
         const char* Info = GApi.llama_print_system_info();
         UE_LOG(LogInoAgents, Log,
-               TEXT("InoAgents: llama.cpp initialised — %s"),
+               TEXT("LlamaCpp: Module: llama.cpp initialised — %s"),
                Info != nullptr ? UTF8_TO_TCHAR(Info) : TEXT("(null system info)"));
     }
     else
     {
-        UE_LOG(LogInoAgents, Log, TEXT("InoAgents: llama.cpp initialised."));
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LlamaCpp: Module: llama.cpp initialised (system info unavailable)."));
     }
 
     GApiValid = true;
+    const double InitElapsedMs = (FPlatformTime::Seconds() - InitStartTime) * 1000.0;
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: Init complete (elapsed=%.1f ms, %d/%d symbols)"),
+           InitElapsedMs, ResolvedCount, TotalCount);
     return true;
 
 #else
     // iOS / Linux / macOS: InoLlamaCpp.Build.cs has no platform branch
     // yet. Any GetApi() caller will see nullptr and handle gracefully.
     UE_LOG(LogInoAgents, Warning,
-           TEXT("InoAgents: llama.cpp is not yet available on this platform."));
+           TEXT("LlamaCpp: Module: llama.cpp is not yet available on this platform."));
     return false;
 #endif
 }
 
 void Shutdown()
 {
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: Shutdown starting (was_valid=%s)"),
+           GApiValid ? TEXT("true") : TEXT("false"));
+
     // Clear the "valid" flag first so any late callers of GetApi()
     // see nullptr rather than a vtable belonging to a DLL we are about
     // to unload. Happens-before ordering matters here.
@@ -525,6 +582,8 @@ void Shutdown()
     if (bWasValid && GApi.llama_backend_free != nullptr)
     {
         GApi.llama_backend_free();
+        UE_LOG(LogInoAgents, Verbose,
+               TEXT("LlamaCpp: Module: llama_backend_free invoked"));
     }
 
     // Zero the vtable now — any post-Shutdown access goes through
@@ -536,25 +595,47 @@ void Shutdown()
     // Release in reverse dependency order: top of the graph first so
     // Windows doesn't error out on "can't free libomp, it's still
     // imported by ggml-cpu-* which is referenced by ggml.dll".
-    auto Free = [](void*& Handle)
+    auto Free = [](const TCHAR* Name, void*& Handle)
     {
         if (Handle != nullptr)
         {
             FPlatformProcess::FreeDllHandle(Handle);
+            UE_LOG(LogInoAgents, Verbose,
+                   TEXT("LlamaCpp: Module: FreeDllHandle(%s) complete"), Name);
             Handle = nullptr;
         }
     };
-    Free(GHandles.LlamaMain);
-    Free(GHandles.GgmlVulkan);
-    Free(GHandles.Ggml);
-    Free(GHandles.GgmlBase);
-    Free(GHandles.LibOmp);
+    Free(TEXT("llama"),        GHandles.LlamaMain);
+    Free(TEXT("ggml-vulkan"),  GHandles.GgmlVulkan);
+    Free(TEXT("ggml"),         GHandles.Ggml);
+    Free(TEXT("ggml-base"),    GHandles.GgmlBase);
+    Free(TEXT("libomp"),       GHandles.LibOmp);
 #endif
+
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LlamaCpp: Module: Shutdown complete"));
 }
 
 const FLlamaCppApi* GetApi()
 {
-    return GApiValid ? &GApi : nullptr;
+    if (!GApiValid)
+    {
+        // Log once — consumers call GetApi() on every hot-path entry and
+        // null-check the result, so we'd flood the log if we warned every
+        // call. The single warning is enough to hint "you tried to use
+        // llama.cpp but Init didn't succeed / Shutdown already ran".
+        static bool bWarnedOnce = false;
+        if (!bWarnedOnce)
+        {
+            bWarnedOnce = true;
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LlamaCpp: Api: GetApi() called but vtable is not valid ")
+                   TEXT("(Init not yet called, failed, or Shutdown already ran) — returning nullptr. ")
+                   TEXT("Further nullptr returns will be silent."));
+        }
+        return nullptr;
+    }
+    return &GApi;
 }
 
 } // namespace InoAgents::LlamaCpp
