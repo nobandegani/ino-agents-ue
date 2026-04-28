@@ -119,32 +119,27 @@ void UInoLiteRtLmConversation::Initialize(
 
     // Session config (sampler params + max output tokens).
     //
-    // DISABLED for LiteRT-LM v0.10.1: passing ANY user-created
-    // SessionConfig (even with reasonable defaults like TopK=40,
-    // temp=0.8) causes Conversation::Create → engine.CreateSession()
-    // to fail for Gemma 4 models. Passing nullptr lets the C API use
-    // SessionConfig::CreateDefault() with TYPE_UNSPECIFIED, which
-    // defers to model metadata for sampler params and works.
-    //
-    // This is NOT related to the extra_context JSON bug (fixed
-    // separately). Verified by re-enabling session config after the
-    // JSON fix — conversation_create still returns NULL.
-    //
-    // TODO(litert-upgrade): re-enable when a future LiteRT-LM version
-    // supports user-provided session configs for Gemma 4.
-    LiteRtLmSessionConfig* SessionConfig = nullptr;
-
-#if 0  // Disabled — see comment above
-    SessionConfig = litert_lm_session_config_create();
+    // Historical note: on LiteRT-LM v0.10.1, passing ANY user-created
+    // SessionConfig caused Conversation::Create → engine.CreateSession()
+    // to return NULL for Gemma 4 models, so this block was gated off
+    // and conversations ran with engine defaults (TYPE_UNSPECIFIED).
+    // Re-enabled on the post-v0.10.2 SHA (4dbbf937) — if conversation_create
+    // returns NULL again on a smoke test, fall back by setting SessionConfig
+    // to nullptr and the relevant sampler/max-token setters become no-ops.
+    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
     if (SessionConfig != nullptr)
     {
         LiteRtLmSamplerParams NativeSampler = {};
         switch (InConfig.Sampler.Type)
         {
-            case EInoLiteRtLmSamplerType::TopK:   NativeSampler.type = kTopK;   break;
-            case EInoLiteRtLmSamplerType::TopP:   NativeSampler.type = kTopP;   break;
-            case EInoLiteRtLmSamplerType::Greedy: NativeSampler.type = kGreedy; break;
-            default:                           NativeSampler.type = kTopK;   break;
+            case EInoLiteRtLmSamplerType::TopK:
+                NativeSampler.type = kLiteRtLmSamplerTypeTopK;   break;
+            case EInoLiteRtLmSamplerType::TopP:
+                NativeSampler.type = kLiteRtLmSamplerTypeTopP;   break;
+            case EInoLiteRtLmSamplerType::Greedy:
+                NativeSampler.type = kLiteRtLmSamplerTypeGreedy; break;
+            default:
+                NativeSampler.type = kLiteRtLmSamplerTypeTopK;   break;
         }
         NativeSampler.top_k       = InConfig.Sampler.TopK;
         NativeSampler.top_p       = InConfig.Sampler.TopP;
@@ -160,7 +155,6 @@ void UInoLiteRtLmConversation::Initialize(
                 SessionConfig, InConfig.MaxOutputTokens);
         }
     }
-#endif
 
     // Pre-populated conversation history (messages_json).
     // Serialize the InitialMessages struct array into a JSON array:
