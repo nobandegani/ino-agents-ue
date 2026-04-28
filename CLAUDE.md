@@ -13,8 +13,8 @@ The plugin is named for "agents" deliberately: the goal is not just text generat
 The plugin carries **three** on-device ML runtimes, each doing what it's best at:
 
 - **LiteRT-LM** — Google's TFLite-based LLM runtime. Handles Gemma 4 inference (chat, tool calling, streaming). Built and staged by the sibling **`InoLiteRT`** plugin (see `Plugins/InoLiteRT/CLAUDE.md`); InoAgents links against the `LiteRtLm.dll` / `libLiteRtLm.so` it produces and consumes the same C API. See the sections below for how InoAgents uses the runtime.
-- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo + NeuCodec decoder for NeuTTS Nano), audio codec decoders, future vision / classifier / embedding models. Prebuilt binaries downloaded at setup time under renamed filenames (`InoOnnxRuntime.dll` + `InoDml.dll` on Windows, `libInoOnnxRuntime.so` on Android) to avoid UE's NNE bundling collisions. See "[ONNX Runtime (the second runtime)](#onnx-runtime-the-second-runtime)" below.
-- **llama.cpp** — The canonical on-device runtime for GGUF-format LLMs. Prebuilt binaries from upstream GitHub releases staged under original filenames (`llama.dll` + `ggml*.dll` + `libomp140.x86_64.dll` on Windows, `libllama.so` + `libggml*.so` on Android). Used at runtime via a synthesised vtable (`FLlamaCppApi`) resolved via GetProcAddress / dlsym — no implicit linking. First and currently only consumer: **NeuTTS Nano TTS**. See `Plugins/InoAgents/LlamaCpp/README.md` for the setup story and `Source/InoAgents/Private/LlamaCpp/InoLlamaCppModule.{h,cpp}` for the vtable.
+- **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo + NeuCodec decoder for NeuTTS Nano), audio codec decoders, future vision / classifier / embedding models. Built and staged by the sibling **`InoOnnx`** plugin (see `Plugins/InoOnnx/CLAUDE.md`); InoAgents links against the `InoOnnxRuntime.dll` / `libInoOnnxRuntime.so` it produces and consumes the `OrtApi` vtable via `InoAgents::Onnx::GetApi()`.
+- **llama.cpp** — The canonical on-device runtime for GGUF-format LLMs. Built and staged by the sibling **`InoLlama`** plugin (see `Plugins/InoLlama/CLAUDE.md`); InoAgents links against the `llama.dll` / `libllama.so` graph it produces and consumes the `FLlamaCppApi` vtable via `InoAgents::LlamaCpp::GetApi()`. First and currently only consumer: **NeuTTS Nano TTS**.
 
 Why three runtimes instead of one: each is purpose-built for a specific ecosystem of models. LiteRT-LM is purpose-built for Gemma 4 (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX or GGUF models. ONNX Runtime is the industry-standard runtime for ONNX graphs (the only format Chatterbox and NeuCodec ship in) with prebuilts on every platform. llama.cpp is the only production-grade runtime for GGUF-format LLMs (which covers Qwen, Phi, Llama, SmolLM, NeuTTS's Qwen2 backbone, and essentially every non-Gemma open LLM worth running on-device). Each runtime is small enough (~14 MB LiteRT-LM + ~14 MB ORT + ~2-80 MB llama.cpp depending on backends shipped) that carrying all three costs less than forcing one runtime to do all three jobs. All three use the same integration shape (prebuilt binaries, dynamic loading, platform-aware execution providers) so the mental model stays consistent.
 
@@ -124,17 +124,9 @@ Gemma 4's **31B dense** and **26B A4B MoE** server-class variants are **intentio
 
 ```
 Plugins/InoAgents/
-├── InoAgents.uplugin                              ← declares "InoLiteRT" in its Plugins array
-│                                                    so UE refuses to load InoAgents without it
-│
-├── OnnxRuntime/                                   ← ONNX runtime — downloads prebuilts, stages
-│   ├── ONNXRUNTIME_VERSION                        ← pinned ORT version (e.g. "1.24.3")
-│   ├── scripts/
-│   │   ├── setup-onnxruntime.ps1                  ← download + stage Win64 + Android AAR
-│   │   └── patch-ort-dml-import.py                ← rewrites InoOnnxRuntime.dll's
-│   │                                                 delay-import "DirectML.dll" → "InoDml.dll"
-│   ├── .cache/                                    ← downloaded ZIPs/AARs (gitignored)
-│   └── README.md
+├── InoAgents.uplugin                              ← declares "InoLiteRT", "InoOnnx", "InoLlama"
+│                                                    in its Plugins array so UE refuses to load
+│                                                    InoAgents without all three
 │
 ├── Chatterbox/                                    ← Chatterbox Turbo TTS — model staging
 │   ├── CHATTERBOX_VERSION                         ← HuggingFace repo revision pin
@@ -146,7 +138,8 @@ Plugins/InoAgents/
 │   └── README.md
 │
 ├── Source/
-│   ├── InoAgents/                                 ← runtime module (UE-facing, wraps both runtimes)
+│   ├── InoAgents/                                 ← runtime module (UE-facing — consumes
+│   │                                                LiteRT-LM, ORT, llama.cpp via siblings)
 │   │   ├── InoAgents.Build.cs
 │   │   ├── Public/
 │   │   │   ├── InoAgents.h                        ← module interface (FInoAgentsModule)
@@ -159,6 +152,8 @@ Plugins/InoAgents/
 │   │   │   │   ├── InoLiteRtLmToolBase.h          ← Blueprintable tool base class
 │   │   │   │   └── InoLiteRtLmAddNumbersTool.h    ← canonical tool sample
 │   │   │   ├── Onnx/                              ← generic ONNX session / tensor API
+│   │   │   │   │                                    (built on top of the InoOnnx-supplied
+│   │   │   │   │                                    OrtApi vtable via InoAgents::Onnx::GetApi())
 │   │   │   │   ├── InoOnnxTypes.h                 ← Dtype / Provider / SessionOptions enums+struct
 │   │   │   │   ├── InoOnnxTensor.h                ← FInoOnnxTensor (move-only OrtValue wrapper)
 │   │   │   │   └── InoOnnxSession.h               ← FInoOnnxSession (Create, Run, RunAsync)
@@ -179,7 +174,8 @@ Plugins/InoAgents/
 │   │   │       ├── SInoChatPanel.h                ← Slate widget
 │   │   │       └── InoChatBridge.h                ← UObject glue (UFUNCTION delegate handlers)
 │   │   └── Private/
-│   │       ├── InoAgents.cpp                      ← module lifecycle + DLL loading for both runtimes
+│   │       ├── InoAgents.cpp                      ← thin module lifecycle (no DLL loading —
+│   │       │                                        sibling plugins pre-load at PreLoadingScreen)
 │   │       ├── InoAgentsLog.h                     ← shared LogInoAgents category
 │   │       ├── InoAgentsSettings.cpp
 │   │       ├── LiteRtLm/                          ← LLM-side impl
@@ -191,8 +187,8 @@ Plugins/InoAgents/
 │   │       │   ├── InoLiteRtLmAddNumbersTool.cpp
 │   │       │   ├── InoLiteRtLmStubs_NonWindows.cpp ← (compile-only) stubs for iOS/Linux/macOS
 │   │       │   └── InoSha256.{h,cpp}              ← model-file integrity check
-│   │       ├── Onnx/                              ← ORT-side impl
-│   │       │   ├── InoOnnxModule.{h,cpp}          ← Init/Shutdown/GetApi; dynamic DLL loading
+│   │       ├── Onnx/                              ← ORT-side impl (calls into the
+│   │       │   │                                    InoOnnx-supplied OrtApi vtable)
 │   │       │   ├── InoOnnxInternal.{h,cpp}        ← CheckOrtStatus, dtype conv, env singleton
 │   │       │   ├── InoOnnxTensor.cpp
 │   │       │   └── InoOnnxSession.cpp
@@ -236,90 +232,35 @@ Plugins/InoAgents/
 │   │           ├── InoLiteRtLmShowChatPanelTest.cpp ← Ino.LiteRtLm.ShowChatPanel / HideChatPanel
 │   │           ├── InoOnnxTest.cpp                ← Ino.Onnx.ProvidersTest, .SessionFromFileTest
 │   │           ├── InoOnnxListDmlAdaptersTest.cpp ← Ino.Onnx.ListDmlAdaptersTest
+│   │           ├── InoLlamaCppBackendInfoTest.cpp ← Ino.LlamaCpp.BackendInfoTest
+│   │           ├── InoLlamaCppVtableTest.cpp      ← Ino.LlamaCpp.VtableTest
 │   │           ├── InoChatterboxTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
-│   │           ├── InoChatterboxSubsystemTest.{h,cpp} ← Ino.Chatterbox.SubsystemSynthTest
-│   │           ├── InoChatterboxStreamSynthTest.{h,cpp} ← Ino.Chatterbox.StreamSynthTest
+│   │           ├── InoChatterboxSubsystemTest.{h,cpp}    ← Ino.Chatterbox.SubsystemSynthTest
+│   │           ├── InoChatterboxStreamSynthTest.{h,cpp}  ← Ino.Chatterbox.StreamSynthTest
+│   │           ├── InoNeuTtsNanoDownloadTest.{h,cpp}     ← Ino.NeuTtsNano.DownloadTest
+│   │           ├── InoNeuTtsNanoSynthTest.{h,cpp}        ← Ino.NeuTtsNano.SynthTest
 │   │           └── InoElevenLabsDialogueStreamTest.{h,cpp} ← Ino.ElevenLabsDialogueStreamTest
-│   └── ThirdParty/
-│       ├── InoLlamaCpp/                           ← llama.cpp external module
-│       │   ├── Public/                            ← staged llama.cpp headers
-│       │   ├── InoLlamaCpp.Build.cs               ← NO implicit linking; dynamic load at runtime
-│       │   └── InoLlamaCpp_UPL_Android.xml        ← APK packaging for libllama.so + ggml*
-│       └── InoOnnxRuntime/                        ← ONNX external module
-│           ├── Public/                            ← staged ORT headers (onnxruntime_c_api.h, etc.)
-│           ├── InoOnnxRuntime.Build.cs            ← NO implicit linking; dynamic load at runtime
-│           └── InoOnnxRuntime_UPL_Android.xml     ← APK packaging for libInoOnnxRuntime.so
-│
-└── Binaries/ThirdParty/
-    ├── InoLlamaCpp/                               ← llama.cpp runtime binaries (Win64 + Android)
-    └── InoOnnxRuntime/                            ← ONNX runtime binaries
-        ├── Win64/
-        │   ├── InoOnnxRuntime.dll                 ← RENAMED from onnxruntime.dll (~14 MB)
-        │   ├── InoDml.dll                         ← RENAMED from DirectML.dll (DML EP, ~20 MB)
-        │   └── onnxruntime_providers_shared.dll   ← original name (no collision risk)
-        └── Android/arm64-v8a/
-            └── libInoOnnxRuntime.so               ← RENAMED from libonnxruntime.so (~25 MB)
+│   └── (no Source/ThirdParty — sibling plugins own all third-party staging)
+└── (no Binaries/ThirdParty — sibling plugins own all runtime binaries)
 ```
 
-**LiteRT + LiteRT-LM are NOT in this layout.** They live in the sibling `Plugins/InoLiteRT/` plugin (separate repo, separate `CLAUDE.md`). InoLiteRT owns the Bazel workspace (`LiteRT/vendor/`, `LiteRT/overlay/`, `LiteRT/scripts/`), the third-party staging (`Source/ThirdParty/{Win64,Android,Public}/`), and pre-loads the runtime DLLs/.so at `LoadingPhase=PreLoadingScreen` — strictly before InoAgents' `Default`-phase StartupModule runs. From InoAgents' perspective the runtimes are simply available: `#include "litert/lm/engine.h"`, call `litert_lm_*` functions, link against `LiteRtLm.lib` (Win64) or `libLiteRtLm.so` (Android) via the `"InoLiteRT"` entry in `InoAgents.Build.cs`'s `PublicDependencyModuleNames`.
+**The three runtimes are NOT in this layout.** They live in sibling plugins, each in its own repo with its own `CLAUDE.md`:
 
-## Build system: handled by InoLiteRT
+- `Plugins/InoLiteRT/` — LiteRT + LiteRT-LM (Bazel-built, owns its `Source/ThirdParty/` and `LiteRT/` workspace).
+- `Plugins/InoOnnx/`   — ONNX Runtime + DirectML (NuGet prebuilts, owns its `Source/ThirdParty/` and `OnnxRuntime/` workspace).
+- `Plugins/InoLlama/`  — llama.cpp (release prebuilts, owns its `Source/ThirdParty/` and `LlamaCpp/` workspace).
 
-LiteRT-LM is built from source with Bazel by the sibling **`InoLiteRT`** plugin. Toolchain requirements (Bazelisk, Visual Studio 2022, BAZEL_VC env var, NDK r28+ for Android, short `--output_base`, etc.), the custom `//ino:LiteRtLm` target with its force-reference exports stub, the `libGemmaModelConstraintProvider.dll` prebuilt handling, the Windows `--whole-archive` workaround, and the build / update / clean scripts all live in `Plugins/InoLiteRT/`. See **`Plugins/InoLiteRT/CLAUDE.md`** for the full story.
+All three pre-load their DLLs/.so at `LoadingPhase=PreLoadingScreen`, strictly before InoAgents' `Default`-phase StartupModule runs. From InoAgents' perspective the runtimes are simply available: `#include "litert/lm/engine.h"` / `#include "onnxruntime_c_api.h"` / `#include "llama.h"`, with the import libs and runtime staging handled by the sibling Build.cs files via the `"InoLiteRT"` / `"InoOnnx"` / `"InoLlama"` entries in `InoAgents.Build.cs`'s `PublicDependencyModuleNames`.
 
-InoAgents itself has no Bazel involvement. Adding new `litert_lm_*` calls in InoAgents only requires a `#include "litert/lm/engine.h"` — the headers are exposed by InoLiteRT's `PublicSystemIncludePaths`, the import lib is in its `PublicAdditionalLibraries`, and the runtime DLLs/.so are pre-loaded by `FInoLiteRTModule::StartupModule` at `PreLoadingScreen` phase. If a build error references a missing `litert_lm_*` symbol in `LiteRtLm.dll`, that's a problem to fix on the InoLiteRT side (most likely the force-reference array in InoLiteRT's BUILD.bazel overlay falling out of sync with `engine.h`).
+## Build system: handled by sibling plugins
 
-## ONNX Runtime (the second runtime)
+InoAgents itself has no third-party build involvement. LiteRT-LM is built from source with Bazel by **`InoLiteRT`**; ONNX Runtime is downloaded as Microsoft prebuilts and patched / renamed by **`InoOnnx`**; llama.cpp is downloaded as ggml-org release artifacts by **`InoLlama`**. Adding new `litert_lm_*` / `Ort*` / `llama_*` calls in InoAgents only requires the corresponding `#include` — the headers are exposed via the sibling plugins' `PublicSystemIncludePaths`, the import libs are in their `PublicAdditionalLibraries`, and the runtime DLLs/.so are pre-loaded by their PreLoadingScreen-phase StartupModule. See `Plugins/InoLiteRT/CLAUDE.md`, `Plugins/InoOnnx/CLAUDE.md`, and `Plugins/InoLlama/CLAUDE.md` for each runtime's build / pin / packaging story. If a build error references a missing symbol, the fix is on the sibling-plugin side, not in InoAgents.
 
-Separate from LiteRT-LM. Covers every ONNX-model consumer the plugin will ever have — TTS (Chatterbox Turbo is the first), audio codec decoders, and any future vision / classifier / embedding workload. The infrastructure is **model-agnostic** — no Chatterbox-specific code exists in this layer.
+## ONNX Runtime API surface (used by Chatterbox / NeuTTS Nano / future ONNX consumers)
 
-### Version pin + setup
+The ONNX Runtime itself — version pinning, prebuilt staging, Win64 / Android packaging, the DLL renames (`onnxruntime.dll` → `InoOnnxRuntime.dll`, `DirectML.dll` → `InoDml.dll`), the PE delay-import patch, the `OrtApi*` vtable load via `OrtGetApiBase` — is owned by the sibling **`InoOnnx`** plugin. See `Plugins/InoOnnx/CLAUDE.md` for that side of the story. From InoAgents' perspective the runtime is simply available: `#include "onnxruntime_c_api.h"`, get the cached vtable with `InoAgents::Onnx::GetApi()` (declared in InoOnnx's `InoOnnx.h`), and call ORT through it. There is no `Init()` / `Shutdown()` work in InoAgents — InoOnnx pre-loads at `LoadingPhase=PreLoadingScreen`, so the API is callable by the time `FInoAgentsModule::StartupModule` runs.
 
-Pinned version lives in `OnnxRuntime/ONNXRUNTIME_VERSION`, currently **1.24.3** (latest version that has both a Windows GitHub Releases ZIP AND an Android AAR on Maven Central; newer Windows releases sometimes appear before the Android counterpart).
-
-Setup is a single script:
-
-```powershell
-cd Plugins/InoAgents/OnnxRuntime/scripts
-./setup-onnxruntime.ps1
-```
-
-The script is idempotent — re-running after a clean checkout downloads the official Microsoft prebuilts (Win64 ZIP from GitHub Releases; Android AAR from Maven Central), extracts headers + .dll/.so, and stages into the third-party + Binaries trees. Caches downloads in `OnnxRuntime/.cache/` so re-runs are fast.
-
-Bumping the pin: edit `ONNXRUNTIME_VERSION`, delete `Source/ThirdParty/InoOnnxRuntime/.ort_version` (or let the script detect drift), re-run `setup-onnxruntime.ps1`, re-run the smoke tests (`Ino.Onnx.ProvidersTest`, `Ino.Onnx.SessionFromFileTest`). Commit the `ONNXRUNTIME_VERSION` bump together with any API tweaks the new version requires.
-
-### Why we rename the DLL / .so (important — don't undo this)
-
-Both the Win64 ORT runtime and the Android .so are **renamed** during staging, and on Windows the DirectML EP gets the same treatment:
-
-- Windows: `onnxruntime.dll` → `InoOnnxRuntime.dll`
-- Windows: `DirectML.dll`    → `InoDml.dll`   (PE delay-import table patched to match)
-- Android: `libonnxruntime.so` → `libInoOnnxRuntime.so`
-
-`onnxruntime_providers_shared.dll` ships under its **original** name on Windows because no other plugin exports it.
-
-This is not cosmetic. UE 5.7 ships **multiple** unrelated copies of ONNX Runtime AND DirectML via bundled plugins — at time of writing:
-
-- `Engine/Plugins/NNE/NNERuntimeORT/Binaries/ThirdParty/Onnxruntime/Win64/onnxruntime.dll` (UE's NNE runtime, ORT 1.19.x)
-- `Engine/Plugins/Marketplace/RuntimeM558be8d6854bV8/.../Win64/onnxruntime.dll` and `.../Android/arm64-v8a/libonnxruntime.so` (a Marketplace plugin's ORT 1.19.2)
-- `Engine/Binaries/Win64/DML/x64/DirectML.dll` (UE's bundled DirectML, loaded early by NNE / RuntimeMetaHumanLipSync via `LoadLibraryA`)
-
-If we were to ship our ORT and its DML EP under their default names:
-
-- **Windows ORT** — LoadLibrary caches DLLs by **base name**, so when our `FPlatformProcess::GetDllHandle` ran with our full path, Windows would return whichever `onnxruntime.dll` was already loaded into the process (usually NNE's older one). Our `OrtApi::GetApi(ORT_API_VERSION=24)` would return nullptr because the cached DLL only implements API 19.
-- **Windows DirectML** — `InoOnnxRuntime.dll` has `DirectML.dll` as a **delay-load** dependency (confirmed via `pefile`'s `DIRECTORY_ENTRY_DELAY_IMPORT`). UE's NNE / lip-sync plugins LoadLibrary their copy of `DirectML.dll` from `Engine/Binaries/Win64/DML/x64/` early in editor startup, winning Windows' base-name cache. Our ORT's delay-load stub would then bind to UE's DirectML on first call, causing kernel-validation failures on fp16 attention and silent numerical corruption.
-- **Android** — clang's linker at libUnreal.so build time would resolve our code's `OrtGetApiBase` reference against whichever `libonnxruntime.so` appeared first on the link path (often the Marketplace plugin's 1.19.2), recording a versioned symbol reference `OrtGetApiBase@VERS_1.19.2`. At runtime the APK only contains our 1.24.3 `.so` (tagged `VERS_1.24.3`), so the dynamic linker aborts the process during libUnreal.so init — silently, before UE's logger is up, no `.log` file, no stack trace.
-
-The combined fix: rename the conflicting DLLs to names no other plugin knows, switch to **dynamic loading via GetProcAddress / dlsym** for the entry point, and patch `InoOnnxRuntime.dll`'s delay-import table to look for `InoDml.dll` instead of `DirectML.dll` (`OnnxRuntime/scripts/patch-ort-dml-import.py`, run automatically by `setup-onnxruntime.ps1`). With that done, `libUnreal.so` has **zero** Ort* symbol references and our `InoOnnxRuntime.dll`'s only delay-load DML target is the file we exclusively own.
-
-### Dynamic loading, not static linking
-
-Direct consequence of the above: `InoOnnxRuntime.Build.cs` does NOT call `PublicAdditionalLibraries` or `PublicDelayLoadDLLs` on any platform. It only:
-
-- adds `Source/ThirdParty/InoOnnxRuntime/Public/` to `PublicSystemIncludePaths` (ORT headers used at compile time for the `OrtApi` / `OrtValue` / etc. struct definitions)
-- stages the runtime via `RuntimeDependencies` (Windows: three DLLs — `InoOnnxRuntime.dll`, `onnxruntime_providers_shared.dll`, `InoDml.dll`) and `AdditionalPropertiesForReceipt("AndroidPlugin", <UPL>)` (Android, with explicit `<copyFile>` into the APK's `lib/arm64-v8a/`)
-
-At runtime, `FInoAgentsModule::StartupModule` calls `InoAgents::Onnx::Init()` which uses `FPlatformProcess::GetDllHandle` on the renamed file, then `FPlatformProcess::GetDllExport("OrtGetApiBase")` to resolve the single entry point. From that point on, everything routes through the `OrtApi*` vtable returned by `GetApiBase()->GetApi(ORT_API_VERSION)` — never through any static-linked symbol. The `OrtApi*` is cached in a file-static and exposed through `InoAgents::Onnx::GetApi()` for every consuming file in the plugin. `InoDml.dll` is loaded lazily by `InoOnnxRuntime.dll`'s patched delay-import table the first time the DirectML EP is registered.
+What InoAgents itself owns on top of that vtable is a small, model-agnostic **C++ wrapper** for ONNX Runtime — `FInoOnnxSession` + `FInoOnnxTensor` + supporting types. Every ONNX-model consumer in the plugin (Chatterbox Turbo's four sessions, NeuTTS Nano's NeuCodec decoder) is built on top of this layer; no ONNX-layer changes are needed to add new ONNX consumers.
 
 ### C++ API surface
 
@@ -335,28 +276,24 @@ Private helpers under `Source/InoAgents/Private/Onnx/`:
 
 | File | Role |
 |---|---|
-| `InoOnnxModule.{h,cpp}` | `Init` / `Shutdown` / `GetApi`. Dynamic DLL/.so loading with per-platform path resolution. |
-| `InoOnnxInternal.{h,cpp}` | `CheckOrtStatus` (uniform error log + release), dtype translations, provider-name debug strings, graph-opt-level translation, lazy-init `GetGlobalOrtEnv()`. |
+| `InoOnnxInternal.{h,cpp}` | `CheckOrtStatus` (uniform error log + release), dtype translations, provider-name debug strings, graph-opt-level translation, lazy-init `GetGlobalOrtEnv()`. Pulls the `OrtApi*` from `InoAgents::Onnx::GetApi()` (defined by sibling InoOnnx) and uses it for every call. |
 | `InoOnnxTensor.cpp` | Tensor factories, OrtAllocator-backed allocation, data pointer access with sizeof(T) vs dtype-size consistency check. |
 | `InoOnnxSession.cpp` | Options builder, provider registration with fallback logging, I/O metadata caching (OrtAllocator-owned name strings freed immediately), Run/RunAsync implementation. |
 
 **Design principles worth preserving:**
 
-- No Blueprint exposure in this layer. Per-model consumers (future `UInoChatterboxTtsSubsystem`, vision wrappers, etc.) add Blueprint-friendly APIs on top.
+- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTtsSubsystem`, `UInoNeuTtsNanoSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
 - Sessions are thread-safe for `Run()` per ORT guarantees; FInoOnnxTensors are move-only to avoid surprise-cost deep clones on the LLM streaming hot path.
 - Exception-free — uses the C API (`onnxruntime_c_api.h`), not the C++ API (`onnxruntime_cxx_api.h` throws `Ort::Exception`). UE modules default `bEnableExceptions=false`; keeping the whole stack exception-free avoids per-module opt-ins.
 - Positional I/O ordering for `Run()`. A named-map variant would cost a hash lookup per inference which matters on AR token loops — callers who need names can wrap trivially at their own layer.
 
 ### Execution providers
 
-Currently shipping:
+`FInoOnnxSessionOptions::ExecutionProviders` is the priority list every consumer uses to ask for accelerators. Which providers actually register depends on what the InoOnnx-staged build of ORT was compiled with — see `Plugins/InoOnnx/CLAUDE.md` for the per-platform list. As of the current pin: Windows has CPU + DirectML; Android has CPU + XNNPACK + NNAPI + WebGPU.
 
-- **Windows**: CPU, **DirectML** (D3D12-based GPU / NPU acceleration via `InoDml.dll` — see the rename / import-patch story above). Azure is also listed by `OrtApi::GetAvailableProviders` because the Microsoft prebuilt is compiled with it, but nothing in the plugin requests it.
-- **Android**: CPU, XNNPACK, NNAPI, WebGPU — all four available in the 1.24.3 Android AAR and usable by requesting them in `FInoOnnxSessionOptions::ExecutionProviders`.
+DirectML is selected via `EInoOnnxProvider::DirectMl` in the priority list, with `DirectMlAdapterIndex` controlling which D3D12 device to bind (0 = default adapter — usually the primary display GPU; higher indices target secondary dGPUs, eGPUs, or NPUs that enumerate later under Windows 11 24H2+ driver builds).
 
-DirectML is selected via `EInoOnnxProvider::DirectMl` in the priority list, with `DirectMlAdapterIndex` controlling which D3D12 device to bind (0 = default adapter — usually the primary display GPU; higher indices target secondary dGPUs, eGPUs, or NPUs that enumerate later under Windows 11 24H2+ driver builds). DirectML is the only Windows accelerator we ship — CUDA / TensorRT / ROCm are intentionally not shipped; they require 150+ MB of vendor-specific runtime libs per game, and DirectML covers NVIDIA, AMD, Intel, and NPUs on a single D3D12 path.
-
-DirectML is a young EP and has known kernel-level bugs that show up on real models. The Chatterbox subsystem handles this with per-session opt-in flags, defaulting all sessions to CPU and letting callers flip individual sessions to GPU after verifying — see the "Chatterbox Turbo TTS" section below for the matrix of which Chatterbox sessions actually work on DirectML 1.24.3.
+DirectML is a young EP with known kernel-level bugs that show up on real models. InoAgents' Chatterbox subsystem handles this with per-session opt-in flags, defaulting all sessions to CPU and letting callers flip individual sessions to GPU after verifying — see the "Chatterbox Turbo TTS" section below for the matrix of which Chatterbox sessions actually work on DirectML at the current pin.
 
 Provider fallback: if a caller requests `[DirectMl, Cpu]` on a platform without a D3D12 device (or with a corrupt DML install), DirectML registration silently fails and the session is built with the remaining providers. The same applies to `[Xnnpack, Nnapi, Cpu]` on Android where NNAPI isn't registered. `FInoOnnxSession::GetActiveProviders()` reports what actually made it onto the session.
 
@@ -490,7 +427,7 @@ constexpr int32   DEFAULT_MAX_NEW_TOKENS = 1024;  // reference script default
 
 ### How it's wired up in the plugin
 
-Actual layout (follows the pattern established by `InoOnnxRuntime` / `Source/InoAgents/LiteRtLm`):
+Actual layout (follows the pattern established by `Source/InoAgents/Onnx` / `Source/InoAgents/LiteRtLm`):
 
 ```
 Plugins/InoAgents/
@@ -590,7 +527,7 @@ This is the **first and currently only consumer of the llama.cpp runtime** in th
 
 ### Architecture
 
-NeuTTS Nano is a **pure consumer** of the existing `InoLlamaCppModule` vtable + `FInoOnnxSession`. No dedicated third-party module of its own; no llama.cpp patches.
+NeuTTS Nano is a **pure consumer** of the InoLlama-supplied `FLlamaCppApi` vtable (accessed via `InoAgents::LlamaCpp::GetApi()` from `InoLlama.h`) + `FInoOnnxSession`. No dedicated third-party module of its own; no llama.cpp patches.
 
 ```
 UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
@@ -623,7 +560,7 @@ UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
 
 | Aspect | v1 Value | Follow-up |
 |---|---|---|
-| Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `InoOnnxRuntime` layer (MIT-licensed, ~5 MB). |
+| Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `FInoOnnxSession` layer (MIT-licensed, ~5 MB). |
 | Default voice | **Baked in** — `NeuTtsNano/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoVoiceRegistry` + scanning a user-provided voices dir. |
 | Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
 | Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxDecoderWorker`. |
@@ -964,44 +901,18 @@ iOS / Linux / macOS only. The stubs make every `litert_lm_*` symbol
 return null / non-zero so the InoAgents subsystem fails gracefully via
 its `OnLoaded` delegate on those platforms.
 
-### ONNX Runtime
+### ONNX Runtime + llama.cpp
 
-| Platform | Status | Setup script | Artifacts | Available providers |
-|---|---|---|---|---|
-| **Windows (Win64)** | ✅ full | `OnnxRuntime/scripts/setup-onnxruntime.ps1` | `InoOnnxRuntime.dll` (~14 MB, renamed) + `InoDml.dll` (~20 MB, renamed) + `onnxruntime_providers_shared.dll` | CPU, **DirectML** (D3D12 — GPU + NPU) |
-| **Android (arm64-v8a)** | ✅ full | same script (downloads AAR) | `libInoOnnxRuntime.so` (~25 MB, renamed) | CPU, XNNPACK, NNAPI, WebGPU |
-| iOS | ⏳ not staged | — | — | — |
-| Linux | ⏳ not staged | — | — | — |
-| macOS | ⏳ not staged | — | — | — |
+Sibling-plugin owned. `Plugins/InoOnnx/CLAUDE.md` and `Plugins/InoLlama/CLAUDE.md` list the per-platform support matrix and which providers / backends ship in each artifact. From InoAgents' perspective the picture is the same as for LiteRT-LM: the runtime is either available on the platform or not, and InoAgents code calls into it via `InoAgents::Onnx::GetApi()` / `InoAgents::LlamaCpp::GetApi()` in either case.
 
-The UE API (subsystem, conversation, tools, delegates) is **identical across platforms**. Only the platform branches in InoLiteRT's `Source/ThirdParty/*.Build.cs`, InoAgents' `InoOnnxRuntime.Build.cs`, and `InoLlamaCpp.Build.cs` differ. On unimplemented platforms, the plugin still links cleanly — calls to `LoadModelAsync` fail gracefully with a "Native engine failed" error via the `FOnInoLiteRtLmModelLoaded` delegate, ORT calls via `FInoOnnxSession::Create` return nullptr with a clear error, and every other feature (ElevenLabs cloud TTS, Slate chat panel, animation/audio helpers) keeps working normally.
+The UE API (subsystems, conversations, tools, delegates) is **identical across platforms**. On platforms where a sibling runtime isn't yet staged, the InoAgents subsystems fail gracefully — `UInoLiteRtLmSubsystem::LoadModelAsync` returns "Native engine failed" via `FOnInoLiteRtLmModelLoaded`, `FInoOnnxSession::Create` returns nullptr with a clear error log, and every non-runtime feature (ElevenLabs cloud TTS, Slate chat panel, animation/audio helpers) keeps working normally.
 
 ### Android specifics
 
-LiteRT / LiteRT-LM Android packaging (UPL XML, `<soLoadLibrary>` order,
-GPU accelerator staging) is owned by **InoLiteRT** — see
-`Plugins/InoLiteRT/CLAUDE.md`. What InoAgents itself owns on Android:
+All native packaging on Android — UPL XML, `<soLoadLibrary>` order, GPU/NNAPI accelerator staging — is owned by the sibling plugins (`InoLiteRT`, `InoOnnx`, `InoLlama`) at `LoadingPhase=PreLoadingScreen`. By the time InoAgents' `Default`-phase `FInoAgentsModule::StartupModule` runs, all three runtimes are mapped into the process. What InoAgents itself owns on Android:
 
-- **`FInoAgentsModule::StartupModule`** runs in `Default` phase, after InoLiteRT has already mapped the LiteRT runtimes. It loads the **ORT** `libInoOnnxRuntime.so` (`InoAgents::Onnx::Init()`) and the **llama.cpp** runtime (`InoAgents::LlamaCpp::Init()`) via the UPL `<soLoadLibrary>` chain owned by `InoOnnxRuntime` / `InoLlamaCpp` respectively. No LiteRT DLL handling here.
-- **Model file distribution.** The 2.6–5 GB `.litertlm` model file cannot ship inside the APK (Play Store limit is 200 MB base APK). The subsystem auto-downloads to `FPaths::ProjectPersistentDownloadDir()` on first use; `android.permission.INTERNET` is required (already enabled for ElevenLabs).
+- **Model file distribution.** The 2.6–5 GB `.litertlm` model file cannot ship inside the APK (Play Store limit is 200 MB base APK). The subsystem auto-downloads to `FPaths::ProjectPersistentDownloadDir()` on first use; `android.permission.INTERNET` is required (already enabled for ElevenLabs). Same pattern for the Chatterbox ONNX bundle and the NeuTTS Nano GGUF + NeuCodec ONNX.
 - **Stubs.** `InoLiteRtLmStubs_NonWindows.cpp` excludes `PLATFORM_ANDROID` so Android links against the real LiteRT-LM symbols staged by InoLiteRT.
-
-## Windows gotchas
-
-LiteRT-LM Windows DLL handling (load order, dual-instance fix,
-GPU accelerator pre-loads, force-reference exports stub) is entirely
-**InoLiteRT**'s problem, handled at `LoadingPhase=PreLoadingScreen`
-before InoAgents' `StartupModule` runs. See `Plugins/InoLiteRT/CLAUDE.md`.
-From here, the runtime is simply available.
-
-ONNX Runtime specifics:
-
-- **Three ORT DLLs to ship alongside the executable**, in `Binaries/ThirdParty/InoOnnxRuntime/Win64/`:
-  - `InoOnnxRuntime.dll` (~14 MB) — renamed from `onnxruntime.dll`. Avoids the base-name `LoadLibrary` cache collision with UE's bundled NNE / Marketplace ORT 1.19.x.
-  - `InoDml.dll` (~20 MB) — renamed from `DirectML.dll`. Our `InoOnnxRuntime.dll`'s delay-import table is patched to look for this name (via `OnnxRuntime/scripts/patch-ort-dml-import.py`, run automatically by `setup-onnxruntime.ps1`).
-  - `onnxruntime_providers_shared.dll` — kept under its original name. ORT `LoadLibrary`s it on demand for some shared providers; no other plugin exports the same name.
-- **Renames are not optional.** Removing either rename re-introduces the silent base-name cache collision (NNE-ORT 1.19.x or UE's `Engine/Binaries/Win64/DML/x64/DirectML.dll` wins, our `OrtApi::GetApi(24)` returns nullptr or our DML EP binds to a different DML version with kernel-validation failures and silent fp16 corruption). See "ONNX Runtime → Why we rename the DLL / .so" for the full diagnosis.
-- **Dynamic loading only.** `InoOnnxRuntime.Build.cs` does NOT use `PublicAdditionalLibraries` or `PublicDelayLoadDLLs` for either DLL — `libUnreal.so` / the editor binary has zero static references to ORT. `InoAgents::Onnx::Init()` does the `FPlatformProcess::GetDllHandle` + `GetProcAddress("OrtGetApiBase")` dance at module startup; `InoDml.dll` is loaded lazily by the patched delay-import table the first time DirectML EP is registered.
 
 ## Model file distribution
 
@@ -1040,32 +951,9 @@ Hugging Face, Apache 2.0, public (no gating, no auth):
 - `litert-community/gemma-4-E2B-it-litert-lm` — 2.58 GB, Text + Image + Audio
 - `litert-community/gemma-4-E4B-it-litert-lm` — 3.65 GB, Text + Image + Audio
 
-## How to update LiteRT-LM
+## How to update the runtime versions
 
-LiteRT-LM bumps happen in the sibling InoLiteRT plugin. See `Plugins/InoLiteRT/CLAUDE.md` for the update script and process. After a bump, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.SubsystemLoadTest`, `Ino.LiteRtLm.ConversationSendTest`, `Ino.LiteRtLm.ConversationToolTest`, `Ino.LiteRtLm.ConversationContextTest`) to confirm InoAgents still talks to the new symbols correctly — the C API has churned across pre-1.0 SHAs (notably the conversation_config_create signature flip from 6-arg to no-arg + setters) and a follow-up tweak in InoAgents may be needed.
-
-## How to update ONNX Runtime
-
-```
-# 1. Edit the pinned version
-edit Plugins/InoAgents/OnnxRuntime/ONNXRUNTIME_VERSION    # e.g. 1.25.0
-
-# 2. Re-stage (downloads new artifacts, renames to InoOnnxRuntime.dll / libInoOnnxRuntime.so)
-cd Plugins/InoAgents/OnnxRuntime/scripts
-./setup-onnxruntime.ps1
-
-# 3. Rebuild the editor + repackage for Android, then run the smoke tests:
-#      Ino.Onnx.ProvidersTest
-#      Ino.Onnx.SessionFromFileTest <a known-good .onnx>
-
-# 4. Commit the ONNXRUNTIME_VERSION bump + any Build.cs tweaks + the newly staged binaries.
-```
-
-Watch-outs when bumping:
-
-- Android releases on Maven Central sometimes lag the Windows GitHub Releases by a week. If the Maven 404s for your target version, either wait or down-grade Windows to match.
-- ORT 1.x has generally maintained API backwards compatibility (our `GetApi(ORT_API_VERSION)` call asks for the compile-time version; older DLLs return nullptr, newer DLLs return a subset-compatible OrtApi). If a bump breaks compilation, it's usually a removed-in-major or a new `[[nodiscard]]` annotation — the `CheckOrtStatus` helper should already catch the latter.
-- If the NNE-bundled ORT in a future UE release matches or exceeds our pinned version, the rename remains the right isolation. Do not remove it.
+Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTtsNano.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
 
 ## What to verify before trusting this file
 
@@ -1076,10 +964,17 @@ This file describes design decisions and architectural intent. Specifics drift o
   header paths. If the symbol names / signatures InoAgents uses differ
   from what's in the staged header, trust the header — pre-1.0
   LiteRT-LM still churns its C API.
-- **ONNX Runtime version:** check `OnnxRuntime/ONNXRUNTIME_VERSION`. If the staged binaries disagree with the pin, the setup script needs to be re-run.
-- **The ONNX Runtime C API:** read `Source/ThirdParty/InoOnnxRuntime/Public/onnxruntime_c_api.h`. Struct field additions across ORT versions are common; the `OrtApi` vtable is versioned so older code still works, but new features require bumping `ORT_API_VERSION` checks in our code.
-- **Plugin scaffold state:** open `Source/ThirdParty/InoOnnxRuntime/InoOnnxRuntime.Build.cs` and `Source/ThirdParty/InoLlamaCpp/InoLlamaCpp.Build.cs`. Both should be "no `PublicAdditionalLibraries`, no `PublicDelayLoadDLLs`, dynamic load only" — if either references implicit linking, a regression slipped through. The LiteRT-LM linking happens inside InoLiteRT's Build.cs, not here.
-- **Renamed ORT DLLs / .so still in place:** `Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll` + `InoDml.dll` + `onnxruntime_providers_shared.dll`, and `.../Android/arm64-v8a/libInoOnnxRuntime.so`. Do NOT undo the rename — the "why" is in the "ONNX Runtime (the second runtime)" section above.
+- **ONNX Runtime version + C API:** owned by InoOnnx — check
+  `Plugins/InoOnnx/CLAUDE.md` for the pinned version, the staged
+  `onnxruntime_c_api.h`, the rename/patch story, and the renamed binaries
+  in InoOnnx's `Binaries/ThirdParty/`. Struct-field additions across ORT
+  versions are common; the `OrtApi` vtable is versioned so older code
+  still works, but new features require bumping `ORT_API_VERSION` checks
+  in InoAgents code.
+- **llama.cpp version + C API:** owned by InoLlama — check
+  `Plugins/InoLlama/CLAUDE.md` for the pinned tag, the staged `llama.h`,
+  and the `FLlamaCppApi` vtable surface that InoAgents consumes via
+  `InoAgents::LlamaCpp::GetApi()`.
 - **Conversation delegate signatures:** read `Source/InoAgents/Public/LiteRtLm/InoLiteRtLmConversation.h`. The list (OnUserMessage, OnToken, OnSentence, OnSentenceBoundary, OnComplete, OnError, OnToolCalled) and the per-event arg shapes are authoritative there — if they shift, this file's diagram in "UE-side integration architecture" goes out of date silently.
-- **Chatterbox per-session DML routing:** the matrix under "Per-session execution-provider overrides (DirectML caveats)" describes the empirical state of ORT 1.24.3 + DirectML. Re-verify after each ORT bump (`Ino.Chatterbox.SubsystemSynthTest` with the relevant `b*OnCpu` flag flipped is the fastest way to spot a regression or a fix).
+- **Chatterbox per-session DML routing:** the matrix under "Per-session execution-provider overrides (DirectML caveats)" describes the empirical state of the current ORT pin + DirectML. Re-verify after each ORT bump in InoOnnx (`Ino.Chatterbox.SubsystemSynthTest` with the relevant `b*OnCpu` flag flipped is the fastest way to spot a regression or a fix).
 - **Tooling versions:** Gemma 4 variant specs and modality support may have evolved — confirm against https://ai.google.dev/gemma/docs/core.
