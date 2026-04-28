@@ -3,7 +3,7 @@
 #include "Onnx/InoOnnxTensor.h"
 
 #include "InoOnnxInternal.h"
-#include "InoOnnxModule.h"
+#include "InoOnnx.h"
 #include "InoAgentsLog.h"
 
 namespace

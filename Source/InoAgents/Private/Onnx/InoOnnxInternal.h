@@ -22,9 +22,9 @@
  *
  * Consumers obtain the OrtApi vtable via
  *     const OrtApi* Api = InoAgents::Onnx::GetApi();
- * already declared in InoOnnxModule.h. All calls go through that
- * vtable — we never call ORT C functions directly (same reason we
- * use GetDllExport on OrtGetApiBase in InoOnnxModule.cpp: zero
+ * already declared in InoOnnx.h (sibling InoOnnx plugin). All calls go
+ * through that vtable — we never call ORT C functions directly (same
+ * reason the InoOnnx plugin uses GetDllExport on OrtGetApiBase: zero
  * static linker dependency on the ORT library).
  */
 namespace InoAgents::Onnx::Internal

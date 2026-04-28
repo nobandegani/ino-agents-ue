@@ -9,7 +9,7 @@
 #include "Onnx/InoOnnxTypes.h"
 #include "Onnx/InoOnnxTensor.h"
 #include "Onnx/InoOnnxSession.h"
-#include "InoOnnxModule.h"        // for InoAgents::Onnx::GetApi() sanity check
+#include "InoOnnx.h"              // for InoAgents::Onnx::GetApi() sanity check (from sibling InoOnnx plugin)
 
 #include "onnxruntime_c_api.h"     // for OrtApi::GetAvailableProviders in ProvidersTest
 

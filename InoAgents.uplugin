@@ -26,6 +26,14 @@
 		{
 			"Name": "InoLiteRT",
 			"Enabled": true
+		},
+		{
+			"Name": "InoOnnx",
+			"Enabled": true
+		},
+		{
+			"Name": "InoLlama",
+			"Enabled": true
 		}
 	],
 	"Modules": [

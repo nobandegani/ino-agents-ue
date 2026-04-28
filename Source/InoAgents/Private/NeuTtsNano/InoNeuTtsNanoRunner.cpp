@@ -3,7 +3,7 @@
 #include "InoNeuTtsNanoRunner.h"
 
 #include "InoAgentsLog.h"
-#include "InoLlamaCppModule.h"              // FLlamaCppApi + GetApi (pulls in llama.h)
+#include "InoLlama.h"                       // FLlamaCppApi + GetApi (pulls in llama.h, from sibling InoLlama plugin)
 #include "Onnx/InoOnnxSession.h"            // FInoOnnxSession::Create
 #include "Onnx/InoOnnxTypes.h"              // FInoOnnxSessionOptions + EInoOnnxProvider
 

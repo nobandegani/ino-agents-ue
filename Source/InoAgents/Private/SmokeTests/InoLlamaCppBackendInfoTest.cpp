@@ -4,7 +4,7 @@
 #include "HAL/IConsoleManager.h"
 
 #include "InoAgentsLog.h"
-#include "InoLlamaCppModule.h"   // InoAgents::LlamaCpp::GetApi + FLlamaCppApi
+#include "InoLlama.h"            // InoAgents::LlamaCpp::GetApi + FLlamaCppApi (from sibling InoLlama plugin)
 
 #include "ggml-backend.h"        // for ggml_backend_reg type (used in vtable sig)
 

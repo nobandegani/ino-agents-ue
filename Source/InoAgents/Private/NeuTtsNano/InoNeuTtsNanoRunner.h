@@ -7,8 +7,9 @@
 #include "NeuTtsNano/InoNeuTtsNanoTypes.h"   // FInoNeuTtsNanoModelConfig
 
 // Opaque forward-decls so this header doesn't pull in llama.h /
-// ggml-backend.h. The .cpp includes InoLlamaCppModule.h which provides
-// the real definitions via its own #include of llama.h.
+// ggml-backend.h. The .cpp includes InoLlama.h (from the sibling
+// InoLlama plugin) which provides the real definitions via its own
+// #include of llama.h.
 struct llama_model;
 struct llama_context;
 

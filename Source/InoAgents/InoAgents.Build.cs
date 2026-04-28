@@ -31,18 +31,11 @@ public class InoAgents : ModuleRules
 				// and similar private headers without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 
-				// Subdirectory of Private/ that holds the ONNX Runtime
-				// module startup glue + future ORT-consuming code (session
-				// wrapper, TTS workers). Added so InoAgents.cpp can
-				// #include "InoOnnxModule.h" without relative paths.
+				// Subdirectory of Private/ that holds ORT-consuming code
+				// (session wrapper, internal helpers, TTS workers). The
+				// runtime DLL loader + InoAgents::Onnx::GetApi() accessor
+				// itself lives in the sibling InoOnnx plugin's InoOnnx.h.
 				Path.Combine(ModuleDirectory, "Private", "Onnx"),
-
-				// Subdirectory of Private/ that holds the llama.cpp module
-				// startup glue (dynamic DLL loading + function-pointer
-				// vtable) and future GGUF-consuming code (subsystem,
-				// conversation, worker). Added so InoAgents.cpp can
-				// #include "InoLlamaCppModule.h" without relative paths.
-				Path.Combine(ModuleDirectory, "Private", "LlamaCpp"),
 
 				// Subdirectory of Private/ that holds the Chatterbox Turbo
 				// TTS pipeline (model bundle, tokenizer, runners, worker).
@@ -74,9 +67,9 @@ public class InoAgents : ModuleRules
 				// on-device TTS subsystem (download orchestration in
 				// Milestone 2; runner + worker + voice registry in
 				// Milestone 3; synthesis pipeline in Milestone 4).
-				// NeuTTS Nano is a pure consumer of the existing llama.cpp
-				// vtable (InoLlamaCppModule) and FInoOnnxSession — no
-				// dedicated third-party module of its own.
+				// NeuTTS Nano is a pure consumer of the InoLlama-supplied
+				// llama.cpp vtable and FInoOnnxSession — no dedicated
+				// third-party module of its own.
 				Path.Combine(ModuleDirectory, "Private", "NeuTtsNano"),
 			}
 			);
@@ -97,13 +90,22 @@ public class InoAgents : ModuleRules
 				                     // and stages the runtime DLLs/.so for packaging. The plugin
 				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
 				                     // are callable by the time this module's StartupModule runs.
-				"InoOnnxRuntime",    // ONNX Runtime (Ort::Session / Env / Value) for generic
-				                     // ONNX inference. First consumer: Chatterbox Turbo TTS.
-				                     // Set up by Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1.
-				"InoLlamaCpp",       // llama.cpp runtime — GGUF-format LLM inference (Qwen,
-				                     // Phi, Llama, SmolLM, DeepSeek-R1-Distill, TinyLlama,
-				                     // and future GGUF-based TTS backbones like NeuTTS Nano).
-				                     // Set up by Plugins/InoAgents/LlamaCpp/scripts/setup-llamacpp.ps1.
+				"InoOnnx",           // ONNX Runtime (Ort::Session / Env / Value) supplied by the
+				                     // sibling InoOnnx plugin. Exposes:
+				                     //   #include "onnxruntime_c_api.h"   (ORT C API)
+				                     //   #include "InoOnnx.h"             (InoAgents::Onnx::GetApi() accessor)
+				                     // and stages the runtime DLLs/.so for packaging. The plugin
+				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
+				                     // are callable by the time this module's StartupModule runs.
+				                     // First consumer: Chatterbox Turbo TTS.
+				"InoLlama",          // llama.cpp runtime — supplied by the sibling InoLlama
+				                     // plugin. Exposes:
+				                     //   #include "llama.h"               (llama.cpp C API)
+				                     //   #include "InoLlama.h"            (InoAgents::LlamaCpp::GetApi() accessor + FLlamaCppApi vtable)
+				                     // and stages the runtime DLLs/.so for packaging. The plugin
+				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
+				                     // are callable by the time this module's StartupModule runs.
+				                     // First consumer: NeuTTS Nano TTS.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				                     // and building ElevenLabs request bodies.
 				"JsonUtilities",     // FJsonObjectWrapper — Blueprint-friendly JSON struct used by

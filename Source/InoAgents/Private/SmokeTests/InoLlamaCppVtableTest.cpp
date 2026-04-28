@@ -4,7 +4,7 @@
 #include "HAL/IConsoleManager.h"
 
 #include "InoAgentsLog.h"
-#include "InoLlamaCppModule.h"   // FLlamaCppApi + GetApi
+#include "InoLlama.h"            // FLlamaCppApi + GetApi (from sibling InoLlama plugin)
 
 /**
  * Console command: Ino.LlamaCpp.VtableTest

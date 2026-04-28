@@ -1,7 +1,7 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 #include "InoOnnxInternal.h"
-#include "InoOnnxModule.h"        // for InoAgents::Onnx::GetApi()
+#include "InoOnnx.h"              // for InoAgents::Onnx::GetApi() (from sibling InoOnnx plugin)
 #include "InoAgentsLog.h"
 
 #include "HAL/CriticalSection.h"

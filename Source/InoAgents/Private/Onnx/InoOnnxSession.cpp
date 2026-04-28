@@ -3,7 +3,7 @@
 #include "Onnx/InoOnnxSession.h"
 
 #include "InoOnnxInternal.h"
-#include "InoOnnxModule.h"
+#include "InoOnnx.h"
 #include "InoAgentsLog.h"
 
 #include "Async/Async.h"

@@ -7,25 +7,20 @@
 /**
  * InoAgents runtime module.
  *
- * Initializes ONNX Runtime and llama.cpp at StartupModule so the rest of the
- * plugin can call into them. LiteRT and LiteRT-LM are NOT loaded here —
- * the separate `InoLiteRT` plugin owns those DLLs/.so files and pre-loads
- * them at LoadingPhase=PreLoadingScreen, which runs before this module's
- * Default-phase StartupModule. By the time we get here, the LiteRT-LM
- * runtime is already callable.
+ * All three foundation runtimes the plugin consumes are owned by sibling
+ * plugins and pre-loaded at LoadingPhase=PreLoadingScreen, before this
+ * Default-phase StartupModule:
+ *   - LiteRT + LiteRT-LM — provided by the `InoLiteRT` plugin.
+ *   - ONNX Runtime — provided by the `InoOnnx` plugin (consumed via
+ *     InoAgents::Onnx::GetApi() — see "InoOnnx.h").
+ *   - llama.cpp — provided by the `InoLlama` plugin (consumed via
+ *     InoAgents::LlamaCpp::GetApi() — see "InoLlama.h").
  *
- * Two runtimes managed by this module:
- *   - ONNX Runtime (`InoOnnxRuntime` external module, dynamic-loaded via
- *     InoAgents::Onnx::Init() — see Source/InoAgents/Private/Onnx/InoOnnxModule.h).
- *     First consumer: Chatterbox Turbo TTS.
- *   - llama.cpp (`InoLlamaCpp` external module, dynamic-loaded via
- *     InoAgents::LlamaCpp::Init() — see Source/InoAgents/Private/LlamaCpp/InoLlamaCppModule.h).
- *     First consumer: NeuTTS Nano TTS.
- *
- * This module does NOT block on model loading — that happens lazily in
- * UInoLiteRtLmSubsystem::LoadModelAsync / UInoChatterboxTtsSubsystem /
- * UInoNeuTtsNanoSubsystem, off the game thread. Loading a 3 GB Gemma 4
- * model from here would freeze the editor for seconds.
+ * This module's StartupModule is currently a no-op — every runtime's
+ * lifecycle is owned upstream. Subsystem-level work (model loading,
+ * conversation lifecycle) happens lazily off the game thread in
+ * UInoLiteRtLmSubsystem::LoadModelAsync, UInoChatterboxTtsSubsystem,
+ * UInoNeuTtsNanoSubsystem, etc.
  *
  * See Plugins/InoAgents/README.md for the plugin's user-facing API and
  * Plugins/InoAgents/CLAUDE.md for the architecture + build notes.
@@ -37,9 +32,4 @@ public:
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
     //~ End of IModuleInterface
-
-private:
-    /** Handle to onnxruntime.dll, returned by InoAgents::Onnx::Init().
-     *  nullptr on Android (the OS linker owns the .so) or if the load failed. */
-    void* OnnxRuntimeHandle          = nullptr;
 };

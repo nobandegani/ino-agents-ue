@@ -3,7 +3,7 @@
 #include "InoNeuTtsNanoSynthesisWorker.h"
 
 #include "InoAgentsLog.h"
-#include "InoLlamaCppModule.h"              // FLlamaCppApi + GetApi (pulls llama.h)
+#include "InoLlama.h"                       // FLlamaCppApi + GetApi (pulls llama.h, from sibling InoLlama plugin)
 #include "InoNeuTtsNanoPromptBuilder.h"
 #include "InoNeuTtsNanoRunner.h"
 #include "InoNeuTtsNanoVoiceRegistry.h"
