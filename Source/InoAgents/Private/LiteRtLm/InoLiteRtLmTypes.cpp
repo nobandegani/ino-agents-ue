@@ -12,6 +12,7 @@ const char* LiteRtLmBackendToString(EInoLiteRtLmBackend Backend)
     {
         case EInoLiteRtLmBackend::Cpu: return "cpu";
         case EInoLiteRtLmBackend::Gpu: return "gpu";
+        case EInoLiteRtLmBackend::Npu: return "npu";
     }
     return "cpu";
 }
