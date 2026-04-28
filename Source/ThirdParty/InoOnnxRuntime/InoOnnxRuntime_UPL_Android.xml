@@ -8,7 +8,8 @@ Referenced from InoOnnxRuntime.Build.cs via
     AdditionalPropertiesForReceipt.Add("AndroidPlugin", "<this file>")
 
 Two concerns handled here, matching the proven pattern from
-InoAgentsLibrary_UPL_Android.xml (the LiteRT-LM UPL):
+the LiteRT-LM UPL (InoLiteRT_UPL_Android.xml in the sibling
+InoLiteRT plugin):
 
   1. Java-side loadLibrary: emit System.loadLibrary("onnxruntime")
      in the generated GameActivity Java so the library is loaded
@@ -24,7 +25,8 @@ Both are required. Empirically, Build.cs RuntimeDependencies alone does
 NOT stage a .so into lib/arm64-v8a/ of the APK — explicit <copyFile>
 in <resourceCopies> is what gets it there.
 
-Path variable gotchas (lessons from InoAgentsLibrary_UPL_Android.xml):
+Path variable gotchas (lessons from the LiteRT-LM UPL — see
+Plugins/InoLiteRT/Source/InoLiteRT/InoLiteRT_UPL_Android.xml):
 
   $S(AbsPluginDir)  — resolves to THIS MODULE's directory, i.e.
                        Plugins/InoAgents/Source/ThirdParty/InoOnnxRuntime/

@@ -1,17 +1,18 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 // ============================================================================
-// LiteRT-LM C API stub implementations for non-Windows platforms.
+// LiteRT-LM C API stub implementations for non-shipped platforms.
 // ============================================================================
 //
-// LiteRT-LM is currently only built for Windows (Milestone D.1+). The plugin's
-// LiteRT-LM code (subsystem, conversation, worker, smoke tests) compiles on
-// every platform — but on non-Windows platforms the linker would fail because
-// there is no libLiteRtLm.so / .dylib to link against.
+// LiteRT-LM is provided by the separate `InoLiteRT` plugin, which currently
+// ships built libraries for Windows (Win64) and Android (arm64-v8a + x86_64)
+// only. The plugin's LiteRT-LM consumer code (subsystem, conversation,
+// worker, smoke tests) compiles on every platform — but on platforms where
+// InoLiteRT has no library to link against, the linker would fail.
 //
 // This file provides empty stub implementations of every litert_lm_* symbol
 // declared in litert/lm/engine.h. The stubs compile into the main InoAgents
-// module on non-Windows platforms only, satisfying the linker while
+// module on non-shipped platforms only, satisfying the linker while
 // guaranteeing that every runtime entry point fails gracefully:
 //
 //   - Constructor-style functions (engine_create, conversation_create, etc.)
@@ -22,11 +23,10 @@
 //   - Int-returning functions return 0 (or a non-zero failure code for
 //     stream-start functions).
 //
-// When LiteRT-LM is ported to each platform, this file skips compilation
-// on that platform and real libraries take over:
-//   - Android: ported via LiteRtLm/scripts/build-android-arm64.ps1
-//              producing libLiteRtLm.so (see InoAgentsLibrary.Build.cs
-//              Android branch). Stubs skipped when PLATFORM_ANDROID.
+// When LiteRT-LM is ported to each platform (in the InoLiteRT plugin —
+// see Plugins/InoLiteRT/LiteRT/scripts/), this file skips compilation
+// on that platform and real libraries take over.
+//   - Windows + Android: skipped here; InoLiteRT supplies the real .dll/.so.
 //   - iOS / Linux / macOS: not yet ported, stubs still apply.
 //
 // Status note: on iOS / Linux / macOS, calling any LiteRT-LM feature
@@ -53,6 +53,11 @@ extern "C" void litert_lm_session_config_set_max_output_tokens(
 {
 }
 
+extern "C" void litert_lm_session_config_set_apply_prompt_template(
+    LiteRtLmSessionConfig* /*config*/, bool /*apply_prompt_template*/)
+{
+}
+
 extern "C" void litert_lm_session_config_set_sampler_params(
     LiteRtLmSessionConfig* /*config*/,
     const LiteRtLmSamplerParams* /*sampler_params*/)
@@ -65,15 +70,35 @@ extern "C" void litert_lm_session_config_delete(LiteRtLmSessionConfig* /*config*
 
 // ----- Conversation config ----------------------------------------------
 
-extern "C" LiteRtLmConversationConfig* litert_lm_conversation_config_create(
-    LiteRtLmEngine*           /*engine*/,
-    const LiteRtLmSessionConfig* /*session_config*/,
-    const char*               /*system_message_json*/,
-    const char*               /*tools_json*/,
-    const char*               /*messages_json*/,
-    bool                      /*enable_constrained_decoding*/)
+extern "C" LiteRtLmConversationConfig* litert_lm_conversation_config_create()
 {
     return nullptr;
+}
+
+extern "C" void litert_lm_conversation_config_set_session_config(
+    LiteRtLmConversationConfig*  /*config*/,
+    const LiteRtLmSessionConfig* /*session_config*/)
+{
+}
+
+extern "C" void litert_lm_conversation_config_set_system_message(
+    LiteRtLmConversationConfig* /*config*/, const char* /*system_message_json*/)
+{
+}
+
+extern "C" void litert_lm_conversation_config_set_tools(
+    LiteRtLmConversationConfig* /*config*/, const char* /*tools_json*/)
+{
+}
+
+extern "C" void litert_lm_conversation_config_set_messages(
+    LiteRtLmConversationConfig* /*config*/, const char* /*messages_json*/)
+{
+}
+
+extern "C" void litert_lm_conversation_config_set_enable_constrained_decoding(
+    LiteRtLmConversationConfig* /*config*/, bool /*enable_constrained_decoding*/)
+{
 }
 
 extern "C" void litert_lm_conversation_config_delete(
@@ -143,6 +168,11 @@ extern "C" void litert_lm_engine_settings_set_num_decode_tokens(
 {
 }
 
+extern "C" void litert_lm_engine_settings_set_enable_speculative_decoding(
+    LiteRtLmEngineSettings* /*settings*/, bool /*enable_speculative_decoding*/)
+{
+}
+
 // ----- Engine lifecycle --------------------------------------------------
 
 extern "C" LiteRtLmEngine* litert_lm_engine_create(
@@ -167,20 +197,47 @@ extern "C" void litert_lm_session_delete(LiteRtLmSession* /*session*/)
 {
 }
 
-extern "C" LiteRtLmResponses* litert_lm_session_generate_content(
+extern "C" int litert_lm_session_run_prefill(
+    LiteRtLmSession*           /*session*/,
+    const LiteRtLmInputData*   /*inputs*/,
+    size_t                     /*num_inputs*/)
+{
+    return -1;
+}
+
+extern "C" LiteRtLmResponses* litert_lm_session_run_decode(
+    LiteRtLmSession* /*session*/)
+{
+    return nullptr;
+}
+
+extern "C" LiteRtLmResponses* litert_lm_session_run_text_scoring(
     LiteRtLmSession* /*session*/,
-    const InputData* /*inputs*/,
-    size_t           /*num_inputs*/)
+    const char**     /*target_text*/,
+    size_t           /*num_targets*/,
+    bool             /*store_token_lengths*/)
+{
+    return nullptr;
+}
+
+extern "C" void litert_lm_session_cancel_process(LiteRtLmSession* /*session*/)
+{
+}
+
+extern "C" LiteRtLmResponses* litert_lm_session_generate_content(
+    LiteRtLmSession*         /*session*/,
+    const LiteRtLmInputData* /*inputs*/,
+    size_t                   /*num_inputs*/)
 {
     return nullptr;
 }
 
 extern "C" int litert_lm_session_generate_content_stream(
-    LiteRtLmSession*        /*session*/,
-    const InputData*        /*inputs*/,
-    size_t                  /*num_inputs*/,
-    LiteRtLmStreamCallback  /*callback*/,
-    void*                   /*callback_data*/)
+    LiteRtLmSession*         /*session*/,
+    const LiteRtLmInputData* /*inputs*/,
+    size_t                   /*num_inputs*/,
+    LiteRtLmStreamCallback   /*callback*/,
+    void*                    /*callback_data*/)
 {
     return -1;  // non-zero = failed to start stream
 }

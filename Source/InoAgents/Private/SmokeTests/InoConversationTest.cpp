@@ -96,18 +96,16 @@ static void RunConversationSmokeTest(const TArray<FString>& Args)
     UE_LOG(LogInoAgents, Log, TEXT("ConversationTest: engine loaded in %.2f s"), TEngineLoaded - T0);
 
     // --- Create conversation config ---
-    // session_config          = nullptr (defaults)
-    // system_message_json     = "You are a helpful assistant..."
-    // tools_json              = nullptr (no tools in this test — see ToolCallTest)
-    // messages_json           = nullptr (no prior history)
+    // session_config          = (skipped — default)
+    // system_message          = "You are a helpful assistant..."
+    // tools_json              = (skipped — no tools in this test, see ToolCallTest)
+    // messages_json           = (skipped — no prior history)
     // enable_constrained_decoding = false (only needed with tools)
-    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create(
-        Engine,
-        /* session_config              = */ nullptr,
-        /* system_message_json         = */ SystemMessageJsonCStr,
-        /* tools_json                  = */ nullptr,
-        /* messages_json               = */ nullptr,
-        /* enable_constrained_decoding = */ false);
+    //
+    // The C API split the old multi-arg create() into a no-arg create()
+    // + setter functions in LiteRT-LM SHA 4dbbf937. Only the system
+    // message setter is called here.
+    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create();
     if (ConvConfig == nullptr)
     {
         UE_LOG(LogInoAgents, Error, TEXT("ConversationTest: conversation_config_create returned NULL"));
@@ -115,6 +113,11 @@ static void RunConversationSmokeTest(const TArray<FString>& Args)
         litert_lm_engine_settings_delete(Settings);
         return;
     }
+    if (SystemMessageJsonCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_system_message(ConvConfig, SystemMessageJsonCStr);
+    }
+    litert_lm_conversation_config_set_enable_constrained_decoding(ConvConfig, false);
 
     // --- Create the conversation ---
     LiteRtLmConversation* Conversation = litert_lm_conversation_create(Engine, ConvConfig);

@@ -195,29 +195,54 @@ void UInoLiteRtLmConversation::Initialize(
         MessagesJsonString.IsEmpty() ? nullptr : MessagesJsonUtf8.Get();
 
     // Create the native conversation config.
-    LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create(
-        InEngine,
-        /*session_config=*/              SessionConfig,
-        /*system_message_json=*/         SystemMessageCStr,
-        /*tools_json=*/                  ToolsJsonCStr,
-        /*messages_json=*/               MessagesCStr,
-        /*enable_constrained_decoding=*/ bEnableConstrainedDecoding);
-
-    // Free the heap UTF-8 converter — the C API has already read
-    // the string by the time conversation_config_create returns.
-    if (ToolsJsonUtf8Ptr != nullptr)
-    {
-        delete ToolsJsonUtf8Ptr;
-        ToolsJsonUtf8Ptr = nullptr;
-    }
+    //
+    // As of LiteRT-LM SHA 4dbbf937 the C API split the old multi-arg
+    // create() into a no-arg create() + a family of setter functions.
+    // We mirror the previous behaviour by calling each setter only when
+    // we actually have a value (so the C side falls back to its own
+    // defaults for unset fields, matching what the old call did when a
+    // parameter was nullptr / false).
+    LiteRtLmConversationConfig* NativeConvConfig = litert_lm_conversation_config_create();
 
     if (NativeConvConfig == nullptr)
     {
+        if (ToolsJsonUtf8Ptr != nullptr)
+        {
+            delete ToolsJsonUtf8Ptr;
+            ToolsJsonUtf8Ptr = nullptr;
+        }
         if (SessionConfig != nullptr) litert_lm_session_config_delete(SessionConfig);
         UE_LOG(LogInoAgents, Error,
                TEXT("LiteRtLm: Conversation: Initialize FAILED — "
                     "litert_lm_conversation_config_create returned NULL"));
         return;
+    }
+
+    if (SessionConfig != nullptr)
+    {
+        litert_lm_conversation_config_set_session_config(NativeConvConfig, SessionConfig);
+    }
+    if (SystemMessageCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_system_message(NativeConvConfig, SystemMessageCStr);
+    }
+    if (ToolsJsonCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_tools(NativeConvConfig, ToolsJsonCStr);
+    }
+    if (MessagesCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_messages(NativeConvConfig, MessagesCStr);
+    }
+    litert_lm_conversation_config_set_enable_constrained_decoding(
+        NativeConvConfig, bEnableConstrainedDecoding);
+
+    // Free the heap UTF-8 converter — every setter that needs the
+    // string has already read it.
+    if (ToolsJsonUtf8Ptr != nullptr)
+    {
+        delete ToolsJsonUtf8Ptr;
+        ToolsJsonUtf8Ptr = nullptr;
     }
 
     // Create the native conversation.

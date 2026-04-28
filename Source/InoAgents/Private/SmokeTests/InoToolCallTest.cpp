@@ -173,13 +173,11 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
     UE_LOG(LogInoAgents, Log, TEXT("ToolCallTest: engine loaded in %.2f s"), TEngineLoaded - T0);
 
     // --- Create conversation config with tools + constrained decoding ---
-    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create(
-        Engine,
-        /* session_config              = */ nullptr,
-        /* system_message_json         = */ SystemMessageJsonCStr,
-        /* tools_json                  = */ ToolsJsonCStr,
-        /* messages_json               = */ nullptr,
-        /* enable_constrained_decoding = */ true);
+    // The C API split the old multi-arg create() into a no-arg create()
+    // + setter functions in LiteRT-LM SHA 4dbbf937. Build the same
+    // (system_message + tools_json + constrained_decoding=true) shape
+    // by populating each setter individually.
+    LiteRtLmConversationConfig* ConvConfig = litert_lm_conversation_config_create();
     if (ConvConfig == nullptr)
     {
         UE_LOG(LogInoAgents, Error, TEXT("ToolCallTest: conversation_config_create returned NULL"));
@@ -187,6 +185,15 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
         litert_lm_engine_settings_delete(Settings);
         return;
     }
+    if (SystemMessageJsonCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_system_message(ConvConfig, SystemMessageJsonCStr);
+    }
+    if (ToolsJsonCStr != nullptr)
+    {
+        litert_lm_conversation_config_set_tools(ConvConfig, ToolsJsonCStr);
+    }
+    litert_lm_conversation_config_set_enable_constrained_decoding(ConvConfig, true);
 
     LiteRtLmConversation* Conversation = litert_lm_conversation_create(Engine, ConvConfig);
     if (Conversation == nullptr)

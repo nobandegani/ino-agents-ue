@@ -94,11 +94,11 @@ static void RunGenerateSmokeTest(const TArray<FString>& Args)
            TEXT("GenerateTest: session created in %.3f s"),
            TSessionCreated - TEngineLoaded);
 
-    // --- Build InputData for the prompt ---
+    // --- Build LiteRtLmInputData for the prompt ---
     // .data must remain valid until generate_content returns; PromptUtf8 is
     // in an enclosing scope so its buffer outlives the call.
-    InputData TextInput;
-    TextInput.type = kInputText;
+    LiteRtLmInputData TextInput;
+    TextInput.type = kLiteRtLmInputDataTypeText;
     TextInput.data = PromptUtf8.Get();
     TextInput.size = static_cast<size_t>(PromptUtf8.Length());
 

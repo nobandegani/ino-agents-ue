@@ -224,13 +224,14 @@ static void RunStreamSmokeTest(const TArray<FString>& Args)
            TEXT("StreamTest: engine + session ready in %.2f s — kicking off stream"),
            FPlatformTime::Seconds() - TSetupStart);
 
-    // --- Build InputData ---
-    // InputData itself is a plain POD struct; generate_content_stream reads
-    // its fields synchronously during tokenization, so passing a stack-local
-    // is safe. The `.data` pointer must be valid for the duration of the
-    // call — we route it through State->PromptUtf8 which lives on the heap.
-    InputData TextInput;
-    TextInput.type = kInputText;
+    // --- Build LiteRtLmInputData ---
+    // LiteRtLmInputData itself is a plain POD struct; generate_content_stream
+    // reads its fields synchronously during tokenization, so passing a
+    // stack-local is safe. The `.data` pointer must be valid for the duration
+    // of the call — we route it through State->PromptUtf8 which lives on the
+    // heap.
+    LiteRtLmInputData TextInput;
+    TextInput.type = kLiteRtLmInputDataTypeText;
     TextInput.data = State->PromptUtf8->Get();
     TextInput.size = static_cast<size_t>(State->PromptUtf8->Length());
 
