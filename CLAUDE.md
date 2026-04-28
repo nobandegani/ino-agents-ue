@@ -20,20 +20,24 @@ Why three runtimes instead of one: each is purpose-built for a specific ecosyste
 
 ### LiteRT-LM
 
-The plugin uses **LiteRT-LM** (Google's open-source on-device LLM runtime — the successor to the deprecated MediaPipe LLM Inference API) as its LLM inference backend.
+LiteRT-LM is **owned by the sibling `InoLiteRT` plugin** — see
+`Plugins/InoLiteRT/CLAUDE.md` for the runtime itself: how it's built,
+which SHA is pinned, supported platforms, backend selection, build
+scripts, the C API header, and packaging. InoAgents is purely a
+**consumer** — we link against `InoLiteRT` via `PublicDependencyModuleNames`
+and call the C API directly from `Source/InoAgents/Private/LiteRtLm/`.
 
-- Upstream: https://github.com/google-ai-edge/LiteRT-LM
-- Docs: https://ai.google.dev/edge/litert-lm
+Why LiteRT-LM as the LLM backend (vs llama.cpp / ONNX-GenAI / MLX /
+MediaPipe): single runtime that covers all our target platforms,
+first-class support for Gemma 4 with public Hugging Face model bundles,
+**native tool-use / function-calling exposed through the public C API**
+(matches the plugin's "agents" mandate, not prompt-engineered on top of
+a raw completion API), and a Windows GPU path that's pure D3D12 with no
+extra CUDA / Vulkan / OpenCL runtime to ship alongside the game.
 
-Why LiteRT-LM and not llama.cpp, ONNX Runtime GenAI, MLX, or MediaPipe:
-
-1. **Single runtime covers every target platform in this plugin's roadmap** — Windows, Linux, macOS, Android, iOS. llama.cpp is great on desktop but painful on UE's Android NDK toolchain. MediaPipe LLM Inference API is deprecated on Android/iOS and has no desktop story. MLX is Mac-only. ONNX Runtime GenAI has no first-class Gemma 4 support.
-2. **Google's first-class runtime for Gemma 4.** Pre-built model bundles live at `litert-community/gemma-4-E2B-it-litert-lm` and `litert-community/gemma-4-E4B-it-litert-lm` on Hugging Face.
-3. **Native tool-use / function-calling is a framework feature** surfaced through the public C API (`litert_lm_conversation_*`). Not prompt-engineered on top of a raw completion API. This matches the plugin's "agents" mandate.
-4. **GPU path on Windows uses DirectX (DXC / D3D12)**, matching the demo project's `DefaultGraphicsRHI=DefaultGraphicsRHI_DX12`. No CUDA / Vulkan / OpenCL runtime to ship alongside the game.
-5. **Native Win64 MSVC support is verified.** Upstream CI ships `litert_lm_main.windows_x86_64.exe` as a release artifact; the build toolchain is Bazel + MSVC + bazelisk. We do not depend on WSL for anything.
-
-Known caveat: LiteRT-LM is **pre-1.0** (v0.10.x). Expect upstream API churn — InoLiteRT pins a specific submodule SHA, never tracks `main`. The currently-pinned commit is `4dbbf9375f52ad9738b80c9c1a12d671a0f5ffb6` (post-v0.10.2; ~71 commits ahead of the v0.10.2 tag).
+LiteRT-LM is **pre-1.0** — InoLiteRT pins a specific submodule SHA and
+never tracks `main`. When that pin bumps, re-test the items in the next
+section.
 
 ### Known LiteRT-LM Gemma 4 runtime limitations
 
@@ -59,23 +63,47 @@ The plugin uses **one integration strategy across all five platform phases: link
 
 ## DLL boundary: pure C API (`litert/lm/engine.h`)
 
-The LiteRT-LM public API at `Plugins/InoLiteRT/Source/ThirdParty/Public/litert/lm/engine.h` (staged copy that InoAgents `#include`s; the upstream original lives at `Plugins/InoLiteRT/LiteRT/vendor/LiteRT-LM/c/engine.h`) is a **pure C API** wrapped in `extern "C"`, with `__declspec(dllexport)` already applied on Windows via `LITERT_LM_C_API_EXPORT`. LiteRT-LM was designed from day one to be a DLL boundary, which means the UE integration skips entire classes of pain:
+InoAgents calls the LiteRT-LM C API directly from
+`Source/InoAgents/Private/LiteRtLm/InoLiteRtLmConversation.cpp` and
+`InoLiteRtLmConversationWorker.cpp` — `#include "litert/lm/engine.h"`,
+which resolves through InoLiteRT's public include path. The header is
+pure C (`extern "C"`) with opaque pointers + primitive types + C
+callbacks, so the UE integration skips entire classes of pain:
 
-- **No C++ ABI matching.** No libstdc++-vs-MSVC-STL concerns, no iterator ABI, no exception propagation across the DLL boundary, no RTTI worries.
-- **No STL types in the boundary.** Opaque pointers (`LiteRtLmEngine*`, `LiteRtLmSession*`, `LiteRtLmConversation*`, etc.) + primitive types + C callbacks. Nothing more.
-- **No hand-written wrapper layer.** `InoLiteRtLmConversation.cpp` and `InoLiteRtLmConversationWorker.cpp` `#include "litert/lm/engine.h"` and call the C functions directly. UE-side work is marshalling between C types and UE types, not bridging ABIs.
+- **No C++ ABI matching** — no libstdc++-vs-MSVC-STL concerns, no
+  iterator ABI, no exception propagation across the DLL boundary.
+- **No STL types in the boundary** — `LiteRtLmEngine*`,
+  `LiteRtLmSession*`, `LiteRtLmConversation*`, etc. + primitive types
+  + `LiteRtLmStreamCallback`. Nothing more.
+- **No hand-written wrapper layer** — UE-side work is marshalling
+  between C types and UE types, not bridging ABIs.
 
-The C API already covers what we need:
+The subset of the API InoAgents actively consumes:
 
-- Engine / session / conversation lifecycle with CPU / GPU / NPU backend selection
-- Streaming generation with C callback (`LiteRtLmStreamCallback`)
-- Multimodal input (text / image / audio via `LiteRtLmInputData` struct, with `kLiteRtLmInputDataTypeText` etc. enum values)
-- Conversation API with tool calling. The post-v0.10.2 surface uses a no-arg `litert_lm_conversation_config_create()` plus per-field setters: `litert_lm_conversation_config_set_session_config`, `set_system_message`, `set_tools`, `set_messages`, `set_enable_constrained_decoding`. `send_message_stream` dispatches tool calls; `cancel_process` cancels inference.
-- Tokenization helpers (`litert_lm_engine_tokenize` / `_detokenize`, `_get_start_token` / `_get_stop_tokens`)
-- Lower-level prefill / decode (`litert_lm_session_run_prefill` / `_run_decode`) and `litert_lm_session_run_text_scoring`
-- Benchmarking with the full benchmark-info getter family
+- **Engine / conversation lifecycle.** `litert_lm_engine_settings_create`
+  (with backend `"cpu"` / `"gpu"` / `"npu"`, vision/audio backends
+  currently `nullptr`), `litert_lm_engine_create`, no-arg
+  `litert_lm_conversation_config_create()` + per-field setters
+  (`set_session_config`, `set_system_message`, `set_tools`,
+  `set_messages`, `set_enable_constrained_decoding`),
+  `litert_lm_conversation_create`.
+- **Streaming.** `litert_lm_conversation_send_message_stream` with our
+  `LiteRtLmStreamCallback` trampoline; `litert_lm_conversation_cancel_process`
+  for cooperative abort.
+- **Sampler params + activation precision** via `LiteRtLmSessionConfig`
+  + `litert_lm_engine_settings_set_activation_data_type` (see Gemma 4
+  runtime limitations above for current status).
+- **Logging.** `litert_lm_set_min_log_level` (called from the InoLiteRT
+  smoke test, not from InoAgents itself).
 
-The pinned SHA exports **75** `litert_lm_*` symbols (up from 44 on v0.10.1). InoAgents currently consumes the conversation + engine settings + cancel + tokenize subset; the lower-level session primitives are available for future use.
+What's available in the API but **not yet wired** in InoAgents:
+multimodal `LiteRtLmInputData` (image/audio types), tokenization helpers
+(`litert_lm_engine_tokenize` / `_detokenize`,
+`_get_start_token` / `_get_stop_tokens`), low-level prefill/decode split
+(`litert_lm_session_run_prefill` / `_run_decode`),
+`litert_lm_session_run_text_scoring`, benchmark info getters, speculative
+decoding. See `Plugins/InoLiteRT/Source/ThirdParty/Public/litert/lm/engine.h`
+for the full surface.
 
 ## Model scope
 
@@ -919,16 +947,22 @@ Smoke tests are compiled into every build configuration. For now they're gated b
 
 ### LiteRT-LM (LLM)
 
-| Platform | Status | Artifacts |
-|---|---|---|
-| **Windows (Win64, MSVC)** | ✅ shipping (CPU + GPU via D3D12/WebGPU) | `LiteRtLm.dll` + `libLiteRt.dll` + 3 prebuilt `.dll` files (built + staged by InoLiteRT) |
-| **Android (arm64-v8a)** | ✅ shipping (CPU + GPU via OpenCL / WebGPU) | `libLiteRtLm.so` + prebuilt `.so` files (built by InoLiteRT's `build-android.ps1`) |
-| **Android (x86_64)** | ✅ shipping (emulator support) | same `.so` set as arm64-v8a, x86_64 ABI |
-| iOS | ⏳ stubs only | `InoLiteRtLmStubs_NonWindows.cpp` returns nullptr |
-| Linux | ⏳ stubs only | same |
-| macOS | ⏳ stubs only | same |
+LiteRT-LM platform availability is owned by **InoLiteRT** — see
+`Plugins/InoLiteRT/CLAUDE.md` for which platforms ship which artifacts.
+From InoAgents' perspective it's a binary "available or not" question:
 
-`InoLiteRtLmStubs_NonWindows.cpp` is guarded by `#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`, so it compiles in for iOS / Linux / macOS only. Both Windows and Android link against the real libraries staged by InoLiteRT.
+| Platform              | LiteRT-LM via InoLiteRT |
+|---|---|
+| Windows (Win64, MSVC) | ✅ available |
+| Android (arm64-v8a)   | ✅ available |
+| Android (x86_64)      | ✅ available |
+| iOS / Linux / macOS   | ⏳ stubs only |
+
+`InoLiteRtLmStubs_NonWindows.cpp` is guarded by
+`#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`, so it compiles in for
+iOS / Linux / macOS only. The stubs make every `litert_lm_*` symbol
+return null / non-zero so the InoAgents subsystem fails gracefully via
+its `OnLoaded` delegate on those platforms.
 
 ### ONNX Runtime
 
@@ -944,9 +978,9 @@ The UE API (subsystem, conversation, tools, delegates) is **identical across pla
 
 ### Android specifics
 
-InoLiteRT owns the LiteRT / LiteRT-LM Android packaging — its UPL XML drives `<soLoadLibrary>` in the correct order (`libLiteRt` → `libGemmaModelConstraintProvider` → `libLiteRtLm`, with the GPU accelerator `.so` files staged via `<resourceCopies>` for runtime `dlopen`), and its `build-android.ps1` produces both arm64-v8a and x86_64 ABIs from a single Windows host. See `Plugins/InoLiteRT/CLAUDE.md` for the full toolchain and NDK story (UE 5.7 wants NDK r27.2 for the C++ build; LiteRT-LM's Bazel build wants r28+; the two coexist).
-
-What InoAgents itself owns on Android:
+LiteRT / LiteRT-LM Android packaging (UPL XML, `<soLoadLibrary>` order,
+GPU accelerator staging) is owned by **InoLiteRT** — see
+`Plugins/InoLiteRT/CLAUDE.md`. What InoAgents itself owns on Android:
 
 - **`FInoAgentsModule::StartupModule`** runs in `Default` phase, after InoLiteRT has already mapped the LiteRT runtimes. It loads the **ORT** `libInoOnnxRuntime.so` (`InoAgents::Onnx::Init()`) and the **llama.cpp** runtime (`InoAgents::LlamaCpp::Init()`) via the UPL `<soLoadLibrary>` chain owned by `InoOnnxRuntime` / `InoLlamaCpp` respectively. No LiteRT DLL handling here.
 - **Model file distribution.** The 2.6–5 GB `.litertlm` model file cannot ship inside the APK (Play Store limit is 200 MB base APK). The subsystem auto-downloads to `FPaths::ProjectPersistentDownloadDir()` on first use; `android.permission.INTERNET` is required (already enabled for ElevenLabs).
@@ -954,7 +988,11 @@ What InoAgents itself owns on Android:
 
 ## Windows gotchas
 
-LiteRT-LM specifics: all five LiteRT/LiteRT-LM Windows DLLs (`LiteRtLm.dll`, `libLiteRt.dll`, `libGemmaModelConstraintProvider.dll`, `libLiteRtWebGpuAccelerator.dll`, `libLiteRtTopKWebGpuSampler.dll`) — including the strict load order, the `--define=litert_link_capi_so=true` dual-instance fix, the GPU-accelerator pre-load-by-full-path requirement, and the force-reference exports stub — are handled by **InoLiteRT** at `LoadingPhase=PreLoadingScreen`, before InoAgents' `StartupModule` even runs. See `Plugins/InoLiteRT/CLAUDE.md` for the full diagnosis. From InoAgents' perspective the runtime is simply available.
+LiteRT-LM Windows DLL handling (load order, dual-instance fix,
+GPU accelerator pre-loads, force-reference exports stub) is entirely
+**InoLiteRT**'s problem, handled at `LoadingPhase=PreLoadingScreen`
+before InoAgents' `StartupModule` runs. See `Plugins/InoLiteRT/CLAUDE.md`.
+From here, the runtime is simply available.
 
 ONNX Runtime specifics:
 
@@ -1033,9 +1071,12 @@ Watch-outs when bumping:
 
 This file describes design decisions and architectural intent. Specifics drift over time. Before acting on any specific claim:
 
-- **LiteRT-LM version:** check `git -C ../InoLiteRT/LiteRT/vendor/LiteRT-LM describe --tags` and the `Plugins/InoLiteRT/LiteRT/LITERT_LM_TAG` file for the pinned commit. Currently `4dbbf9375f52ad9738b80c9c1a12d671a0f5ffb6` (post-v0.10.2).
+- **LiteRT-LM version + C API:** owned by InoLiteRT — check
+  `Plugins/InoLiteRT/CLAUDE.md` for the pinned SHA and authoritative
+  header paths. If the symbol names / signatures InoAgents uses differ
+  from what's in the staged header, trust the header — pre-1.0
+  LiteRT-LM still churns its C API.
 - **ONNX Runtime version:** check `OnnxRuntime/ONNXRUNTIME_VERSION`. If the staged binaries disagree with the pin, the setup script needs to be re-run.
-- **The public C API:** read `Plugins/InoLiteRT/Source/ThirdParty/Public/litert/lm/engine.h` (or the upstream `Plugins/InoLiteRT/LiteRT/vendor/LiteRT-LM/c/engine.h`). If symbol names or signatures differ from what this file describes, trust the header — pre-1.0 LiteRT-LM still churns its C API.
 - **The ONNX Runtime C API:** read `Source/ThirdParty/InoOnnxRuntime/Public/onnxruntime_c_api.h`. Struct field additions across ORT versions are common; the `OrtApi` vtable is versioned so older code still works, but new features require bumping `ORT_API_VERSION` checks in our code.
 - **Plugin scaffold state:** open `Source/ThirdParty/InoOnnxRuntime/InoOnnxRuntime.Build.cs` and `Source/ThirdParty/InoLlamaCpp/InoLlamaCpp.Build.cs`. Both should be "no `PublicAdditionalLibraries`, no `PublicDelayLoadDLLs`, dynamic load only" — if either references implicit linking, a regression slipped through. The LiteRT-LM linking happens inside InoLiteRT's Build.cs, not here.
 - **Renamed ORT DLLs / .so still in place:** `Binaries/ThirdParty/InoOnnxRuntime/Win64/InoOnnxRuntime.dll` + `InoDml.dll` + `onnxruntime_providers_shared.dll`, and `.../Android/arm64-v8a/libInoOnnxRuntime.so`. Do NOT undo the rename — the "why" is in the "ONNX Runtime (the second runtime)" section above.
