@@ -90,7 +90,11 @@ public class InoAgents : ModuleRules
 				                     // Source/InoAgents/Public/LiteRtLm/ starting at Milestone D.1.
 				"Engine",            // UDataAsset, UGameInstanceSubsystem, GEngine, FWorldContext —
 				                     // used in ULiteRtLmModelConfig and UInoLiteRtLmSubsystem.
-				//"InoAgentsLibrary",  // LiteRT-LM C API via the staged header.
+				"InoLiteRT",         // LiteRT + LiteRT-LM C APIs.exposes:
+				                     //   #include "litert/c/litert_*.h"  (LiteRT TFLite runtime)
+				                     //   #include "litert/lm/engine.h"   (LiteRT-LM LLM runtime)
+				                     // and stages the runtime DLLs/.so for packaging. Replaces
+				                     // the previously embedded InoAgentsLibrary external module.
 				"InoOnnxRuntime",    // ONNX Runtime (Ort::Session / Env / Value) for generic
 				                     // ONNX inference. First consumer: Chatterbox Turbo TTS.
 				                     // Set up by Plugins/InoAgents/OnnxRuntime/scripts/setup-onnxruntime.ps1.

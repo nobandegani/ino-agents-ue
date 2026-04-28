@@ -22,6 +22,10 @@
 		{
 			"Name": "RuntimeAudioImporter",
 			"Enabled": true
+		},
+		{
+			"Name": "InoLiteRT",
+			"Enabled": true
 		}
 	],
 	"Modules": [
