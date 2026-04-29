@@ -47,12 +47,6 @@ public class InoAgents : ModuleRules
 				// and similar private headers without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 
-				// Subdirectory of Private/ that holds the Slate chat-panel
-				// implementation (private widgets, style, bridge .cpp).
-				// Added so sibling .cpps can #include "InoChatStyle.h"
-				// and #include "SInoMessageBubble.h" without relative paths.
-				Path.Combine(ModuleDirectory, "Private", "UI", "Slate"),
-
 				// Subdirectory of Private/ that holds the ElevenLabs HTTP
 				// backend implementation (subsystem, async actions, request
 				// builders). Added so sibling .cpps can include each other's
@@ -118,25 +112,8 @@ public class InoAgents : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				// Slate UI for the in-PIE chat panel (SInoChatPanel and friends).
-				// All Slate-using files live under Source/InoAgents/{Public,Private}/UI/Slate/.
-				"Slate",
-				"SlateCore",
-
-				// Required for EKeys::Enter / EKeys::Escape constants used by the
-				// chat input's Enter-to-send and ESC-to-dismiss handling. Forgetting
-				// this gives a confusing link error rather than a header error.
-				"InputCore",
 			}
 			);
-
-		// FEditorDelegates::PrePIEEnded is editor-only — used by the chat panel's
-		// Show/Hide console commands to tear the panel down BEFORE the GameViewport
-		// dies at PIE end. Wrapped in #if WITH_EDITOR at every call site.
-		if (Target.bBuildEditor)
-		{
-			PrivateDependencyModuleNames.Add("UnrealEd");
-		}
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
