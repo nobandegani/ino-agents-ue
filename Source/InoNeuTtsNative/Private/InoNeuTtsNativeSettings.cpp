@@ -14,26 +14,26 @@ UInoNeuTtsNativeSettings::UInoNeuTtsNativeSettings()
     // neuphonic/neutts-nano-q8-gguf is a follow-up milestone. Users who
     // want Q8 can add a second entry themselves in Project Settings.
     {
-        FInoNeuTtsNanoModelEntry Q4;
+        FInoNeuTtsNanoNativeModelEntry Q4;
         Q4.DisplayName              = TEXT("NeuTTS Nano Q4");
-        Q4.BackboneVariant          = EInoNeuTtsNanoBackboneVariant::Q4;
+        Q4.BackboneVariant          = EInoNeuTtsNanoNativeBackboneVariant::Q4;
         Q4.BackboneHuggingFaceRepoUrl = TEXT("https://huggingface.co/neuphonic/neutts-nano-q4-gguf");
         Q4.BackboneRevision         = TEXT("main");
         Q4.BackboneFileName         = TEXT("neutts-nano-Q4_0.gguf");
         Q4.CodecHuggingFaceRepoUrl  = TEXT("https://huggingface.co/neuphonic/neucodec-onnx-decoder");
         Q4.CodecRevision            = TEXT("main");
         Q4.CodecFileName            = TEXT("model.onnx");
-        NeuTtsNanoModels.Add(MoveTemp(Q4));
+        NeuTtsNanoNativeModels.Add(MoveTemp(Q4));
     }
 }
 
-const FInoNeuTtsNanoModelEntry* UInoNeuTtsNativeSettings::FindNeuTtsNanoModel(
-    EInoNeuTtsNanoBackboneVariant Variant) const
+const FInoNeuTtsNanoNativeModelEntry* UInoNeuTtsNativeSettings::FindNeuTtsNanoNativeModel(
+    EInoNeuTtsNanoNativeBackboneVariant Variant) const
 {
     // First match wins — same linear-scan / first-match-wins policy
     // as Chatterbox. NeuTTS Nano's variant count is tiny (Q4 only in
     // v1, Q8 as a future addition).
-    for (const FInoNeuTtsNanoModelEntry& Entry : NeuTtsNanoModels)
+    for (const FInoNeuTtsNanoNativeModelEntry& Entry : NeuTtsNanoNativeModels)
     {
         if (Entry.BackboneVariant == Variant)
         {

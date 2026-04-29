@@ -1,23 +1,23 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 // ============================================================================
-// Ino.NeuTtsNano.SynthTest (Milestone 5 verification)
+// Ino.NeuTtsNanoNative.SynthTest (Milestone 5 verification)
 // ============================================================================
 //
 // Full end-to-end smoke for the NeuTTS Nano subsystem. Usable from the
 // Output Log under PIE:
 //
-//     Ino.NeuTtsNano.SynthTest                # uses the default phoneme string
-//     Ino.NeuTtsNano.SynthTest hɛloʊ wɝːld    # custom pre-phonemized IPA
+//     Ino.NeuTtsNanoNative.SynthTest                # uses the default phoneme string
+//     Ino.NeuTtsNanoNative.SynthTest hɛloʊ wɝːld    # custom pre-phonemized IPA
 //
 // Flow:
-//   1. Locate UInoNeuTtsNanoSubsystem (requires PIE — GameInstanceSubsystems
+//   1. Locate UInoNeuTtsNanoNativeSubsystem (requires PIE — GameInstanceSubsystems
 //      only exist once a game instance is up).
 //   2. If IsModelLoaded()==false, call LoadModelAsync to stand up the
 //      runtime (download if needed, ~1-3 min cold, ~1.7 s warm).
 //   3. On load success, call SynthesizeAsync with the phonemes from args
 //      (or the baked-in default "Hello my name is Andy").
-//   4. On synth success, write Saved/InoNeuTtsNanoTest.wav via
+//   4. On synth success, write Saved/InoNeuTtsNanoNativeTest.wav via
 //      UInoAudioFunctionLibrary::SaveInt16PcmAsWav and log:
 //        - wall-clock time for the full synth call
 //        - PCM size in samples / bytes / seconds of audio
@@ -27,12 +27,12 @@
 // down cleanly via RemoveFromRoot — no leaked UObjects if synth errors.
 // ============================================================================
 
-#include "InoNeuTtsNanoSynthTest.h"
+#include "InoNeuTtsNanoNativeSynthTest.h"
 
 #include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
 #include "InoSmokeTestCommon.h"
-#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.h"
 
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
@@ -54,7 +54,7 @@ namespace
         TEXT("hɛloʊ maɪ neɪm ɪz ændi. ɪts naɪs tə miːt juː.");
 }
 
-void UInoNeuTtsNanoSynthTestObserver::HandleLoaded(
+void UInoNeuTtsNanoNativeSynthTestObserver::HandleLoaded(
     bool bSuccess, FString ErrorMessage)
 {
     const double Elapsed = FPlatformTime::Seconds() - LoadStartTime;
@@ -74,7 +74,7 @@ void UInoNeuTtsNanoSynthTestObserver::HandleLoaded(
     KickOffSynthesis();
 }
 
-void UInoNeuTtsNanoSynthTestObserver::KickOffSynthesis()
+void UInoNeuTtsNanoNativeSynthTestObserver::KickOffSynthesis()
 {
     if (!IsValid(Subsystem))
     {
@@ -86,8 +86,8 @@ void UInoNeuTtsNanoSynthTestObserver::KickOffSynthesis()
 
     SynthStartTime = FPlatformTime::Seconds();
 
-    FOnInoNeuTtsNanoSynthesisComplete SynthDelegate;
-    SynthDelegate.BindDynamic(this, &UInoNeuTtsNanoSynthTestObserver::HandleSynthComplete);
+    FOnInoNeuTtsNanoNativeSynthesisComplete SynthDelegate;
+    SynthDelegate.BindDynamic(this, &UInoNeuTtsNanoNativeSynthTestObserver::HandleSynthComplete);
 
     UE_LOG(LogInoAgents, Log,
            TEXT("SynthTest: calling SynthesizeAsync "
@@ -101,7 +101,7 @@ void UInoNeuTtsNanoSynthTestObserver::KickOffSynthesis()
         SynthDelegate);
 }
 
-void UInoNeuTtsNanoSynthTestObserver::HandleSynthComplete(
+void UInoNeuTtsNanoNativeSynthTestObserver::HandleSynthComplete(
     bool bSuccess,
     const TArray<uint8>& PcmInt16LE,
     FString ErrorMessage)
@@ -159,23 +159,23 @@ void UInoNeuTtsNanoSynthTestObserver::HandleSynthComplete(
     Finish();
 }
 
-void UInoNeuTtsNanoSynthTestObserver::Finish()
+void UInoNeuTtsNanoNativeSynthTestObserver::Finish()
 {
     RemoveFromRoot();
 }
 
-static void RunNeuTtsNanoSynthTest(const TArray<FString>& Args)
+static void RunNeuTtsNanoNativeSynthTest(const TArray<FString>& Args)
 {
-    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
+    UInoNeuTtsNanoNativeSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoNativeSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("SynthTest: no UInoNeuTtsNanoSubsystem. Enter PIE first."));
+               TEXT("SynthTest: no UInoNeuTtsNanoNativeSubsystem. Enter PIE first."));
         return;
     }
 
     // Compose phonemes string from all trailing args (joined by spaces).
-    // This lets `Ino.NeuTtsNano.SynthTest h ɛ l oʊ` work even though UE
+    // This lets `Ino.NeuTtsNanoNative.SynthTest h ɛ l oʊ` work even though UE
     // splits on whitespace.
     FString Phonemes;
     if (Args.Num() > 0)
@@ -192,14 +192,14 @@ static void RunNeuTtsNanoSynthTest(const TArray<FString>& Args)
     // repeated runs overwrite rather than accumulating.
     const FString OutputPath = FPaths::Combine(
         FPaths::ProjectSavedDir(),
-        TEXT("InoNeuTtsNanoTest.wav"));
+        TEXT("InoNeuTtsNanoNativeTest.wav"));
 
-    auto* Observer = NewObject<UInoNeuTtsNanoSynthTestObserver>();
+    auto* Observer = NewObject<UInoNeuTtsNanoNativeSynthTestObserver>();
     Observer->StartTime  = FPlatformTime::Seconds();
     Observer->Subsystem  = Subsys;
     Observer->Phonemes   = Phonemes;
     Observer->OutputPath = OutputPath;
-    Observer->Options    = FInoNeuTtsNanoSynthesisOptions{};   // defaults
+    Observer->Options    = FInoNeuTtsNanoNativeSynthesisOptions{};   // defaults
     Observer->AddToRoot();
 
     // Two code paths based on current load state:
@@ -215,25 +215,25 @@ static void RunNeuTtsNanoSynthTest(const TArray<FString>& Args)
     {
         Observer->LoadStartTime = FPlatformTime::Seconds();
 
-        FOnInoNeuTtsNanoModelLoaded LoadDelegate;
+        FOnInoNeuTtsNanoNativeModelLoaded LoadDelegate;
         LoadDelegate.BindDynamic(
-            Observer, &UInoNeuTtsNanoSynthTestObserver::HandleLoaded);
+            Observer, &UInoNeuTtsNanoNativeSynthTestObserver::HandleLoaded);
 
-        FInoNeuTtsNanoModelConfig Config;
-        Config.Variant = EInoNeuTtsNanoBackboneVariant::Q4;
+        FInoNeuTtsNanoNativeModelConfig Config;
+        Config.Variant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
         UE_LOG(LogInoAgents, Log,
                TEXT("SynthTest: model not loaded — calling LoadModelAsync first "
                     "(cold cache = ~1-3 min, warm cache = ~1.7 s)."));
-        Subsys->LoadModelAsync(Config, FOnInoNeuTtsNanoDownloadProgress(), LoadDelegate);
+        Subsys->LoadModelAsync(Config, FOnInoNeuTtsNanoNativeDownloadProgress(), LoadDelegate);
     }
 }
 
-static FAutoConsoleCommand GNeuTtsNanoSynthTestCmd(
-    TEXT("Ino.NeuTtsNano.SynthTest"),
+static FAutoConsoleCommand GNeuTtsNanoNativeSynthTestCmd(
+    TEXT("Ino.NeuTtsNanoNative.SynthTest"),
     TEXT("Milestone 5 smoke test: loads the NeuTTS Nano Q4 variant if not "
          "already loaded, runs SynthesizeAsync with the caller's phonemes "
          "(or a baked-in default), saves the int16 PCM to "
-         "Saved/InoNeuTtsNanoTest.wav, and logs real-time factor. PIE required. "
+         "Saved/InoNeuTtsNanoNativeTest.wav, and logs real-time factor. PIE required. "
          "Args: pre-phonemized IPA text (joined by spaces)."),
-    FConsoleCommandWithArgsDelegate::CreateStatic(&RunNeuTtsNanoSynthTest));
+    FConsoleCommandWithArgsDelegate::CreateStatic(&RunNeuTtsNanoNativeSynthTest));

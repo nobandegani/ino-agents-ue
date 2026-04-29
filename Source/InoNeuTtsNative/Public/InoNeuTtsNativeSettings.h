@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"  // EInoNeuTtsNanoBackboneVariant + FInoNeuTtsNanoModelEntry
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"  // EInoNeuTtsNanoNativeBackboneVariant + FInoNeuTtsNanoNativeModelEntry
 
 #include "InoNeuTtsNativeSettings.generated.h"
 
@@ -35,13 +35,13 @@ public:
     //~ End UDeveloperSettings interface
 
     /** Available NeuTTS Nano variants and their download URLs.
-     *  UInoNeuTtsNanoSubsystem::LoadModelAsync matches its
-     *  FInoNeuTtsNanoModelConfig::Variant against this array to find
+     *  UInoNeuTtsNanoNativeSubsystem::LoadModelAsync matches its
+     *  FInoNeuTtsNanoNativeModelConfig::Variant against this array to find
      *  the backbone GGUF + codec ONNX URLs to pull missing files from.
      *  Each entry carries TWO HuggingFace repo URLs — one for the
      *  Qwen2-derived backbone and one for the NeuCodec ONNX decoder. */
     UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Nano|Models")
-    TArray<FInoNeuTtsNanoModelEntry> NeuTtsNanoModels;
+    TArray<FInoNeuTtsNanoNativeModelEntry> NeuTtsNanoNativeModels;
 
     // =============================================================
     // Accessors
@@ -50,8 +50,8 @@ public:
     static const UInoNeuTtsNativeSettings* Get() { return GetDefault<UInoNeuTtsNativeSettings>(); }
 
     /** Look up a NeuTTS Nano model entry by backbone variant. Returns
-     *  nullptr if no matching entry is configured — UInoNeuTtsNanoSubsystem
+     *  nullptr if no matching entry is configured — UInoNeuTtsNanoNativeSubsystem
      *  treats that as "no download URL for this variant" and fails
      *  LoadModelAsync with a clear error. */
-    const FInoNeuTtsNanoModelEntry* FindNeuTtsNanoModel(EInoNeuTtsNanoBackboneVariant Variant) const;
+    const FInoNeuTtsNanoNativeModelEntry* FindNeuTtsNanoNativeModel(EInoNeuTtsNanoNativeBackboneVariant Variant) const;
 };

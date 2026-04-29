@@ -5,14 +5,14 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"
 
-#include "InoNeuTtsNanoDownloadTest.generated.h"
+#include "InoNeuTtsNanoNativeDownloadTest.generated.h"
 
-class UInoNeuTtsNanoSubsystem;
+class UInoNeuTtsNanoNativeSubsystem;
 
 /**
- * One-shot observer for the Ino.NeuTtsNano.DownloadTest console
+ * One-shot observer for the Ino.NeuTtsNanoNative.DownloadTest console
  * command. Holds UFUNCTION callbacks that BindDynamic can target, plus
  * UPROPERTY-kept-alive references to the subsystem and config so they
  * aren't garbage-collected mid-download.
@@ -21,7 +21,7 @@ class UInoNeuTtsNanoSubsystem;
  * at terminal, file-stat verification after success.
  */
 UCLASS()
-class UInoNeuTtsNanoDownloadTestObserver : public UObject
+class UInoNeuTtsNanoNativeDownloadTestObserver : public UObject
 {
     GENERATED_BODY()
 
@@ -30,10 +30,10 @@ public:
     double LastProgressLogTime = 0.0;
 
     UPROPERTY()
-    TObjectPtr<UInoNeuTtsNanoSubsystem> Subsystem = nullptr;
+    TObjectPtr<UInoNeuTtsNanoNativeSubsystem> Subsystem = nullptr;
 
     UPROPERTY()
-    FInoNeuTtsNanoModelConfig Config;
+    FInoNeuTtsNanoNativeModelConfig Config;
 
     // Dynamic delegate handlers — FString by value per BindDynamic contract.
     UFUNCTION()

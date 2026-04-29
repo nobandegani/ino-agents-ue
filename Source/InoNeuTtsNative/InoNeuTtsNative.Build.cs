@@ -35,8 +35,8 @@ public class InoNeuTtsNative : ModuleRules
 			new string[] {
 				// Subdirectory of Private/ that holds the runner + worker
 				// + voice registry + prompt builder. .cpps include each
-				// other with bare names (e.g. #include "InoNeuTtsNanoRunner.h").
-				Path.Combine(ModuleDirectory, "Private", "NeuTtsNano"),
+				// other with bare names (e.g. #include "InoNeuTtsNanoNativeRunner.h").
+				Path.Combine(ModuleDirectory, "Private", "NeuTtsNanoNative"),
 
 				// Subdirectory of Private/ that holds the sub-module's own
 				// smoke tests.
@@ -49,7 +49,7 @@ public class InoNeuTtsNative : ModuleRules
 			{
 				"Core",
 				"CoreUObject",       // UCLASS / USTRUCT / UENUM macros — used in
-				                     // Public/ for UInoNeuTtsNanoSubsystem etc.
+				                     // Public/ for UInoNeuTtsNanoNativeSubsystem etc.
 				"Engine",            // UGameInstanceSubsystem.
 
 				"InoAgents",         // For the shared LogInoAgents category +

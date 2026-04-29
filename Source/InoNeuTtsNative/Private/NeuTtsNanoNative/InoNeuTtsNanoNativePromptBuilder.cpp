@@ -1,10 +1,10 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "InoNeuTtsNanoPromptBuilder.h"
+#include "InoNeuTtsNanoNativePromptBuilder.h"
 
 #include "InoAgentsLog.h"
 
-namespace InoNeuTtsNano
+namespace InoNeuTtsNanoNative
 {
 
 FString BuildPrompt(
@@ -13,7 +13,7 @@ FString BuildPrompt(
     const FString&       InputPhonemes)
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: PromptBuilder: BuildPrompt entry "
+           TEXT("NeuTtsNanoNative: PromptBuilder: BuildPrompt entry "
                 "(input_phonemes=%d chars, ref_phones=%d chars, ref_codes=%d)"),
            InputPhonemes.Len(), RefPhones.Len(), RefCodes.Num());
 
@@ -43,13 +43,13 @@ FString BuildPrompt(
         *CodesSection);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: PromptBuilder: BuildPrompt done (prompt=%d chars, codes_section=%d chars)"),
+           TEXT("NeuTtsNanoNative: PromptBuilder: BuildPrompt done (prompt=%d chars, codes_section=%d chars)"),
            Prompt.Len(), CodesSection.Len());
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: PromptBuilder: full prompt (first 400 chars): %s"),
+           TEXT("NeuTtsNanoNative: PromptBuilder: full prompt (first 400 chars): %s"),
            *Prompt.Left(400));
 
     return Prompt;
 }
 
-} // namespace InoNeuTtsNano
+} // namespace InoNeuTtsNanoNative

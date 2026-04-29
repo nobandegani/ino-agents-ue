@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"   // FInoNeuTtsNanoModelConfig
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"   // FInoNeuTtsNanoNativeModelConfig
 
 // Opaque forward-decls so this header doesn't pull in llama.h /
 // ggml-backend.h. The .cpp includes InoLlama.h (from the sibling
@@ -18,7 +18,7 @@ class FInoOnnxSession;
 /**
  * Per-load native-resource owner for NeuTTS Nano.
  *
- * Created by UInoNeuTtsNanoSubsystem's async load worker on a
+ * Created by UInoNeuTtsNanoNativeSubsystem's async load worker on a
  * ThreadPool thread after both model files are on disk. Owns:
  *
  *   - llama_model*   — the Qwen2-derived GGUF backbone. Freed in dtor
@@ -47,7 +47,7 @@ class FInoOnnxSession;
  *     call with no thread affinity, and FInoOnnxSession's dtor is
  *     likewise thread-safe.
  */
-class FInoNeuTtsNanoRunner
+class FInoNeuTtsNanoNativeRunner
 {
 public:
     /**
@@ -63,18 +63,18 @@ public:
      * @param Config            Variant + n_gpu_layers + n_ctx knobs
      * @param OutError          Set to a diagnostic on failure
      */
-    static TUniquePtr<FInoNeuTtsNanoRunner> Create(
+    static TUniquePtr<FInoNeuTtsNanoNativeRunner> Create(
         const FString& BackboneGgufPath,
         const FString& CodecOnnxPath,
-        const FInoNeuTtsNanoModelConfig& Config,
+        const FInoNeuTtsNanoNativeModelConfig& Config,
         FString& OutError);
 
-    ~FInoNeuTtsNanoRunner();
+    ~FInoNeuTtsNanoNativeRunner();
 
-    FInoNeuTtsNanoRunner(const FInoNeuTtsNanoRunner&) = delete;
-    FInoNeuTtsNanoRunner& operator=(const FInoNeuTtsNanoRunner&) = delete;
-    FInoNeuTtsNanoRunner(FInoNeuTtsNanoRunner&&) = delete;
-    FInoNeuTtsNanoRunner& operator=(FInoNeuTtsNanoRunner&&) = delete;
+    FInoNeuTtsNanoNativeRunner(const FInoNeuTtsNanoNativeRunner&) = delete;
+    FInoNeuTtsNanoNativeRunner& operator=(const FInoNeuTtsNanoNativeRunner&) = delete;
+    FInoNeuTtsNanoNativeRunner(FInoNeuTtsNanoNativeRunner&&) = delete;
+    FInoNeuTtsNanoNativeRunner& operator=(FInoNeuTtsNanoNativeRunner&&) = delete;
 
     // Accessors (raw borrows — owner semantics stay with this Runner).
     struct llama_model*   GetModel()   const { return Model; }
@@ -88,7 +88,7 @@ public:
     int32 GetStopTokenId() const { return StopTokenId; }
 
 private:
-    FInoNeuTtsNanoRunner() = default;
+    FInoNeuTtsNanoNativeRunner() = default;
 
     struct llama_model*   Model   = nullptr;
     struct llama_context* Context = nullptr;

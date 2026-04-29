@@ -1,4 +1,4 @@
-# NeuTtsNano/ — NeuTTS Nano integration for the InoAgents plugin
+# NeuTtsNanoNative/ — NeuTTS Nano integration for the InoAgents plugin
 
 This directory holds the **version-pinned defaults, offline helper
 scripts, and baked-in default voice** for the plugin's NeuTTS Nano
@@ -15,7 +15,7 @@ licensing / runtime model.
 
 ## Status — v1 shipping ✓
 
-Full pipeline verified end-to-end: `Ino.NeuTtsNano.SynthTest` loads the Q4
+Full pipeline verified end-to-end: `Ino.NeuTtsNanoNative.SynthTest` loads the Q4
 model in ~1.5 s and synthesises intelligible voice-cloned speech (Jo's
 reference voice, encoded from Neuphonic's `jo.wav` sample). Output is 24
 kHz mono int16 PCM LE bytes delivered via the `OnComplete` delegate,
@@ -38,12 +38,12 @@ directly consumable by RuntimeAudioImporter's `UStreamingSoundWave`.
 - **NeuCodec decoder:** ~70 ms per second of audio
 - **Short utterance (2.5 s audio output):** ~10 s wall-clock (0.25× real-time)
 
-The dominant cost is **prompt prefill** — linear in reference-voice length. Shorter reference WAVs (3-5 s) cut prefill significantly. Vulkan offload via `FInoNeuTtsNanoModelConfig::NumGpuLayers > 0` is available but untested; the llama.cpp Vulkan backend registers at module startup on hosts with a working driver.
+The dominant cost is **prompt prefill** — linear in reference-voice length. Shorter reference WAVs (3-5 s) cut prefill significantly. Vulkan offload via `FInoNeuTtsNanoNativeModelConfig::NumGpuLayers > 0` is available but untested; the llama.cpp Vulkan backend registers at module startup on hosts with a working driver.
 
 ## Directory layout
 
 ```
-NeuTtsNano/
+NeuTtsNanoNative/
 ├── Resources/
 │   └── default_voice.nvoice.json   ← the baked-in default voice
 │                                     (ref_text + pre-encoded int32 ref_codes)
@@ -60,7 +60,7 @@ NeuTtsNano/
 ## The default voice JSON
 
 `Resources/default_voice.nvoice.json` is read at subsystem init by
-`FInoNeuTtsNanoVoiceRegistry` and registered under the name `"Default"`.
+`FInoNeuTtsNanoNativeVoiceRegistry` and registered under the name `"Default"`.
 Schema:
 
 ```json
@@ -137,7 +137,7 @@ pip install neucodec librosa soundfile phonemizer
 $env:PHONEMIZER_ESPEAK_LIBRARY = "C:/Program Files/eSpeak NG/libespeak-ng.dll"
 $env:PHONEMIZER_ESPEAK_PATH    = "C:/Program Files/eSpeak NG/espeak-ng.exe"
 
-cd Plugins/InoAgents/NeuTtsNano
+cd Plugins/InoAgents/NeuTtsNanoNative
 python scripts/encode-default-voice.py `
     --input-wav <path-to-reference.wav> `
     --ref-text  "<verbatim transcript of the WAV>" `
@@ -179,7 +179,7 @@ is also fine.
 
 ## Pre-staging the model files (optional)
 
-On first `LoadModelAsync` call, `UInoNeuTtsNanoSubsystem` downloads two
+On first `LoadModelAsync` call, `UInoNeuTtsNanoNativeSubsystem` downloads two
 files from HuggingFace into UE's PersistentDownloadDir:
 
 - `neutts-nano-Q4_0.gguf` (195 MB — GGUF backbone)
@@ -189,7 +189,7 @@ That's ~1 GB and takes a couple of minutes on a typical connection.
 For dev iteration, run this script **once**:
 
 ```powershell
-cd Plugins/InoAgents/NeuTtsNano/scripts
+cd Plugins/InoAgents/NeuTtsNanoNative/scripts
 ./setup-neutts-nano.ps1
 ```
 
@@ -206,15 +206,15 @@ command-line args defaulting to the same HF repos; pass `-BackboneUrl`
 
 | Concern | Where it lives |
 |---|---|
-| Default voice JSON, offline encoder, dev pre-stage | here — `NeuTtsNano/` |
+| Default voice JSON, offline encoder, dev pre-stage | here — `NeuTtsNanoNative/` |
 | Settings UI (backbone URL, codec URL, revision) | `Source/InoAgents/Public/InoAgentsSettings.h` |
-| `FInoNeuTtsNanoModelEntry` USTRUCT + delegates | `Source/InoAgents/Public/NeuTtsNano/InoNeuTtsNanoTypes.h` |
-| Subsystem public API | `Source/InoAgents/Public/NeuTtsNano/InoNeuTtsNanoSubsystem.h` |
-| Subsystem impl (download + ThreadPool load + SynthesizeAsync) | `Source/InoAgents/Private/NeuTtsNano/InoNeuTtsNanoSubsystem.cpp` |
-| Runner (llama_model + llama_context + FInoOnnxSession owner) | `Source/InoAgents/Private/NeuTtsNano/InoNeuTtsNanoRunner.{h,cpp}` |
-| FRunnable worker + AR loop + full synthesis pipeline | `Source/InoAgents/Private/NeuTtsNano/InoNeuTtsNanoSynthesisWorker.{h,cpp}` |
-| Prompt builder + voice registry | `Source/InoAgents/Private/NeuTtsNano/InoNeuTtsNanoPromptBuilder.{h,cpp}` + `InoNeuTtsNanoVoiceRegistry.{h,cpp}` |
-| Smoke tests | `Source/InoAgents/Private/SmokeTests/InoNeuTtsNano*.{h,cpp}` |
+| `FInoNeuTtsNanoNativeModelEntry` USTRUCT + delegates | `Source/InoAgents/Public/NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h` |
+| Subsystem public API | `Source/InoAgents/Public/NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.h` |
+| Subsystem impl (download + ThreadPool load + SynthesizeAsync) | `Source/InoAgents/Private/NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.cpp` |
+| Runner (llama_model + llama_context + FInoOnnxSession owner) | `Source/InoAgents/Private/NeuTtsNanoNative/InoNeuTtsNanoNativeRunner.{h,cpp}` |
+| FRunnable worker + AR loop + full synthesis pipeline | `Source/InoAgents/Private/NeuTtsNanoNative/InoNeuTtsNanoNativeSynthesisWorker.{h,cpp}` |
+| Prompt builder + voice registry | `Source/InoAgents/Private/NeuTtsNanoNative/InoNeuTtsNanoNativePromptBuilder.{h,cpp}` + `InoNeuTtsNanoNativeVoiceRegistry.{h,cpp}` |
+| Smoke tests | `Source/InoAgents/Private/SmokeTests/InoNeuTtsNanoNative*.{h,cpp}` |
 
 The runtime subsystem is a **pure consumer** of our existing
 `InoLlamaCppModule` vtable (for the backbone) and `FInoOnnxSession`
@@ -223,15 +223,15 @@ The runtime subsystem is a **pure consumer** of our existing
 ## Using it from Blueprint / C++
 
 ```cpp
-UInoNeuTtsNanoSubsystem* Subsys =
-    GetGameInstance()->GetSubsystem<UInoNeuTtsNanoSubsystem>();
+UInoNeuTtsNanoNativeSubsystem* Subsys =
+    GetGameInstance()->GetSubsystem<UInoNeuTtsNanoNativeSubsystem>();
 
-FInoNeuTtsNanoModelConfig Cfg;
-Cfg.Variant         = EInoNeuTtsNanoBackboneVariant::Q4;
+FInoNeuTtsNanoNativeModelConfig Cfg;
+Cfg.Variant         = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 Cfg.NumGpuLayers    = 0;       // 99 = all on Vulkan (Win64 only, untested)
 Cfg.NumContextTokens = 2048;
 
-FOnInoNeuTtsNanoModelLoaded OnLoaded;
+FOnInoNeuTtsNanoNativeModelLoaded OnLoaded;
 OnLoaded.BindDynamic(this, &MyClass::HandleModelLoaded);
 Subsys->LoadModelAsync(Cfg, OnLoaded);
 ```
@@ -239,10 +239,10 @@ Subsys->LoadModelAsync(Cfg, OnLoaded);
 Then after OnLoaded fires with bSuccess=true:
 
 ```cpp
-FInoNeuTtsNanoSynthesisOptions Opts;    // defaults match NeuTTS upstream
+FInoNeuTtsNanoNativeSynthesisOptions Opts;    // defaults match NeuTTS upstream
                                          // (TopK=50, Temperature=1.0, Seed=-1)
 
-FOnInoNeuTtsNanoSynthesisComplete OnDone;
+FOnInoNeuTtsNanoNativeSynthesisComplete OnDone;
 OnDone.BindDynamic(this, &MyClass::HandlePcm);
 
 Subsys->SynthesizeAsync(

@@ -18,9 +18,9 @@
  * plugins, so by the time this module's StartupModule runs both
  * runtimes are callable.
  *
- * Public surface lives under Source/InoNeuTtsNative/Public/NeuTtsNano/:
- *   - InoNeuTtsNanoTypes.h        variant enum, voice/options/result USTRUCTs
- *   - InoNeuTtsNanoSubsystem.h    UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
+ * Public surface lives under Source/InoNeuTtsNative/Public/NeuTtsNanoNative/:
+ *   - InoNeuTtsNanoNativeTypes.h        variant enum, voice/options/result USTRUCTs
+ *   - InoNeuTtsNanoNativeSubsystem.h    UInoNeuTtsNanoNativeSubsystem (UGameInstanceSubsystem)
  *
  * Settings live in Public/InoNeuTtsNativeSettings.h (a separate
  * UDeveloperSettings page from the InoAgents one).

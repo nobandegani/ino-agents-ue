@@ -236,8 +236,8 @@ Plugins/InoAgents/
 │   │           ├── InoChatterboxTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
 │   │           ├── InoChatterboxSubsystemTest.{h,cpp}    ← Ino.Chatterbox.SubsystemSynthTest
 │   │           ├── InoChatterboxStreamSynthTest.{h,cpp}  ← Ino.Chatterbox.StreamSynthTest
-│   │           ├── InoNeuTtsNanoDownloadTest.{h,cpp}     ← Ino.NeuTtsNano.DownloadTest
-│   │           ├── InoNeuTtsNanoSynthTest.{h,cpp}        ← Ino.NeuTtsNano.SynthTest
+│   │           ├── InoNeuTtsNanoNativeDownloadTest.{h,cpp}     ← Ino.NeuTtsNanoNative.DownloadTest
+│   │           ├── InoNeuTtsNanoNativeSynthTest.{h,cpp}        ← Ino.NeuTtsNanoNative.SynthTest
 │   │           └── InoElevenLabsDialogueStreamTest.{h,cpp} ← Ino.ElevenLabsDialogueStreamTest
 │   └── (no Source/ThirdParty — sibling plugins own all third-party staging)
 └── (no Binaries/ThirdParty — sibling plugins own all runtime binaries)
@@ -281,7 +281,7 @@ Private helpers under `Source/InoAgents/Private/Onnx/`:
 
 **Design principles worth preserving:**
 
-- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTtsSubsystem`, `UInoNeuTtsNanoSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
+- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTtsSubsystem`, `UInoNeuTtsNanoNativeSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
 - Sessions are thread-safe for `Run()` per ORT guarantees; FInoOnnxTensors are move-only to avoid surprise-cost deep clones on the LLM streaming hot path.
 - Exception-free — uses the C API (`onnxruntime_c_api.h`), not the C++ API (`onnxruntime_cxx_api.h` throws `Ort::Exception`). UE modules default `bEnableExceptions=false`; keeping the whole stack exception-free avoids per-module opt-ins.
 - Positional I/O ordering for `Run()`. A named-map variant would cost a hash lookup per inference which matters on AR token loops — callers who need names can wrap trivially at their own layer.
@@ -531,18 +531,18 @@ This is the **first and currently only consumer of the llama.cpp runtime** in th
 NeuTTS Nano is a **pure consumer** of the InoLlama-supplied `FLlamaCppApi` vtable (accessed via `InoAgents::LlamaCpp::GetApi()` from `InoLlama.h`) + `FInoOnnxSession`. No dedicated third-party module of its own; no llama.cpp patches.
 
 ```
-UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
-├── FInoNeuTtsNanoVoiceRegistry      (loads default_voice.nvoice.json at Initialize)
-├── FInoNeuTtsNanoRunner              (owns llama_model + llama_context + FInoOnnxSession)
+UInoNeuTtsNanoNativeSubsystem (UGameInstanceSubsystem)
+├── FInoNeuTtsNanoNativeVoiceRegistry      (loads default_voice.nvoice.json at Initialize)
+├── FInoNeuTtsNanoNativeRunner              (owns llama_model + llama_context + FInoOnnxSession)
 │      ↳ consumes InoAgents::LlamaCpp::GetApi() vtable exclusively
 │      ↳ consumes FInoOnnxSession::Create for the NeuCodec decoder
-└── FInoNeuTtsNanoSynthesisWorker     (FRunnable + Spsc queue + cancel atomic)
+└── FInoNeuTtsNanoNativeSynthesisWorker     (FRunnable + Spsc queue + cancel atomic)
        ↳ hosts the AR loop + full synthesis pipeline
 ```
 
 ### The pipeline (per-synth, in the worker thread)
 
-1. **Build prompt** via `InoNeuTtsNano::BuildPrompt` — composes the exact NeuTTS chat template:
+1. **Build prompt** via `InoNeuTtsNanoNative::BuildPrompt` — composes the exact NeuTTS chat template:
    ```
    user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phonemes}<|TEXT_PROMPT_END|>
    assistant:<|SPEECH_GENERATION_START|><|speech_N1|><|speech_N2|>...
@@ -555,26 +555,26 @@ UInoNeuTtsNanoSubsystem (UGameInstanceSubsystem)
 7. **Regex-parse** `<\|speech_(\d+)\|>` from the generated text → `TArray<int32>` speech-token ids. UE's `FRegexMatcher` is adequate — runs once post-generation, not on the hot path.
 8. **Decoder** — `FInoOnnxTensor::CreateFromBufferCopy<int32>({1, 1, N})` → `Session->Run` → float32 `[1, 1, N_samples]` waveform.
 9. **PCM conversion** — float32 clamp [-1, 1] → int16 LE via round-half-away-from-zero → `TArray<uint8>` (matches Chatterbox's output contract for RuntimeAudioImporter compatibility).
-10. **Dispatch** via `AsyncTask(ENamedThreads::GameThread)` so the dynamic `FOnInoNeuTtsNanoSynthesisComplete` delegate fires on the right thread.
+10. **Dispatch** via `AsyncTask(ENamedThreads::GameThread)` so the dynamic `FOnInoNeuTtsNanoNativeSynthesisComplete` delegate fires on the right thread.
 
 ### v1 scope (locked; extension points documented)
 
 | Aspect | v1 Value | Follow-up |
 |---|---|---|
 | Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `FInoOnnxSession` layer (MIT-licensed, ~5 MB). |
-| Default voice | **Baked in** — `NeuTtsNano/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoVoiceRegistry` + scanning a user-provided voices dir. |
+| Default voice | **Baked in** — `NeuTtsNanoNative/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoNativeVoiceRegistry` + scanning a user-provided voices dir. |
 | Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
 | Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxDecoderWorker`. |
 
 ### Why phonemization is offline-only
 
-NeuTTS Nano was trained on IPA phonemes (from espeak-ng), not raw English. The standard runtime phonemizer is espeak-ng itself, which is **GPLv3** — a copyleft dependency that poisons commercial games that ship NeuTTS. Our approach: phonemize **once at voice-encoding time** via the offline Python script (`NeuTtsNano/scripts/encode-default-voice.py`), store the phonemes in the JSON alongside ref_codes, and keep the runtime plugin phonemizer-free. v2 will add an ONNX G2P (MIT) for plain-text input.
+NeuTTS Nano was trained on IPA phonemes (from espeak-ng), not raw English. The standard runtime phonemizer is espeak-ng itself, which is **GPLv3** — a copyleft dependency that poisons commercial games that ship NeuTTS. Our approach: phonemize **once at voice-encoding time** via the offline Python script (`NeuTtsNanoNative/scripts/encode-default-voice.py`), store the phonemes in the JSON alongside ref_codes, and keep the runtime plugin phonemizer-free. v2 will add an ONNX G2P (MIT) for plain-text input.
 
 ### File layout
 
 ```
 Plugins/InoAgents/
-├── NeuTtsNano/                                        ← setup + baked-in voice
+├── NeuTtsNanoNative/                                        ← setup + baked-in voice
 │   ├── Resources/
 │   │   └── default_voice.nvoice.json                  ← 653 FSQ codes + IPA phones
 │   │                                                    (generated once from jo.wav)
@@ -586,31 +586,31 @@ Plugins/InoAgents/
 │   └── README.md
 │
 └── Source/InoAgents/
-    ├── Public/NeuTtsNano/
-    │   ├── InoNeuTtsNanoTypes.h                       ← variant enum, entry/config/
+    ├── Public/NeuTtsNanoNative/
+    │   ├── InoNeuTtsNanoNativeTypes.h                       ← variant enum, entry/config/
     │   │                                                options USTRUCTs, delegates
-    │   └── InoNeuTtsNanoSubsystem.h                   ← UInoNeuTtsNanoSubsystem
-    └── Private/NeuTtsNano/
-        ├── InoNeuTtsNanoSubsystem.cpp                 ← Blueprint glue, download flow
+    │   └── InoNeuTtsNanoNativeSubsystem.h                   ← UInoNeuTtsNanoNativeSubsystem
+    └── Private/NeuTtsNanoNative/
+        ├── InoNeuTtsNanoNativeSubsystem.cpp                 ← Blueprint glue, download flow
         │                                                (Chatterbox-style BuildDownload
         │                                                Queue + HEAD probe + sequential
         │                                                GET + .partial + atomic rename),
         │                                                ThreadPool load dispatch
-        ├── InoNeuTtsNanoTypes.cpp                     ← ResolveModelDir helper
-        ├── InoNeuTtsNanoRunner.{h,cpp}                ← llama_model + llama_context +
+        ├── InoNeuTtsNanoNativeTypes.cpp                     ← ResolveModelDir helper
+        ├── InoNeuTtsNanoNativeRunner.{h,cpp}                ← llama_model + llama_context +
         │                                                 FInoOnnxSession owner (move-only)
-        ├── InoNeuTtsNanoPromptBuilder.{h,cpp}         ← BuildPrompt: exact chat-template
-        ├── InoNeuTtsNanoSynthesisWorker.{h,cpp}       ← FRunnable + Spsc queue + full
+        ├── InoNeuTtsNanoNativePromptBuilder.{h,cpp}         ← BuildPrompt: exact chat-template
+        ├── InoNeuTtsNanoNativeSynthesisWorker.{h,cpp}       ← FRunnable + Spsc queue + full
         │                                                 AR-loop synthesis pipeline
-        └── InoNeuTtsNanoVoiceRegistry.{h,cpp}         ← .nvoice.json parser
+        └── InoNeuTtsNanoNativeVoiceRegistry.{h,cpp}         ← .nvoice.json parser
 ```
 
 ### Smoke tests
 
 | Command | What it proves | PIE? |
 |---|---|---|
-| `Ino.NeuTtsNano.DownloadTest` | `UInoNeuTtsNanoSubsystem::LoadModelAsync` downloads (cold) or finds (warm) both model files, dispatches the ThreadPool loader, fires `OnLoaded(true)`, file-stat verifies both files on disk. | yes |
-| `Ino.NeuTtsNano.SynthTest [phonemes...]` | Full pipeline: auto-load → `SynthesizeAsync` with the args as pre-phonemized IPA (or a baked-in default) → writes `Saved/InoNeuTtsNanoTest.wav` → logs real-time factor + sample count. | yes |
+| `Ino.NeuTtsNanoNative.DownloadTest` | `UInoNeuTtsNanoNativeSubsystem::LoadModelAsync` downloads (cold) or finds (warm) both model files, dispatches the ThreadPool loader, fires `OnLoaded(true)`, file-stat verifies both files on disk. | yes |
+| `Ino.NeuTtsNanoNative.SynthTest [phonemes...]` | Full pipeline: auto-load → `SynthesizeAsync` with the args as pre-phonemized IPA (or a baked-in default) → writes `Saved/InoNeuTtsNanoNativeTest.wav` → logs real-time factor + sample count. | yes |
 
 ### Observed numbers on CPU (alderlake variant, warm load)
 
@@ -954,7 +954,7 @@ Hugging Face, Apache 2.0, public (no gating, no auth):
 
 ## How to update the runtime versions
 
-Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTtsNano.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
+Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTtsNanoNative.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
 
 ## What to verify before trusting this file
 

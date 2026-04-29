@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#include "InoNeuTtsNanoTypes.generated.h"
+#include "InoNeuTtsNanoNativeTypes.generated.h"
 
 /**
  * NeuTTS Nano backbone variant.
@@ -16,7 +16,7 @@
  * quality ground with much better on-disk footprint.
  */
 UENUM(BlueprintType)
-enum class EInoNeuTtsNanoBackboneVariant : uint8
+enum class EInoNeuTtsNanoNativeBackboneVariant : uint8
 {
     Q4 UMETA(DisplayName = "Q4 (195 MB)"),
     Q8 UMETA(DisplayName = "Q8 (deferred)"),
@@ -31,11 +31,11 @@ enum class EInoNeuTtsNanoBackboneVariant : uint8
  * comes from neuphonic/neucodec-onnx-decoder (shared across variants).
  * So each entry carries two URL+revision+filename sets.
  *
- * UInoAgentsSettings::NeuTtsNanoModels holds one of these per variant.
+ * UInoAgentsSettings::NeuTtsNanoNativeModels holds one of these per variant.
  * Seeded in the UInoAgentsSettings constructor with the Q4 defaults.
  */
 USTRUCT(BlueprintType)
-struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelEntry
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoNativeModelEntry
 {
     GENERATED_BODY()
 
@@ -43,7 +43,7 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelEntry
     FString DisplayName = TEXT("NeuTTS Nano Q4");
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano")
-    EInoNeuTtsNanoBackboneVariant BackboneVariant = EInoNeuTtsNanoBackboneVariant::Q4;
+    EInoNeuTtsNanoNativeBackboneVariant BackboneVariant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
     // --- Backbone (Qwen2-derived GGUF) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano|Backbone")
@@ -98,7 +98,7 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelEntry
  * benchmarking shows the defaults leave performance on the table.
  */
 USTRUCT(BlueprintType)
-struct INONEUTTSNATIVE_API FInoNeuTtsNanoPerformanceOptions
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoNativePerformanceOptions
 {
     GENERATED_BODY()
 
@@ -269,13 +269,13 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoPerformanceOptions
  * else has sensible defaults.
  */
 USTRUCT(BlueprintType)
-struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelConfig
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoNativeModelConfig
 {
     GENERATED_BODY()
 
-    /** Which variant to load. Matched against UInoAgentsSettings::FindNeuTtsNanoModel. */
+    /** Which variant to load. Matched against UInoAgentsSettings::FindNeuTtsNanoNativeModel. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano")
-    EInoNeuTtsNanoBackboneVariant Variant = EInoNeuTtsNanoBackboneVariant::Q4;
+    EInoNeuTtsNanoNativeBackboneVariant Variant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
     /** n_gpu_layers for the llama.cpp backbone. 0 = pure CPU, 99 = all
      *  layers on GPU (Vulkan on Win64), partial values = hybrid. Ignored
@@ -293,10 +293,10 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelConfig
 
     /** Advanced perf tuning — thread counts, accelerator selection,
      *  diagnostics. All fields have safe defaults; most callers leave
-     *  this default-constructed. See FInoNeuTtsNanoPerformanceOptions
+     *  this default-constructed. See FInoNeuTtsNanoNativePerformanceOptions
      *  for the per-field discussion. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|NeuTTS Nano")
-    FInoNeuTtsNanoPerformanceOptions Performance;
+    FInoNeuTtsNanoNativePerformanceOptions Performance;
 };
 
 /**
@@ -305,7 +305,7 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelConfig
  * max_tokens=max_context).
  */
 USTRUCT(BlueprintType)
-struct INONEUTTSNATIVE_API FInoNeuTtsNanoSynthesisOptions
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoNativeSynthesisOptions
 {
     GENERATED_BODY()
 
@@ -379,14 +379,14 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoSynthesisOptions
 /**
  * One file in the NeuTTS Nano download queue — internal detail of the
  * auto-download flow. Declared at namespace scope (not nested in
- * UInoNeuTtsNanoSubsystem) so the build-queue helper in the subsystem's
+ * UInoNeuTtsNanoNativeSubsystem) so the build-queue helper in the subsystem's
  * .cpp anonymous namespace can reference it without friending.
  *
  * Mirrors FInoChatterboxDownloadFile — same semantics, different
  * containing subsystem. The duplication is flagged tech debt; a future
  * refactor will factor both into Private/InoHttpDownload/FDownloadFile.
  */
-struct FInoNeuTtsNanoDownloadFile
+struct FInoNeuTtsNanoNativeDownloadFile
 {
     FString Url;
     FString TargetPath;       // absolute path on disk (not the .partial)
@@ -404,7 +404,7 @@ struct FInoNeuTtsNanoDownloadFile
  * Fired exactly once when LoadModelAsync resolves. bSuccess=true on
  * happy path; otherwise bSuccess=false with ErrorMessage set.
  */
-DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoNeuTtsNanoModelLoaded,
+DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoNeuTtsNanoNativeModelLoaded,
     bool,    bSuccess,
     FString, ErrorMessage);
 
@@ -419,10 +419,10 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnInoNeuTtsNanoModelLoaded,
  * 24 kHz by the NeuCodec decoder and cannot be configured at runtime
  * (it would require retraining the codec). If you need the rate value
  * (e.g. to construct a USoundWaveProcedural or a WAV header), call
- * UInoNeuTtsNanoSubsystem::GetOutputSampleRate() — a BlueprintPure
+ * UInoNeuTtsNanoNativeSubsystem::GetOutputSampleRate() — a BlueprintPure
  * getter that returns 24000.
  */
-DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoSynthesisComplete,
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoNativeSynthesisComplete,
     bool,                   bSuccess,
     const TArray<uint8>&,   PcmInt16LE,
     FString,                ErrorMessage);
@@ -450,14 +450,14 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoSynthesisComplete,
  *                   broadcast is NOT fired — the error flows through
  *                   OnLoaded(false, err).
  */
-DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoDownloadProgress,
+DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoNativeDownloadProgress,
     float, Percent,
     int64, BytesReceived,
     int64, TotalBytes,
     bool,  bCompleted);
 
 /**
- * Fired by UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync for each
+ * Fired by UInoNeuTtsNanoNativeSubsystem::SynthesizeStreamAsync for each
  * incremental audio delta produced during synthesis.
  *
  *   AudioChunk       — NEW bytes since the last chunk, 24 kHz mono int16
@@ -479,10 +479,10 @@ DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoDownloadProgress,
  * Blueprint reflection layer cannot pass a TArray by value through a
  * dynamic delegate — the BindDynamic path fails with "No value will be
  * returned by reference. Parameter 'AudioChunk'". Same reason
- * FOnInoNeuTtsNanoSynthesisComplete above uses a const ref; matches
+ * FOnInoNeuTtsNanoNativeSynthesisComplete above uses a const ref; matches
  * Chatterbox's FOnInoChatterboxAudioChunk shape exactly.
  */
-DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoAudioChunk,
+DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoNativeAudioChunk,
     const TArray<uint8>&, AudioChunk,
     bool,                 bIsFinal,
     int32,                NumSpeechIds);
@@ -495,15 +495,15 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoAudioChunk,
  * Returns "q4" / "q8" (or similar short tokens) for a variant. Used to
  * build variant-scoped paths and directory names.
  */
-INONEUTTSNATIVE_API FString NeuTtsNanoVariantToString(EInoNeuTtsNanoBackboneVariant Variant);
+INONEUTTSNATIVE_API FString NeuTtsNanoNativeVariantToString(EInoNeuTtsNanoNativeBackboneVariant Variant);
 
 /**
  * Absolute directory where model files for a given variant live:
- *   {PersistentDownloadDir}/InoAgents/Models/NeuTtsNano/{variant}/
+ *   {PersistentDownloadDir}/InoAgents/Models/NeuTtsNanoNative/{variant}/
  *
- * Matches the layout UInoNeuTtsNanoSubsystem uses as both its download
+ * Matches the layout UInoNeuTtsNanoNativeSubsystem uses as both its download
  * target and its model-load source. The shape mirrors Chatterbox's
  * per-variant directory pattern — makes a future multi-variant install
  * (Q4 + Q8 coexisting) trivial.
  */
-INONEUTTSNATIVE_API FString NeuTtsNanoResolveModelDir(EInoNeuTtsNanoBackboneVariant Variant);
+INONEUTTSNATIVE_API FString NeuTtsNanoNativeResolveModelDir(EInoNeuTtsNanoNativeBackboneVariant Variant);

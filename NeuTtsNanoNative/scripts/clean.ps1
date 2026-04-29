@@ -17,7 +17,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $NeuTtsDir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 
 $LocalAppData = [Environment]::GetFolderPath("LocalApplicationData")
-$StageDir = Join-Path $LocalAppData "$ProjectName\Saved\PersistentDownloadDir\InoAgents\Models\NeuTtsNano"
+$StageDir = Join-Path $LocalAppData "$ProjectName\Saved\PersistentDownloadDir\InoAgents\Models\NeuTtsNanoNative"
 $CacheDir = Join-Path $NeuTtsDir ".cache"
 
 $Targets = @($StageDir, $CacheDir)

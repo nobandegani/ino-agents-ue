@@ -1,13 +1,13 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 // ============================================================================
-// Ino.NeuTtsNano.DownloadTest (Milestone 2 verification)
+// Ino.NeuTtsNanoNative.DownloadTest (Milestone 2 verification)
 // ============================================================================
 //
-// Exercises UInoNeuTtsNanoSubsystem::LoadModelAsync's download half:
+// Exercises UInoNeuTtsNanoNativeSubsystem::LoadModelAsync's download half:
 //
 //   1. Grab the subsystem from the current game instance (requires PIE).
-//   2. Build a FInoNeuTtsNanoModelConfig pointing at the Q4 variant.
+//   2. Build a FInoNeuTtsNanoNativeModelConfig pointing at the Q4 variant.
 //   3. Bind OnDownloadProgress + the one-shot OnLoaded delegate.
 //   4. Call LoadModelAsync:
 //        - On warm cache: the loader dispatches immediately with
@@ -22,22 +22,22 @@
 // fire on the game thread and log progressively.
 //
 // Invoke (PIE required):
-//     Ino.NeuTtsNano.DownloadTest
+//     Ino.NeuTtsNanoNative.DownloadTest
 // ============================================================================
 
-#include "InoNeuTtsNanoDownloadTest.h"
+#include "InoNeuTtsNanoNativeDownloadTest.h"
 
 #include "InoAgentsLog.h"
 #include "InoNeuTtsNativeSettings.h"
 #include "InoSmokeTestCommon.h"
-#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.h"
 
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
 
-void UInoNeuTtsNanoDownloadTestObserver::HandleProgress(
+void UInoNeuTtsNanoNativeDownloadTestObserver::HandleProgress(
     float Percent, int64 BytesReceived, int64 TotalBytes, bool bCompleted)
 {
     // Always log the terminal completion tick regardless of throttle —
@@ -47,7 +47,7 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleProgress(
     {
         const double MbReceived = (double)BytesReceived / (1024.0 * 1024.0);
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano.DownloadTest: DOWNLOAD COMPLETE (%.1f MB, 100%%); ")
+               TEXT("NeuTtsNanoNative.DownloadTest: DOWNLOAD COMPLETE (%.1f MB, 100%%); ")
                TEXT("ThreadPool load dispatching next."),
                MbReceived);
         return;
@@ -67,18 +67,18 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleProgress(
     {
         const double MbTotal = (double)TotalBytes / (1024.0 * 1024.0);
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano.DownloadTest: %.1f%% (%.1f / %.1f MB)"),
+               TEXT("NeuTtsNanoNative.DownloadTest: %.1f%% (%.1f / %.1f MB)"),
                Percent, MbReceived, MbTotal);
     }
     else
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano.DownloadTest: %.1f%% (%.1f MB; total unknown)"),
+               TEXT("NeuTtsNanoNative.DownloadTest: %.1f%% (%.1f MB; total unknown)"),
                Percent, MbReceived);
     }
 }
 
-void UInoNeuTtsNanoDownloadTestObserver::HandleLoaded(
+void UInoNeuTtsNanoNativeDownloadTestObserver::HandleLoaded(
     bool bSuccess, FString ErrorMessage)
 {
     const double Elapsed = FPlatformTime::Seconds() - StartTime;
@@ -86,23 +86,23 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleLoaded(
     if (!bSuccess)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("NeuTtsNano.DownloadTest: FAILED after %.2f s: %s"),
+               TEXT("NeuTtsNanoNative.DownloadTest: FAILED after %.2f s: %s"),
                Elapsed, *ErrorMessage);
         RemoveFromRoot();
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano.DownloadTest: load-callback fired in %.2f s, bSuccess=true"),
+           TEXT("NeuTtsNanoNative.DownloadTest: load-callback fired in %.2f s, bSuccess=true"),
            Elapsed);
 
     // File-stat check: both expected files should exist on disk now.
     const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
-    const FInoNeuTtsNanoModelEntry* Entry =
-        Settings ? Settings->FindNeuTtsNanoModel(Config.Variant) : nullptr;
+    const FInoNeuTtsNanoNativeModelEntry* Entry =
+        Settings ? Settings->FindNeuTtsNanoNativeModel(Config.Variant) : nullptr;
     if (Entry != nullptr)
     {
-        const FString Dir = NeuTtsNanoResolveModelDir(Config.Variant);
+        const FString Dir = NeuTtsNanoNativeResolveModelDir(Config.Variant);
         IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
 
         auto StatLog = [&](const TCHAR* Label, const FString& FileName)
@@ -134,25 +134,25 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleLoaded(
     {
         const bool bLoaded = Subsystem->IsModelLoaded();
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano.DownloadTest: IsModelLoaded()=%s after callback"),
+               TEXT("NeuTtsNanoNative.DownloadTest: IsModelLoaded()=%s after callback"),
                bLoaded ? TEXT("true") : TEXT("false"));
         Subsystem->UnloadModel();
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano.DownloadTest: UnloadModel() called; IsModelLoaded()=%s"),
+               TEXT("NeuTtsNanoNative.DownloadTest: UnloadModel() called; IsModelLoaded()=%s"),
                Subsystem->IsModelLoaded() ? TEXT("true") : TEXT("false"));
     }
 
-    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNano.DownloadTest: DONE"));
+    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNanoNative.DownloadTest: DONE"));
     RemoveFromRoot();
 }
 
-static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
+static void RunNeuTtsNanoNativeDownloadTest(const TArray<FString>& /*Args*/)
 {
-    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
+    UInoNeuTtsNanoNativeSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoNativeSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("NeuTtsNano.DownloadTest: no UInoNeuTtsNanoSubsystem found. "
+               TEXT("NeuTtsNanoNative.DownloadTest: no UInoNeuTtsNanoNativeSubsystem found. "
                     "Enter PIE first — GameInstanceSubsystems are created by "
                     "the active game instance."));
         return;
@@ -161,15 +161,15 @@ static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
     if (Subsys->IsModelLoaded())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano.DownloadTest: a model is already loaded. "
+               TEXT("NeuTtsNanoNative.DownloadTest: a model is already loaded. "
                     "Unloading first so the test runs from a clean state."));
         Subsys->UnloadModel();
     }
 
-    FInoNeuTtsNanoModelConfig Config;
-    Config.Variant = EInoNeuTtsNanoBackboneVariant::Q4;
+    FInoNeuTtsNanoNativeModelConfig Config;
+    Config.Variant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
-    auto* Observer = NewObject<UInoNeuTtsNanoDownloadTestObserver>();
+    auto* Observer = NewObject<UInoNeuTtsNanoNativeDownloadTestObserver>();
     Observer->StartTime           = FPlatformTime::Seconds();
     Observer->LastProgressLogTime = 0.0;   // force first progress log
     Observer->Subsystem           = Subsys;
@@ -180,28 +180,28 @@ static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
     // only, OnLoaded fires once at terminal completion. Single-cast
     // dynamic so we bind one observer handler for each and hand them
     // to LoadModelAsync as parameters.
-    FOnInoNeuTtsNanoDownloadProgress ProgressDelegate;
+    FOnInoNeuTtsNanoNativeDownloadProgress ProgressDelegate;
     ProgressDelegate.BindDynamic(
-        Observer, &UInoNeuTtsNanoDownloadTestObserver::HandleProgress);
+        Observer, &UInoNeuTtsNanoNativeDownloadTestObserver::HandleProgress);
 
-    FOnInoNeuTtsNanoModelLoaded LoadedDelegate;
+    FOnInoNeuTtsNanoNativeModelLoaded LoadedDelegate;
     LoadedDelegate.BindDynamic(
-        Observer, &UInoNeuTtsNanoDownloadTestObserver::HandleLoaded);
+        Observer, &UInoNeuTtsNanoNativeDownloadTestObserver::HandleLoaded);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano.DownloadTest: calling LoadModelAsync (non-blocking). "
+           TEXT("NeuTtsNanoNative.DownloadTest: calling LoadModelAsync (non-blocking). "
                 "On cold cache this downloads ~978 MB and may take 1-3 minutes."));
 
     Subsys->LoadModelAsync(Config, ProgressDelegate, LoadedDelegate);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano.DownloadTest: LoadModelAsync returned synchronously."));
+           TEXT("NeuTtsNanoNative.DownloadTest: LoadModelAsync returned synchronously."));
 }
 
-static FAutoConsoleCommand GNeuTtsNanoDownloadTestCmd(
-    TEXT("Ino.NeuTtsNano.DownloadTest"),
-    TEXT("Milestone 2 smoke test: kicks off UInoNeuTtsNanoSubsystem::LoadModelAsync "
+static FAutoConsoleCommand GNeuTtsNanoNativeDownloadTestCmd(
+    TEXT("Ino.NeuTtsNanoNative.DownloadTest"),
+    TEXT("Milestone 2 smoke test: kicks off UInoNeuTtsNanoNativeSubsystem::LoadModelAsync "
          "for the Q4 variant, logs OnDownloadProgress at ~1 Hz, verifies both "
-         "files land on disk in PersistentDownloadDir/InoAgents/Models/NeuTtsNano/q4/ "
+         "files land on disk in PersistentDownloadDir/InoAgents/Models/NeuTtsNanoNative/q4/ "
          "after the loaded delegate fires. PIE required."),
-    FConsoleCommandWithArgsDelegate::CreateStatic(&RunNeuTtsNanoDownloadTest));
+    FConsoleCommandWithArgsDelegate::CreateStatic(&RunNeuTtsNanoNativeDownloadTest));

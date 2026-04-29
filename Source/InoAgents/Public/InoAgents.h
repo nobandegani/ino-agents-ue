@@ -20,7 +20,7 @@
  * lifecycle is owned upstream. Subsystem-level work (model loading,
  * conversation lifecycle) happens lazily off the game thread in
  * UInoLiteRtLmSubsystem::LoadModelAsync, UInoChatterboxTtsSubsystem,
- * UInoNeuTtsNanoSubsystem, etc.
+ * UInoNeuTtsNanoNativeSubsystem, etc.
  *
  * See Plugins/InoAgents/README.md for the plugin's user-facing API and
  * Plugins/InoAgents/CLAUDE.md for the architecture + build notes.

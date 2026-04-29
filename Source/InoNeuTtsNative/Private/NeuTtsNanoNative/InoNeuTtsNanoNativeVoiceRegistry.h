@@ -8,7 +8,7 @@
  * One loaded voice entry — reference-text transcript (original +
  * phonemized) + the pre-encoded FSQ speech-token sequence produced
  * by NeuCodec's PyTorch encoder (see
- * Plugins/InoAgents/NeuTtsNano/scripts/encode-default-voice.py).
+ * Plugins/InoAgents/NeuTtsNanoNative/scripts/encode-default-voice.py).
  *
  * Schema (matches what encode-default-voice.py emits):
  *   - DisplayName: human-readable name for UI / logs
@@ -28,7 +28,7 @@
  * worker (Milestone 4) null-checks IsPlaceholder() and fails with a
  * clear "regenerate via encode-default-voice.py" error.
  */
-struct FInoNeuTtsNanoVoice
+struct FInoNeuTtsNanoNativeVoice
 {
     FString       DisplayName;
     FString       RefText;
@@ -40,24 +40,24 @@ struct FInoNeuTtsNanoVoice
 
 /**
  * In-memory map of registered voices. Populated at subsystem
- * Initialize time from Plugins/InoAgents/NeuTtsNano/Resources/
+ * Initialize time from Plugins/InoAgents/NeuTtsNanoNative/Resources/
  * default_voice.nvoice.json; future milestones may extend to scan
  * a user-provided voices/ directory.
  *
  * Lookup is by FName (matches the Blueprint-facing voice name like
  * "Default"). The registry is non-copyable, move-only — owned as a
- * TUniquePtr member of UInoNeuTtsNanoSubsystem.
+ * TUniquePtr member of UInoNeuTtsNanoNativeSubsystem.
  */
-class FInoNeuTtsNanoVoiceRegistry
+class FInoNeuTtsNanoNativeVoiceRegistry
 {
 public:
-    FInoNeuTtsNanoVoiceRegistry() = default;
-    ~FInoNeuTtsNanoVoiceRegistry() = default;
+    FInoNeuTtsNanoNativeVoiceRegistry() = default;
+    ~FInoNeuTtsNanoNativeVoiceRegistry() = default;
 
-    FInoNeuTtsNanoVoiceRegistry(const FInoNeuTtsNanoVoiceRegistry&) = delete;
-    FInoNeuTtsNanoVoiceRegistry& operator=(const FInoNeuTtsNanoVoiceRegistry&) = delete;
-    FInoNeuTtsNanoVoiceRegistry(FInoNeuTtsNanoVoiceRegistry&&) = default;
-    FInoNeuTtsNanoVoiceRegistry& operator=(FInoNeuTtsNanoVoiceRegistry&&) = default;
+    FInoNeuTtsNanoNativeVoiceRegistry(const FInoNeuTtsNanoNativeVoiceRegistry&) = delete;
+    FInoNeuTtsNanoNativeVoiceRegistry& operator=(const FInoNeuTtsNanoNativeVoiceRegistry&) = delete;
+    FInoNeuTtsNanoNativeVoiceRegistry(FInoNeuTtsNanoNativeVoiceRegistry&&) = default;
+    FInoNeuTtsNanoNativeVoiceRegistry& operator=(FInoNeuTtsNanoNativeVoiceRegistry&&) = default;
 
     /**
      * Load a .nvoice.json file and register the resulting voice under
@@ -79,17 +79,17 @@ public:
     bool RegisterFromJsonFile(const FString& JsonPath, FName RegisterAs, FString& OutError);
 
     /** Register a voice in-place. Replaces any existing entry at Name. */
-    void Register(FName Name, FInoNeuTtsNanoVoice Voice);
+    void Register(FName Name, FInoNeuTtsNanoNativeVoice Voice);
 
     /** Lookup. Returns nullptr if Name isn't registered. */
-    const FInoNeuTtsNanoVoice* Find(FName Name) const;
+    const FInoNeuTtsNanoNativeVoice* Find(FName Name) const;
 
-    /** Used by UInoNeuTtsNanoSubsystem::GetAvailableVoiceNames to
+    /** Used by UInoNeuTtsNanoNativeSubsystem::GetAvailableVoiceNames to
      *  surface the voice list to Blueprint. */
     TArray<FName> GetAvailableVoiceNames() const;
 
     int32 Num() const { return Voices.Num(); }
 
 private:
-    TMap<FName, FInoNeuTtsNanoVoice> Voices;
+    TMap<FName, FInoNeuTtsNanoNativeVoice> Voices;
 };

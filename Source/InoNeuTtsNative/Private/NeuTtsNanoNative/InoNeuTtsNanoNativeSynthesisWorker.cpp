@@ -1,13 +1,13 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "InoNeuTtsNanoSynthesisWorker.h"
+#include "InoNeuTtsNanoNativeSynthesisWorker.h"
 
 #include "InoAgentsLog.h"
 #include "InoLlama.h"                       // FLlamaCppApi + GetApi (pulls llama.h, from sibling InoLlama plugin)
-#include "InoNeuTtsNanoPromptBuilder.h"
-#include "InoNeuTtsNanoRunner.h"
-#include "InoNeuTtsNanoVoiceRegistry.h"
-#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
+#include "InoNeuTtsNanoNativePromptBuilder.h"
+#include "InoNeuTtsNanoNativeRunner.h"
+#include "InoNeuTtsNanoNativeVoiceRegistry.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.h"
 #include "Onnx/InoOnnxSession.h"
 #include "Onnx/InoOnnxTensor.h"
 #include "Onnx/InoOnnxTypes.h"
@@ -131,10 +131,10 @@ namespace
 // Lifecycle
 // ============================================================================
 
-FInoNeuTtsNanoSynthesisWorker::FInoNeuTtsNanoSynthesisWorker(
-    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> InOwner,
-    FInoNeuTtsNanoRunner* InRunner,
-    const FInoNeuTtsNanoVoiceRegistry* InVoiceRegistry)
+FInoNeuTtsNanoNativeSynthesisWorker::FInoNeuTtsNanoNativeSynthesisWorker(
+    TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> InOwner,
+    FInoNeuTtsNanoNativeRunner* InRunner,
+    const FInoNeuTtsNanoNativeVoiceRegistry* InVoiceRegistry)
     : WeakSubsystem(InOwner)
     , Runner(InRunner)
     , VoiceRegistry(InVoiceRegistry)
@@ -142,20 +142,20 @@ FInoNeuTtsNanoSynthesisWorker::FInoNeuTtsNanoSynthesisWorker(
     QueueEvent = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
     Thread = FRunnableThread::Create(
         this,
-        TEXT("InoNeuTtsNanoSynthesisWorker"),
+        TEXT("InoNeuTtsNanoNativeSynthesisWorker"),
         /*StackSize=*/ 0,
         TPri_Normal);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Worker: ctor — thread created (runner=%s, voices=%s)"),
+           TEXT("NeuTtsNanoNative: Worker: ctor — thread created (runner=%s, voices=%s)"),
            Runner ? TEXT("alive") : TEXT("null"),
            VoiceRegistry ? TEXT("alive") : TEXT("null"));
 }
 
-FInoNeuTtsNanoSynthesisWorker::~FInoNeuTtsNanoSynthesisWorker()
+FInoNeuTtsNanoNativeSynthesisWorker::~FInoNeuTtsNanoNativeSynthesisWorker()
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Worker: dtor — signalling stop + joining thread"));
+           TEXT("NeuTtsNanoNative: Worker: dtor — signalling stop + joining thread"));
 
     bStopRequested  = true;
     bStreamCancelled = true;
@@ -183,20 +183,20 @@ FInoNeuTtsNanoSynthesisWorker::~FInoNeuTtsNanoSynthesisWorker()
     // won't fire them either (we're mid-teardown). Chatterbox's
     // SynthesisWorker takes the same approach.
     int32 Drained = 0;
-    FInoNeuTtsNanoPendingSynth Discard;
+    FInoNeuTtsNanoNativePendingSynth Discard;
     while (Queue.Dequeue(Discard)) { ++Drained; }
     if (Drained > 0)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano: Worker: dtor drained %d undelivered pending synth(es)"),
+               TEXT("NeuTtsNanoNative: Worker: dtor drained %d undelivered pending synth(es)"),
                Drained);
     }
 }
 
-void FInoNeuTtsNanoSynthesisWorker::Stop()
+void FInoNeuTtsNanoNativeSynthesisWorker::Stop()
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Worker: Stop observed — flagging bStopRequested + bStreamCancelled"));
+           TEXT("NeuTtsNanoNative: Worker: Stop observed — flagging bStopRequested + bStreamCancelled"));
     bStopRequested  = true;
     bStreamCancelled = true;
     if (QueueEvent != nullptr)
@@ -205,19 +205,19 @@ void FInoNeuTtsNanoSynthesisWorker::Stop()
     }
 }
 
-void FInoNeuTtsNanoSynthesisWorker::SignalCancel()
+void FInoNeuTtsNanoNativeSynthesisWorker::SignalCancel()
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Worker: SignalCancel observed — bStreamCancelled=true"));
+           TEXT("NeuTtsNanoNative: Worker: SignalCancel observed — bStreamCancelled=true"));
     bStreamCancelled = true;
     // Don't trigger QueueEvent — cancellation means "abandon the
     // in-flight synthesis", not "wake from idle".
 }
 
-void FInoNeuTtsNanoSynthesisWorker::Enqueue(FInoNeuTtsNanoPendingSynth Pending)
+void FInoNeuTtsNanoNativeSynthesisWorker::Enqueue(FInoNeuTtsNanoNativePendingSynth Pending)
 {
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: Worker: Enqueue (voice=%s, phonemes=%d chars, streaming=%s)"),
+           TEXT("NeuTtsNanoNative: Worker: Enqueue (voice=%s, phonemes=%d chars, streaming=%s)"),
            *Pending.VoiceName.ToString(),
            Pending.PhonemesText.Len(),
            Pending.bStreamingEnabled ? TEXT("yes") : TEXT("no"));
@@ -232,17 +232,17 @@ void FInoNeuTtsNanoSynthesisWorker::Enqueue(FInoNeuTtsNanoPendingSynth Pending)
 // Run loop
 // ============================================================================
 
-uint32 FInoNeuTtsNanoSynthesisWorker::Run()
+uint32 FInoNeuTtsNanoNativeSynthesisWorker::Run()
 {
-    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNano: Worker: Run entry — thread loop starting"));
+    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNanoNative: Worker: Run entry — thread loop starting"));
 
     while (!bStopRequested.Load())
     {
-        FInoNeuTtsNanoPendingSynth Pending;
+        FInoNeuTtsNanoNativePendingSynth Pending;
         if (Queue.Dequeue(Pending))
         {
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("NeuTtsNano: Worker: dequeued synth (voice=%s, streaming=%s) — dispatching to ProcessSynth"),
+                   TEXT("NeuTtsNanoNative: Worker: dequeued synth (voice=%s, streaming=%s) — dispatching to ProcessSynth"),
                    *Pending.VoiceName.ToString(),
                    Pending.bStreamingEnabled ? TEXT("yes") : TEXT("no"));
 
@@ -256,14 +256,14 @@ uint32 FInoNeuTtsNanoSynthesisWorker::Run()
 
         // Queue empty — block until Enqueue or Stop triggers.
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Worker: queue empty — blocking on QueueEvent"));
+               TEXT("NeuTtsNanoNative: Worker: queue empty — blocking on QueueEvent"));
         if (QueueEvent != nullptr)
         {
             QueueEvent->Wait();
         }
     }
 
-    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNano: Worker: Run exit — thread loop terminating"));
+    UE_LOG(LogInoAgents, Log, TEXT("NeuTtsNanoNative: Worker: Run exit — thread loop terminating"));
     return 0;
 }
 
@@ -271,8 +271,8 @@ uint32 FInoNeuTtsNanoSynthesisWorker::Run()
 // Game-thread dispatch
 // ============================================================================
 
-void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
-    FOnInoNeuTtsNanoSynthesisComplete OnComplete,
+void FInoNeuTtsNanoNativeSynthesisWorker::DispatchCompleteOnGameThread(
+    FOnInoNeuTtsNanoNativeSynthesisComplete OnComplete,
     bool             bSuccess,
     TArray<uint8>    PcmInt16LE,
     FString          ErrorMessage)
@@ -282,7 +282,7 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
     // weak-ptr so we can verify the subsystem is still alive (though
     // strictly we only use it for the IsValid() sanity check — the
     // delegate itself is a standalone FScriptDelegate handle).
-    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSelf = WeakSubsystem;
+    TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> WeakSelf = WeakSubsystem;
     AsyncTask(ENamedThreads::GameThread,
         [WeakSelf, OnComplete, bSuccess,
          Pcm = MoveTemp(PcmInt16LE),
@@ -299,8 +299,8 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchCompleteOnGameThread(
         });
 }
 
-void FInoNeuTtsNanoSynthesisWorker::DispatchAudioChunkOnGameThread(
-    FOnInoNeuTtsNanoAudioChunk OnAudioChunk,
+void FInoNeuTtsNanoNativeSynthesisWorker::DispatchAudioChunkOnGameThread(
+    FOnInoNeuTtsNanoNativeAudioChunk OnAudioChunk,
     TArray<uint8>              AudioChunk,
     bool                       bIsFinal,
     int32                      NumSpeechIds)
@@ -308,7 +308,7 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchAudioChunkOnGameThread(
     // Same pattern as DispatchCompleteOnGameThread — dynamic delegate
     // invocation must happen on the game thread. Move the audio bytes
     // into the lambda so we don't pay for a copy.
-    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSelf = WeakSubsystem;
+    TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> WeakSelf = WeakSubsystem;
     AsyncTask(ENamedThreads::GameThread,
         [WeakSelf, OnAudioChunk,
          Chunk = MoveTemp(AudioChunk),
@@ -346,10 +346,10 @@ void FInoNeuTtsNanoSynthesisWorker::DispatchAudioChunkOnGameThread(
 // kOutputSampleRate (24000) is used only for diagnostic real-time-factor
 // calculations and for fractional-seconds log lines — it's NOT passed
 // through to the delegate (the caller reads it from
-// UInoNeuTtsNanoSubsystem::GetOutputSampleRate()).
+// UInoNeuTtsNanoNativeSubsystem::GetOutputSampleRate()).
 // ============================================================================
 
-void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pending)
+void FInoNeuTtsNanoNativeSynthesisWorker::ProcessSynth(FInoNeuTtsNanoNativePendingSynth& Pending)
 {
     constexpr int32 kOutputSampleRate = 24000;
     const double StartTime = FPlatformTime::Seconds();
@@ -357,19 +357,19 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     auto FailWith = [&](const TCHAR* Fmt) -> void
     {
         const FString Err(Fmt);
-        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano: Runner: synth FAILED: %s"), *Err);
+        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNanoNative: Runner: synth FAILED: %s"), *Err);
         DispatchCompleteOnGameThread(
             Pending.OnComplete, false, TArray<uint8>(), Err);
     };
     auto FailWithFmt = [&](const FString& Err) -> void
     {
-        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano: Runner: synth FAILED: %s"), *Err);
+        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNanoNative: Runner: synth FAILED: %s"), *Err);
         DispatchCompleteOnGameThread(
             Pending.OnComplete, false, TArray<uint8>(), Err);
     };
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: ProcessSynth begin (voice=%s, phonemes=%d chars, "
+           TEXT("NeuTtsNanoNative: Runner: ProcessSynth begin (voice=%s, phonemes=%d chars, "
                 "max_new=%d, streaming=%s, chunk_tokens=%d)"),
            *Pending.VoiceName.ToString(),
            Pending.PhonemesText.Len(),
@@ -401,7 +401,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     const FName VoiceName = Pending.VoiceName.IsNone()
         ? FName(TEXT("Default"))
         : Pending.VoiceName;
-    const FInoNeuTtsNanoVoice* Voice = VoiceRegistry->Find(VoiceName);
+    const FInoNeuTtsNanoNativeVoice* Voice = VoiceRegistry->Find(VoiceName);
     if (Voice == nullptr)
     {
         FailWithFmt(FString::Printf(
@@ -411,8 +411,8 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     if (Voice->IsPlaceholder())
     {
         FailWith(TEXT("Default voice is a placeholder (empty ref_codes). "
-                      "Regenerate via Plugins/InoAgents/NeuTtsNano/scripts/"
-                      "encode-default-voice.py — see NeuTtsNano/README.md."));
+                      "Regenerate via Plugins/InoAgents/NeuTtsNanoNative/scripts/"
+                      "encode-default-voice.py — see NeuTtsNanoNative/README.md."));
         return;
     }
     if (Voice->RefPhones.IsEmpty())
@@ -435,12 +435,12 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     // 1. Build prompt + tokenize
     // -----------------------------------------------------------------
     const double PromptBuildStart = FPlatformTime::Seconds();
-    const FString Prompt = InoNeuTtsNano::BuildPrompt(
+    const FString Prompt = InoNeuTtsNanoNative::BuildPrompt(
         Voice->RefPhones, Voice->RefCodes, Pending.PhonemesText);
     const double PromptBuildMs = (FPlatformTime::Seconds() - PromptBuildStart) * 1000.0;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: prompt built in %.1f ms (%d chars, ref_phones=%d chars, "
+           TEXT("NeuTtsNanoNative: Runner: prompt built in %.1f ms (%d chars, ref_phones=%d chars, "
                 "ref_codes=%d, input_phonemes=%d chars)"),
            PromptBuildMs, Prompt.Len(),
            Voice->RefPhones.Len(), Voice->RefCodes.Num(), Pending.PhonemesText.Len());
@@ -461,7 +461,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         return;
     }
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: tokenize done (%d tokens, %.1f ms)"),
+           TEXT("NeuTtsNanoNative: Runner: tokenize done (%d tokens, %.1f ms)"),
            PromptTokens.Num(), TokenizeMs);
 
     const uint32_t NCtx = Api->llama_n_ctx(Runner->GetContext());
@@ -470,13 +470,13 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         FailWithFmt(FString::Printf(
             TEXT("Prompt has %d tokens, exceeds context size %u. "
                  "Reduce ref_codes (shorter reference voice) or raise "
-                 "FInoNeuTtsNanoModelConfig::NumContextTokens."),
+                 "FInoNeuTtsNanoNativeModelConfig::NumContextTokens."),
             PromptTokens.Num(), NCtx));
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: synth config — prompt=%d tokens, voice=\"%s\", "
+           TEXT("NeuTtsNanoNative: Runner: synth config — prompt=%d tokens, voice=\"%s\", "
                 "ref_codes=%d, target_phonemes=%d chars, max_new=%d, n_ctx=%u"),
            PromptTokens.Num(),
            *Voice->DisplayName,
@@ -511,7 +511,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
             return;
         }
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Runner: llama_decode prefill complete (ctx=%d tokens, %.1f ms)"),
+               TEXT("NeuTtsNanoNative: Runner: llama_decode prefill complete (ctx=%d tokens, %.1f ms)"),
                PromptTokens.Num(), PrefillMs);
     }
 
@@ -579,7 +579,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     // FullPcm accumulates every delta chunk dispatched via
     // OnAudioChunk. OnComplete's final PcmInt16LE is this exact buffer
     // — see the "OnComplete's full_bytes == concat of emitted chunks"
-    // contract documented on FOnInoNeuTtsNanoAudioChunk. This avoids a
+    // contract documented on FOnInoNeuTtsNanoNativeAudioChunk. This avoids a
     // subtle correctness trap: re-running the decoder on growing
     // prefixes produces slightly different samples near each
     // intermediate chunk boundary (convolutional-codec right-edge
@@ -697,7 +697,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     const double DecodeStart = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: AR loop begin (hard_cap=%d, stop_token_id=%d)"),
+           TEXT("NeuTtsNanoNative: Runner: AR loop begin (hard_cap=%d, stop_token_id=%d)"),
            HardCap, StopTokenId);
 
     while (TokensGenerated < HardCap)
@@ -707,7 +707,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
             Sampler, Runner->GetContext(), /*idx=*/-1);
 
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Runner: AR iter %d/%d — sampled token=%d"),
+               TEXT("NeuTtsNanoNative: Runner: AR iter %d/%d — sampled token=%d"),
                TokensGenerated + 1, HardCap, (int32)Next);
 
         // Stop conditions BEFORE accepting (matches upstream convention;
@@ -716,7 +716,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         {
             bHitStop = true;
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("NeuTtsNano: Runner: AR loop hit <|SPEECH_GENERATION_END|> at iter %d"),
+                   TEXT("NeuTtsNanoNative: Runner: AR loop hit <|SPEECH_GENERATION_END|> at iter %d"),
                    TokensGenerated + 1);
             break;
         }
@@ -724,7 +724,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         {
             bHitStop = true;
             UE_LOG(LogInoAgents, Verbose,
-                   TEXT("NeuTtsNano: Runner: AR loop hit vocab EOG at iter %d (token=%d)"),
+                   TEXT("NeuTtsNanoNative: Runner: AR loop hit vocab EOG at iter %d (token=%d)"),
                    TokensGenerated + 1, (int32)Next);
             break;
         }
@@ -737,7 +737,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
             if (bStreamCancelled.Load())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("NeuTtsNano: Runner: AR loop cancelled at iter %d "
+                       TEXT("NeuTtsNanoNative: Runner: AR loop cancelled at iter %d "
                             "(bStreamCancelled observed)"),
                        TokensGenerated + 1);
                 FreeSampler();
@@ -784,7 +784,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
                 && SpeechIds.Num() - LastDecodedCodeCount >= ChunkSize)
             {
                 UE_LOG(LogInoAgents, Verbose,
-                       TEXT("NeuTtsNano: Runner: stream decode trigger at AR iter %d "
+                       TEXT("NeuTtsNanoNative: Runner: stream decode trigger at AR iter %d "
                             "(codes=%d, last_decoded=%d, threshold=%d)"),
                        TokensGenerated, SpeechIds.Num(), LastDecodedCodeCount, ChunkSize);
                 if (!RunIntermediateDecodeEmit(/*bIsFinal=*/ false))
@@ -816,7 +816,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
 
     const double DecodeMs = (FPlatformTime::Seconds() - DecodeStart) * 1000.0;
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: AR loop complete (%d tokens generated, hit_stop=%s, %.0f ms, %.1f tok/s)"),
+           TEXT("NeuTtsNanoNative: Runner: AR loop complete (%d tokens generated, hit_stop=%s, %.0f ms, %.1f tok/s)"),
            TokensGenerated,
            bHitStop ? TEXT("yes") : TEXT("no"),
            DecodeMs,
@@ -869,7 +869,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         const double AudioSec = (double)NumSamples / (double)kOutputSampleRate;
         const double RtFactor = AudioSec * 1000.0 / FMath::Max(1.0, TotalMs);
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Runner: stream DONE — %d chunks, %lld samples "
+               TEXT("NeuTtsNanoNative: Runner: stream DONE — %d chunks, %lld samples "
                     "(%.2f s audio @ %d Hz), %d bytes total, %.0f ms wall (%.2fx real-time)"),
                ChunksDispatched, NumSamples, AudioSec, kOutputSampleRate,
                FullPcm.Num(), TotalMs, RtFactor);
@@ -898,7 +898,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
         return;
     }
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: parsed %d speech-token ids from LM output"),
+           TEXT("NeuTtsNanoNative: Runner: parsed %d speech-token ids from LM output"),
            SpeechIds.Num());
 
     // -----------------------------------------------------------------
@@ -963,7 +963,7 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: codec decode done (%lld samples, %.0f ms)"),
+           TEXT("NeuTtsNanoNative: Runner: codec decode done (%lld samples, %.0f ms)"),
            NumSamples, DecoderMs);
 
     const double PcmStart = FPlatformTime::Seconds();
@@ -971,14 +971,14 @@ void FInoNeuTtsNanoSynthesisWorker::ProcessSynth(FInoNeuTtsNanoPendingSynth& Pen
     const double PcmMs = (FPlatformTime::Seconds() - PcmStart) * 1000.0;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: PCM convert done (%d bytes int16 LE, %.1f ms)"),
+           TEXT("NeuTtsNanoNative: Runner: PCM convert done (%d bytes int16 LE, %.1f ms)"),
            Pcm.Num(), PcmMs);
 
     const double TotalMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
     const double AudioSec = (double)NumSamples / (double)kOutputSampleRate;
     const double RtFactor = AudioSec * 1000.0 / FMath::Max(1.0, TotalMs);
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Runner: synth DONE — %lld samples (%.2f s audio @ %d Hz), "
+           TEXT("NeuTtsNanoNative: Runner: synth DONE — %lld samples (%.2f s audio @ %d Hz), "
                 "decoder %.0f ms, total %.0f ms (%.2fx real-time)"),
            NumSamples, AudioSec, kOutputSampleRate,
            DecoderMs, TotalMs, RtFactor);

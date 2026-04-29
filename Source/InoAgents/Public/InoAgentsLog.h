@@ -27,7 +27,7 @@
  *
  *   Chatterbox    Chatterbox Turbo TTS (4-ORT-session pipeline)
  *   LiteRtLm      Google LiteRT-LM (Gemma 4 inference)
- *   NeuTtsNano    Neuphonic NeuTTS Nano (llama.cpp + NeuCodec)
+ *   NeuTtsNanoNative    Neuphonic NeuTTS Nano (llama.cpp + NeuCodec)
  *   Onnx          ONNX Runtime infrastructure (generic, not per-model)
  *   LlamaCpp      llama.cpp runtime infrastructure
  *   ElevenLabs    ElevenLabs cloud TTS
@@ -45,13 +45,13 @@
  *                 worker, decoder worker)
  *   Session       An individual ORT / LiteRT session (per-component load,
  *                 single Run call diagnostics)
- *   Runner        Inner-loop pipeline driver (Chatterbox runner, NeuTtsNano
+ *   Runner        Inner-loop pipeline driver (Chatterbox runner, NeuTtsNanoNative
  *                 runner)
  *   Decoder       Chatterbox's parallel conditional_decoder thread
  *   Tokenizer     BPE / SentencePiece tokenizer state + stats
  *   Tool          LiteRtLm tool-call registry + dispatch
  *   Download      HTTP download flow (HEAD probe, chunk GET, rename)
- *   Voice         NeuTtsNano voice registry + encoding
+ *   Voice         NeuTtsNanoNative voice registry + encoding
  *   Settings      UDeveloperSettings load / reload
  *   AsyncAction   UBlueprintAsyncActionBase subclasses
  *   SmokeTest     Test commands under Private/SmokeTests/ — prefixed by
@@ -92,7 +92,7 @@
  *   LogInoAgents: Chatterbox: Runner: AR loop iter 42/1024 (hit STOP: no, elapsed=3621 ms)
  *   LogInoAgents: LiteRtLm: Conversation: stream round 2 started (4 tool results pending)
  *   LogInoAgents: Onnx: Session: registered provider DirectML (adapter=0)
- *   LogInoAgents: NeuTtsNano: Runner: llama_decode prefill complete (ctx=653 tokens, 318.4 ms)
+ *   LogInoAgents: NeuTtsNanoNative: Runner: llama_decode prefill complete (ctx=653 tokens, 318.4 ms)
  *
  * When adding new logs: err on the side of more, not less. Runtime
  * cost of UE_LOG is nil when the verbosity is below the active level.

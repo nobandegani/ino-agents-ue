@@ -5,14 +5,14 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"
 
-#include "InoNeuTtsNanoSynthTest.generated.h"
+#include "InoNeuTtsNanoNativeSynthTest.generated.h"
 
-class UInoNeuTtsNanoSubsystem;
+class UInoNeuTtsNanoNativeSubsystem;
 
 /**
- * Observer for the Ino.NeuTtsNano.SynthTest console command.
+ * Observer for the Ino.NeuTtsNanoNative.SynthTest console command.
  *
  * Orchestrates a full load + synth + WAV-save flow across two
  * asynchronous hops:
@@ -27,7 +27,7 @@ class UInoNeuTtsNanoSubsystem;
  * the observer + its captured state alive across the two hops.
  */
 UCLASS()
-class UInoNeuTtsNanoSynthTestObserver : public UObject
+class UInoNeuTtsNanoNativeSynthTestObserver : public UObject
 {
     GENERATED_BODY()
 
@@ -37,7 +37,7 @@ public:
     double SynthStartTime = 0.0;
 
     UPROPERTY()
-    TObjectPtr<UInoNeuTtsNanoSubsystem> Subsystem = nullptr;
+    TObjectPtr<UInoNeuTtsNanoNativeSubsystem> Subsystem = nullptr;
 
     /** Phonemes supplied by the caller (or the baked-in default). */
     FString Phonemes;
@@ -47,7 +47,7 @@ public:
 
     /** Synthesis options — sensible NeuTTS defaults; caller can't
      *  override from the console in v1. */
-    FInoNeuTtsNanoSynthesisOptions Options;
+    FInoNeuTtsNanoNativeSynthesisOptions Options;
 
     // FString by value throughout per BindDynamic contract.
     UFUNCTION()

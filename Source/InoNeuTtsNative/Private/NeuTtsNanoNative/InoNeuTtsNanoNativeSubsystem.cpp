@@ -1,16 +1,16 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeSubsystem.h"
 
 #include "InoAgentsLog.h"
 #include "InoNeuTtsNativeSettings.h"
 
-// Private NeuTtsNano implementation headers. Fully visible here so the
+// Private NeuTtsNanoNative implementation headers. Fully visible here so the
 // forward-declared TUniquePtr<> members' deleter can instantiate
 // correctly (see "out-of-line special members" block below).
-#include "InoNeuTtsNanoRunner.h"
-#include "InoNeuTtsNanoSynthesisWorker.h"
-#include "InoNeuTtsNanoVoiceRegistry.h"
+#include "InoNeuTtsNanoNativeRunner.h"
+#include "InoNeuTtsNanoNativeSynthesisWorker.h"
+#include "InoNeuTtsNanoNativeVoiceRegistry.h"
 
 #include "Async/Async.h"
 #include "HAL/PlatformFileManager.h"
@@ -24,26 +24,26 @@
 // ============================================================================
 // Out-of-line special members
 //
-// The subsystem owns TUniquePtr<FInoNeuTtsNanoRunner>,
-// TUniquePtr<FInoNeuTtsNanoSynthesisWorker>, and
-// TUniquePtr<FInoNeuTtsNanoVoiceRegistry>, all of which are
+// The subsystem owns TUniquePtr<FInoNeuTtsNanoNativeRunner>,
+// TUniquePtr<FInoNeuTtsNanoNativeSynthesisWorker>, and
+// TUniquePtr<FInoNeuTtsNanoNativeVoiceRegistry>, all of which are
 // forward-declared in the public header. UHT's generated .gen.cpp would
 // otherwise emit the implicit default ctor + FVTableHelper ctor + dtor
 // inline and fail to compile (C4150 "cannot delete pointer to
 // incomplete type") because it doesn't include the private
-// NeuTtsNano/ headers. Defining them here, where the full types are
+// NeuTtsNanoNative/ headers. Defining them here, where the full types are
 // visible, resolves the TDefaultDelete instantiation cleanly.
 // Same trick UInoChatterboxTtsSubsystem + UInoLiteRtLmConversation use.
 // ============================================================================
 
-UInoNeuTtsNanoSubsystem::UInoNeuTtsNanoSubsystem() = default;
+UInoNeuTtsNanoNativeSubsystem::UInoNeuTtsNanoNativeSubsystem() = default;
 
-UInoNeuTtsNanoSubsystem::UInoNeuTtsNanoSubsystem(FVTableHelper& Helper)
+UInoNeuTtsNanoNativeSubsystem::UInoNeuTtsNanoNativeSubsystem(FVTableHelper& Helper)
     : Super(Helper)
 {
 }
 
-UInoNeuTtsNanoSubsystem::~UInoNeuTtsNanoSubsystem() = default;
+UInoNeuTtsNanoNativeSubsystem::~UInoNeuTtsNanoNativeSubsystem() = default;
 
 // ============================================================================
 // Internal helpers (anonymous namespace — .cpp-local)
@@ -60,11 +60,11 @@ namespace
      * Both required (bRequired=true). NeuTTS has no optional files like
      * Chatterbox's .onnx_data companions, so the queue is simpler.
      */
-    TArray<FInoNeuTtsNanoDownloadFile> BuildDownloadQueue(
-        const FInoNeuTtsNanoModelEntry& Entry,
+    TArray<FInoNeuTtsNanoNativeDownloadFile> BuildDownloadQueue(
+        const FInoNeuTtsNanoNativeModelEntry& Entry,
         const FString&                  TargetDir)
     {
-        using FFile = FInoNeuTtsNanoDownloadFile;
+        using FFile = FInoNeuTtsNanoNativeDownloadFile;
 
         // Trim trailing slashes on repo URLs so the composed URLs don't
         // end up with doubles (HF tolerates it but looks ugly in logs).
@@ -103,14 +103,14 @@ namespace
 // Subsystem lifecycle
 // ============================================================================
 
-void UInoNeuTtsNanoSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+void UInoNeuTtsNanoNativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
 
     // Zero-init state — no model loaded, no download in flight.
     bModelLoaded  = false;
     bLoadInFlight = false;
-    LoadedVariant = EInoNeuTtsNanoBackboneVariant::Q4;
+    LoadedVariant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
     // Create the voice registry and try to load the plugin's baked-in
     // default voice. The committed JSON ships as a placeholder (empty
@@ -118,30 +118,30 @@ void UInoNeuTtsNanoSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // we still register it so GetAvailableVoiceNames returns "Default"
     // and the Milestone 4 synthesis worker can emit a clear
     // "regenerate voice" error rather than a silent failure.
-    VoiceRegistry = MakeUnique<FInoNeuTtsNanoVoiceRegistry>();
+    VoiceRegistry = MakeUnique<FInoNeuTtsNanoNativeVoiceRegistry>();
 
     const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
     if (Plugin.IsValid())
     {
         const FString VoicePath = FPaths::Combine(
             Plugin->GetBaseDir(),
-            TEXT("NeuTtsNano/Resources/default_voice.nvoice.json"));
+            TEXT("NeuTtsNanoNative/Resources/default_voice.nvoice.json"));
 
         FString VoiceErr;
         if (VoiceRegistry->RegisterFromJsonFile(VoicePath, FName(TEXT("Default")), VoiceErr))
         {
-            const FInoNeuTtsNanoVoice* Default = VoiceRegistry->Find(FName(TEXT("Default")));
+            const FInoNeuTtsNanoNativeVoice* Default = VoiceRegistry->Find(FName(TEXT("Default")));
             if (Default != nullptr && Default->IsPlaceholder())
             {
                 UE_LOG(LogInoAgents, Warning,
-                       TEXT("NeuTtsNano: Voice: default is a PLACEHOLDER (empty ref_codes). "
+                       TEXT("NeuTtsNanoNative: Voice: default is a PLACEHOLDER (empty ref_codes). "
                             "Synthesis will fail until regenerated. See "
-                            "Plugins/InoAgents/NeuTtsNano/README.md."));
+                            "Plugins/InoAgents/NeuTtsNanoNative/README.md."));
             }
             else if (Default != nullptr)
             {
                 UE_LOG(LogInoAgents, Log,
-                       TEXT("NeuTtsNano: Voice: loaded default \"%s\" "
+                       TEXT("NeuTtsNanoNative: Voice: loaded default \"%s\" "
                             "(%d ref codes, %d-char ref_text, %d-char ref_phones)"),
                        *Default->DisplayName,
                        Default->RefCodes.Num(),
@@ -152,26 +152,26 @@ void UInoNeuTtsNanoSubsystem::Initialize(FSubsystemCollectionBase& Collection)
         else
         {
             UE_LOG(LogInoAgents, Warning,
-                   TEXT("NeuTtsNano: Voice: failed to load default voice JSON: %s"), *VoiceErr);
+                   TEXT("NeuTtsNanoNative: Voice: failed to load default voice JSON: %s"), *VoiceErr);
         }
     }
     else
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano: Voice: IPluginManager::FindPlugin(\"InoAgents\") returned "
+               TEXT("NeuTtsNanoNative: Voice: IPluginManager::FindPlugin(\"InoAgents\") returned "
                     "invalid — default voice not loaded."));
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: Initialize — ready (no model loaded, "
+           TEXT("NeuTtsNanoNative: Subsystem: Initialize — ready (no model loaded, "
                 "%d voice(s) registered)"),
            VoiceRegistry->Num());
 }
 
-void UInoNeuTtsNanoSubsystem::Deinitialize()
+void UInoNeuTtsNanoNativeSubsystem::Deinitialize()
 {
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: Deinitialize — tearing down "
+           TEXT("NeuTtsNanoNative: Subsystem: Deinitialize — tearing down "
                 "(model_loaded=%s, load_in_flight=%s, voices=%d)"),
            bModelLoaded  ? TEXT("yes") : TEXT("no"),
            bLoadInFlight ? TEXT("yes") : TEXT("no"),
@@ -199,27 +199,27 @@ void UInoNeuTtsNanoSubsystem::Deinitialize()
 // Public API
 // ============================================================================
 
-void UInoNeuTtsNanoSubsystem::LoadModelAsync(
-    const FInoNeuTtsNanoModelConfig&        Config,
-    const FOnInoNeuTtsNanoDownloadProgress& OnDownloadProgress,
-    const FOnInoNeuTtsNanoModelLoaded&      OnLoaded)
+void UInoNeuTtsNanoNativeSubsystem::LoadModelAsync(
+    const FInoNeuTtsNanoNativeModelConfig&        Config,
+    const FOnInoNeuTtsNanoNativeDownloadProgress& OnDownloadProgress,
+    const FOnInoNeuTtsNanoNativeModelLoaded&      OnLoaded)
 {
     check(IsInGameThread());
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: LoadModelAsync called "
+           TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync called "
                 "(variant=%s, n_gpu_layers=%d, n_ctx=%d, current_loaded=%s, in_flight=%s)"),
-           *NeuTtsNanoVariantToString(Config.Variant),
+           *NeuTtsNanoNativeVariantToString(Config.Variant),
            Config.NumGpuLayers,
            Config.NumContextTokens,
-           bModelLoaded  ? *NeuTtsNanoVariantToString(LoadedVariant) : TEXT("none"),
+           bModelLoaded  ? *NeuTtsNanoNativeVariantToString(LoadedVariant) : TEXT("none"),
            bLoadInFlight ? TEXT("yes") : TEXT("no"));
 
     // Guard: only one load at a time.
     if (bLoadInFlight)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync ignored — another load is in flight"));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync ignored — another load is in flight"));
         OnLoaded.ExecuteIfBound(false, TEXT("Another load is already in flight."));
         return;
     }
@@ -228,8 +228,8 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
     if (bModelLoaded && LoadedVariant == Config.Variant)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync — variant %s already loaded, no-op"),
-               *NeuTtsNanoVariantToString(Config.Variant));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync — variant %s already loaded, no-op"),
+               *NeuTtsNanoNativeVariantToString(Config.Variant));
         OnLoaded.ExecuteIfBound(true, FString());
         return;
     }
@@ -239,8 +239,8 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
     if (bModelLoaded)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync — switching variants, unloading %s first"),
-               *NeuTtsNanoVariantToString(LoadedVariant));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync — switching variants, unloading %s first"),
+               *NeuTtsNanoNativeVariantToString(LoadedVariant));
         UnloadModel();
     }
 
@@ -249,20 +249,20 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
     if (Settings == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync FAILED — UInoNeuTtsNativeSettings unavailable"));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync FAILED — UInoNeuTtsNativeSettings unavailable"));
         OnLoaded.ExecuteIfBound(false, TEXT("UInoNeuTtsNativeSettings unavailable."));
         return;
     }
-    const FInoNeuTtsNanoModelEntry* Entry = Settings->FindNeuTtsNanoModel(Config.Variant);
+    const FInoNeuTtsNanoNativeModelEntry* Entry = Settings->FindNeuTtsNanoNativeModel(Config.Variant);
     if (Entry == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync FAILED — no settings entry for variant %s"),
-               *NeuTtsNanoVariantToString(Config.Variant));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync FAILED — no settings entry for variant %s"),
+               *NeuTtsNanoNativeVariantToString(Config.Variant));
         OnLoaded.ExecuteIfBound(false, FString::Printf(
             TEXT("No UInoNeuTtsNativeSettings entry for NeuTTS Nano variant '%s'. "
                  "Add one under Edit → Project Settings → Plugins → InoAgents → NeuTTS Nano."),
-            *NeuTtsNanoVariantToString(Config.Variant)));
+            *NeuTtsNanoNativeVariantToString(Config.Variant)));
         return;
     }
 
@@ -273,36 +273,36 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
     PendingOnDownloadProgress = OnDownloadProgress;
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: Subsystem: state transition — bLoadInFlight=false→true"));
+           TEXT("NeuTtsNanoNative: Subsystem: state transition — bLoadInFlight=false→true"));
 
     // Fast path: both files already on disk → skip download, dispatch
     // the loader immediately.
     if (IsModelDownloaded(Config.Variant))
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync — variant %s already on disk, skipping download"),
-               *NeuTtsNanoVariantToString(Config.Variant));
+               TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync — variant %s already on disk, skipping download"),
+               *NeuTtsNanoNativeVariantToString(Config.Variant));
         DispatchLoadWorker();
         return;
     }
 
     // Slow path: start the multi-file download.
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: LoadModelAsync — variant %s not on disk, starting download"),
-           *NeuTtsNanoVariantToString(Config.Variant));
+           TEXT("NeuTtsNanoNative: Subsystem: LoadModelAsync — variant %s not on disk, starting download"),
+           *NeuTtsNanoNativeVariantToString(Config.Variant));
     StartDownload();
 }
 
-void UInoNeuTtsNanoSubsystem::UnloadModel()
+void UInoNeuTtsNanoNativeSubsystem::UnloadModel()
 {
     check(IsInGameThread());
 
     const bool bWasLoaded = bModelLoaded;
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: UnloadModel called "
+           TEXT("NeuTtsNanoNative: Subsystem: UnloadModel called "
                 "(was_loaded=%s, variant=%s, worker=%s, runner=%s)"),
            bWasLoaded ? TEXT("yes") : TEXT("no"),
-           *NeuTtsNanoVariantToString(LoadedVariant),
+           *NeuTtsNanoNativeVariantToString(LoadedVariant),
            Worker.IsValid() ? TEXT("alive") : TEXT("null"),
            Runner.IsValid() ? TEXT("alive") : TEXT("null"));
 
@@ -312,18 +312,18 @@ void UInoNeuTtsNanoSubsystem::UnloadModel()
     if (bLoadInFlight && DownloadQueue.Num() > 0)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: UnloadModel — aborting in-flight download"));
+               TEXT("NeuTtsNanoNative: Subsystem: UnloadModel — aborting in-flight download"));
         FinishDownloadError(TEXT("Cancelled by UnloadModel."));
     }
 
     // 2. Stop + join worker thread BEFORE freeing Runner, since the
     //    worker holds borrowed pointers into Runner's native resources.
-    //    ~FInoNeuTtsNanoSynthesisWorker signals stop + WaitForCompletion
-    //    (see InoNeuTtsNanoSynthesisWorker.cpp dtor).
+    //    ~FInoNeuTtsNanoNativeSynthesisWorker signals stop + WaitForCompletion
+    //    (see InoNeuTtsNanoNativeSynthesisWorker.cpp dtor).
     if (Worker.IsValid())
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Subsystem: UnloadModel — signalling + joining worker"));
+               TEXT("NeuTtsNanoNative: Subsystem: UnloadModel — signalling + joining worker"));
         Worker->SignalCancel();  // abandon any in-flight synthesis
         Worker.Reset();           // joins the thread
     }
@@ -333,7 +333,7 @@ void UInoNeuTtsNanoSubsystem::UnloadModel()
     if (Runner.IsValid())
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Subsystem: UnloadModel — freeing Runner (llama_model / codec session)"));
+               TEXT("NeuTtsNanoNative: Subsystem: UnloadModel — freeing Runner (llama_model / codec session)"));
         Runner.Reset();
     }
 
@@ -342,30 +342,30 @@ void UInoNeuTtsNanoSubsystem::UnloadModel()
     if (bWasLoaded)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: state transition — bModelLoaded=true→false"));
+               TEXT("NeuTtsNanoNative: Subsystem: state transition — bModelLoaded=true→false"));
     }
 }
 
-TArray<FName> UInoNeuTtsNanoSubsystem::GetAvailableVoiceNames() const
+TArray<FName> UInoNeuTtsNanoNativeSubsystem::GetAvailableVoiceNames() const
 {
     if (!VoiceRegistry.IsValid())
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Subsystem: GetAvailableVoiceNames called — registry null, returning empty"));
+               TEXT("NeuTtsNanoNative: Subsystem: GetAvailableVoiceNames called — registry null, returning empty"));
         return TArray<FName>();
     }
     TArray<FName> Names = VoiceRegistry->GetAvailableVoiceNames();
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: Subsystem: GetAvailableVoiceNames called — returning %d voice(s)"),
+           TEXT("NeuTtsNanoNative: Subsystem: GetAvailableVoiceNames called — returning %d voice(s)"),
            Names.Num());
     return Names;
 }
 
-void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
+void UInoNeuTtsNanoNativeSubsystem::SynthesizeAsync(
     const FString& PhonemesText,
     FName VoiceName,
-    const FInoNeuTtsNanoSynthesisOptions& Options,
-    const FOnInoNeuTtsNanoSynthesisComplete& OnComplete)
+    const FInoNeuTtsNanoNativeSynthesisOptions& Options,
+    const FOnInoNeuTtsNanoNativeSynthesisComplete& OnComplete)
 {
     check(IsInGameThread());
 
@@ -373,7 +373,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
     // OnComplete(false, "...") synchronously to keep the "exactly one
     // OnComplete fire per call" invariant intact.
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: SynthesizeAsync called "
+           TEXT("NeuTtsNanoNative: Subsystem: SynthesizeAsync called "
                 "(text_len=%d, voice=%s, max_new_tokens=%d, top_k=%d, top_p=%.2f, "
                 "min_p=%.2f, temp=%.2f, seed=%d)"),
            PhonemesText.Len(),
@@ -388,7 +388,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
     auto FailImmediately = [&](const TCHAR* Reason)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano: Subsystem: SynthesizeAsync early-failed: %s"), Reason);
+               TEXT("NeuTtsNanoNative: Subsystem: SynthesizeAsync early-failed: %s"), Reason);
         OnComplete.ExecuteIfBound(false, TArray<uint8>(), FString(Reason));
     };
 
@@ -411,14 +411,14 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
 
     // Package + enqueue — worker dequeues on its dedicated thread and
     // fires OnComplete asynchronously via AsyncTask(GameThread).
-    FInoNeuTtsNanoPendingSynth Pending;
+    FInoNeuTtsNanoNativePendingSynth Pending;
     Pending.PhonemesText = PhonemesText;
     Pending.VoiceName    = VoiceName.IsNone() ? FName(TEXT("Default")) : VoiceName;
     Pending.Options      = Options;
     Pending.OnComplete   = OnComplete;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: SynthesizeAsync queued "
+           TEXT("NeuTtsNanoNative: Subsystem: SynthesizeAsync queued "
                 "(voice=%s, phonemes=%d chars, max_new=%d, top_k=%d, top_p=%.2f, "
                 "min_p=%.2f, temp=%.2f, seed=%d)"),
            *Pending.VoiceName.ToString(),
@@ -433,12 +433,12 @@ void UInoNeuTtsNanoSubsystem::SynthesizeAsync(
     Worker->Enqueue(MoveTemp(Pending));
 }
 
-void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
+void UInoNeuTtsNanoNativeSubsystem::SynthesizeStreamAsync(
     const FString& PhonemesText,
     FName VoiceName,
-    const FInoNeuTtsNanoSynthesisOptions& Options,
-    const FOnInoNeuTtsNanoAudioChunk& OnAudioChunk,
-    const FOnInoNeuTtsNanoSynthesisComplete& OnComplete)
+    const FInoNeuTtsNanoNativeSynthesisOptions& Options,
+    const FOnInoNeuTtsNanoNativeAudioChunk& OnAudioChunk,
+    const FOnInoNeuTtsNanoNativeSynthesisComplete& OnComplete)
 {
     check(IsInGameThread());
 
@@ -447,7 +447,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
     // OnAudioChunk is NOT fired on synchronous early-fail (it's the
     // caller's responsibility to treat OnComplete as the stream terminator).
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: SynthesizeStreamAsync called "
+           TEXT("NeuTtsNanoNative: Subsystem: SynthesizeStreamAsync called "
                 "(text_len=%d, voice=%s, max_new_tokens=%d, top_k=%d, top_p=%.2f, "
                 "min_p=%.2f, temp=%.2f, seed=%d, chunk_tokens=%d)"),
            PhonemesText.Len(),
@@ -463,7 +463,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
     auto FailImmediately = [&](const TCHAR* Reason)
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("NeuTtsNano: Subsystem: SynthesizeStreamAsync early-failed: %s"), Reason);
+               TEXT("NeuTtsNanoNative: Subsystem: SynthesizeStreamAsync early-failed: %s"), Reason);
         OnComplete.ExecuteIfBound(false, TArray<uint8>(), FString(Reason));
     };
 
@@ -484,7 +484,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
         return;
     }
 
-    FInoNeuTtsNanoPendingSynth Pending;
+    FInoNeuTtsNanoNativePendingSynth Pending;
     Pending.PhonemesText      = PhonemesText;
     Pending.VoiceName         = VoiceName.IsNone() ? FName(TEXT("Default")) : VoiceName;
     Pending.Options           = Options;
@@ -493,7 +493,7 @@ void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
     Pending.OnAudioChunk      = OnAudioChunk;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: SynthesizeStreamAsync queued "
+           TEXT("NeuTtsNanoNative: Subsystem: SynthesizeStreamAsync queued "
                 "(voice=%s, phonemes=%d chars, max_new=%d, top_k=%d, top_p=%.2f, "
                 "min_p=%.2f, temp=%.2f, seed=%d, chunk_tokens=%d)"),
            *Pending.VoiceName.ToString(),
@@ -509,34 +509,34 @@ void UInoNeuTtsNanoSubsystem::SynthesizeStreamAsync(
     Worker->Enqueue(MoveTemp(Pending));
 }
 
-void UInoNeuTtsNanoSubsystem::CancelSynthesis()
+void UInoNeuTtsNanoNativeSubsystem::CancelSynthesis()
 {
     check(IsInGameThread());
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: CancelSynthesis called (worker=%s)"),
+           TEXT("NeuTtsNanoNative: Subsystem: CancelSynthesis called (worker=%s)"),
            Worker.IsValid() ? TEXT("alive") : TEXT("null"));
     if (Worker.IsValid())
     {
         Worker->SignalCancel();
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Subsystem: CancelSynthesis — signalled worker"));
+               TEXT("NeuTtsNanoNative: Subsystem: CancelSynthesis — signalled worker"));
     }
 }
 
-bool UInoNeuTtsNanoSubsystem::IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Variant) const
+bool UInoNeuTtsNanoNativeSubsystem::IsModelDownloaded(EInoNeuTtsNanoNativeBackboneVariant Variant) const
 {
     const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     if (Settings == nullptr)
     {
         return false;
     }
-    const FInoNeuTtsNanoModelEntry* Entry = Settings->FindNeuTtsNanoModel(Variant);
+    const FInoNeuTtsNanoNativeModelEntry* Entry = Settings->FindNeuTtsNanoNativeModel(Variant);
     if (Entry == nullptr)
     {
         return false;
     }
 
-    const FString Dir = NeuTtsNanoResolveModelDir(Variant);
+    const FString Dir = NeuTtsNanoNativeResolveModelDir(Variant);
     IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
 
     const FString BackbonePath = FPaths::Combine(Dir, Entry->BackboneFileName);
@@ -551,19 +551,19 @@ bool UInoNeuTtsNanoSubsystem::IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Va
         PF.FileExists(*CodecPath) && PF.FileSize(*CodecPath) > 0;
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: Subsystem: IsModelDownloaded variant=%s — backbone=%s, codec=%s"),
-           *NeuTtsNanoVariantToString(Variant),
+           TEXT("NeuTtsNanoNative: Subsystem: IsModelDownloaded variant=%s — backbone=%s, codec=%s"),
+           *NeuTtsNanoNativeVariantToString(Variant),
            bBackboneOk ? TEXT("ok") : TEXT("missing"),
            bCodecOk    ? TEXT("ok") : TEXT("missing"));
 
     return bBackboneOk && bCodecOk;
 }
 
-void UInoNeuTtsNanoSubsystem::CancelDownload()
+void UInoNeuTtsNanoNativeSubsystem::CancelDownload()
 {
     check(IsInGameThread());
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: CancelDownload called (queue_size=%d)"),
+           TEXT("NeuTtsNanoNative: Subsystem: CancelDownload called (queue_size=%d)"),
            DownloadQueue.Num());
     if (DownloadQueue.Num() == 0)
     {
@@ -590,28 +590,28 @@ void UInoNeuTtsNanoSubsystem::CancelDownload()
 // shared Private/InoHttpDownload/ helper.
 // ============================================================================
 
-void UInoNeuTtsNanoSubsystem::StartDownload()
+void UInoNeuTtsNanoNativeSubsystem::StartDownload()
 {
     check(IsInGameThread());
 
     const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
-    const FInoNeuTtsNanoModelEntry* Entry =
-        Settings ? Settings->FindNeuTtsNanoModel(PendingConfig.Variant) : nullptr;
+    const FInoNeuTtsNanoNativeModelEntry* Entry =
+        Settings ? Settings->FindNeuTtsNanoNativeModel(PendingConfig.Variant) : nullptr;
     if (Entry == nullptr)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("NeuTtsNano: Download: no settings entry for variant %s."),
-            *NeuTtsNanoVariantToString(PendingConfig.Variant)));
+            TEXT("NeuTtsNanoNative: Download: no settings entry for variant %s."),
+            *NeuTtsNanoNativeVariantToString(PendingConfig.Variant)));
         return;
     }
 
-    const FString TargetDir = NeuTtsNanoResolveModelDir(PendingConfig.Variant);
+    const FString TargetDir = NeuTtsNanoNativeResolveModelDir(PendingConfig.Variant);
     IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/ true);
 
     DownloadQueue = BuildDownloadQueue(*Entry, TargetDir);
     if (DownloadQueue.Num() == 0)
     {
-        FinishDownloadError(TEXT("NeuTtsNano: Download: empty queue."));
+        FinishDownloadError(TEXT("NeuTtsNanoNative: Download: empty queue."));
         return;
     }
 
@@ -619,9 +619,9 @@ void UInoNeuTtsNanoSubsystem::StartDownload()
     bDownloadProbing = true;
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Download: StartDownload — variant=%s, %d files "
+           TEXT("NeuTtsNanoNative: Download: StartDownload — variant=%s, %d files "
                 "(backbone_repo=%s, codec_repo=%s, target_dir=%s)"),
-           *NeuTtsNanoVariantToString(PendingConfig.Variant),
+           *NeuTtsNanoNativeVariantToString(PendingConfig.Variant),
            DownloadQueue.Num(),
            *Entry->BackboneHuggingFaceRepoUrl,
            *Entry->CodecHuggingFaceRepoUrl,
@@ -631,7 +631,7 @@ void UInoNeuTtsNanoSubsystem::StartDownload()
     for (int32 Idx = 0; Idx < DownloadQueue.Num(); ++Idx)
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Download: queued file %d/%d — url=%s → target=%s"),
+               TEXT("NeuTtsNanoNative: Download: queued file %d/%d — url=%s → target=%s"),
                Idx + 1, DownloadQueue.Num(),
                *DownloadQueue[Idx].Url,
                *DownloadQueue[Idx].TargetPath);
@@ -640,7 +640,7 @@ void UInoNeuTtsNanoSubsystem::StartDownload()
     StartHeadProbe();
 }
 
-void UInoNeuTtsNanoSubsystem::StartHeadProbe()
+void UInoNeuTtsNanoNativeSubsystem::StartHeadProbe()
 {
     check(IsInGameThread());
 
@@ -649,7 +649,7 @@ void UInoNeuTtsNanoSubsystem::StartHeadProbe()
     {
         int32 KnownSizes = 0;
         int64 KnownTotal = 0;
-        for (const FInoNeuTtsNanoDownloadFile& F : DownloadQueue)
+        for (const FInoNeuTtsNanoNativeDownloadFile& F : DownloadQueue)
         {
             if (F.ExpectedBytes > 0)
             {
@@ -658,7 +658,7 @@ void UInoNeuTtsNanoSubsystem::StartHeadProbe()
             }
         }
         UE_LOG(LogInoAgents, Log,
-               TEXT("NeuTtsNano: Download: HEAD phase complete — %d/%d files reported size "
+               TEXT("NeuTtsNanoNative: Download: HEAD phase complete — %d/%d files reported size "
                     "(sum of known=%.1f MB). %s"),
                KnownSizes, DownloadQueue.Num(),
                (double)KnownTotal / (1024.0 * 1024.0),
@@ -672,22 +672,22 @@ void UInoNeuTtsNanoSubsystem::StartHeadProbe()
         return;
     }
 
-    const FInoNeuTtsNanoDownloadFile& File = DownloadQueue[DownloadCursor];
+    const FInoNeuTtsNanoNativeDownloadFile& File = DownloadQueue[DownloadCursor];
 
     DownloadRequest = FHttpModule::Get().CreateRequest();
     DownloadRequest->SetURL(File.Url);
     DownloadRequest->SetVerb(TEXT("HEAD"));
     DownloadRequest->OnProcessRequestComplete().BindUObject(
-        this, &UInoNeuTtsNanoSubsystem::HandleHeadComplete);
+        this, &UInoNeuTtsNanoNativeSubsystem::HandleHeadComplete);
 
     UE_LOG(LogInoAgents, Verbose,
-           TEXT("NeuTtsNano: Download: HEAD %d/%d — %s"),
+           TEXT("NeuTtsNanoNative: Download: HEAD %d/%d — %s"),
            DownloadCursor + 1, DownloadQueue.Num(), *File.Url);
 
     DownloadRequest->ProcessRequest();
 }
 
-void UInoNeuTtsNanoSubsystem::HandleHeadComplete(
+void UInoNeuTtsNanoNativeSubsystem::HandleHeadComplete(
     FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
 {
     check(IsInGameThread());
@@ -700,7 +700,7 @@ void UInoNeuTtsNanoSubsystem::HandleHeadComplete(
         return;
     }
 
-    FInoNeuTtsNanoDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoNeuTtsNanoNativeDownloadFile& File = DownloadQueue[DownloadCursor];
     const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
 
     if (bSucceeded && Response.IsValid() && Code >= 200 && Code < 400)
@@ -715,14 +715,14 @@ void UInoNeuTtsNanoSubsystem::HandleHeadComplete(
             }
         }
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Download: HEAD %d/%d ok, ExpectedBytes=%lld"),
+               TEXT("NeuTtsNanoNative: Download: HEAD %d/%d ok, ExpectedBytes=%lld"),
                DownloadCursor + 1, DownloadQueue.Num(), File.ExpectedBytes);
     }
     else if (bSucceeded && Code == 404)
     {
         // All NeuTTS files are required — a 404 here is fatal.
         FinishDownloadError(FString::Printf(
-            TEXT("NeuTtsNano: Download: required file 404 on HEAD: %s"),
+            TEXT("NeuTtsNanoNative: Download: required file 404 on HEAD: %s"),
             *File.Url));
         return;
     }
@@ -733,7 +733,7 @@ void UInoNeuTtsNanoSubsystem::HandleHeadComplete(
         // the GET will either succeed (and we report bytes-only
         // progress) or fail conclusively.
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Download: HEAD %d/%d non-fatal probe failure (code=%d); "
+               TEXT("NeuTtsNanoNative: Download: HEAD %d/%d non-fatal probe failure (code=%d); "
                     "continuing with unknown total size"),
                DownloadCursor + 1, DownloadQueue.Num(), Code);
     }
@@ -742,7 +742,7 @@ void UInoNeuTtsNanoSubsystem::HandleHeadComplete(
     StartHeadProbe();
 }
 
-void UInoNeuTtsNanoSubsystem::StartNextFileDownload()
+void UInoNeuTtsNanoNativeSubsystem::StartNextFileDownload()
 {
     check(IsInGameThread());
 
@@ -752,7 +752,7 @@ void UInoNeuTtsNanoSubsystem::StartNextFileDownload()
         return;
     }
 
-    FInoNeuTtsNanoDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoNeuTtsNanoNativeDownloadFile& File = DownloadQueue[DownloadCursor];
     File.BytesWritten = 0;
 
     // Open .partial for writing. OpenWrite(..., bAppend=false) truncates
@@ -767,13 +767,13 @@ void UInoNeuTtsNanoSubsystem::StartNextFileDownload()
     if (DownloadFileHandle == nullptr)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("NeuTtsNano: Download: failed to open %s for writing"),
+            TEXT("NeuTtsNanoNative: Download: failed to open %s for writing"),
             *PartialPath));
         return;
     }
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Download: GET %d/%d kick-off — url=%s (%lld bytes expected) → %s"),
+           TEXT("NeuTtsNanoNative: Download: GET %d/%d kick-off — url=%s (%lld bytes expected) → %s"),
            DownloadCursor + 1, DownloadQueue.Num(),
            *File.Url, File.ExpectedBytes, *PartialPath);
 
@@ -783,16 +783,16 @@ void UInoNeuTtsNanoSubsystem::StartNextFileDownload()
     DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
 
     DownloadRequest->OnHeaderReceived().BindUObject(
-        this, &UInoNeuTtsNanoSubsystem::HandleDownloadHeader);
+        this, &UInoNeuTtsNanoNativeSubsystem::HandleDownloadHeader);
     DownloadRequest->OnRequestProgress64().BindUObject(
-        this, &UInoNeuTtsNanoSubsystem::HandleDownloadProgress);
+        this, &UInoNeuTtsNanoNativeSubsystem::HandleDownloadProgress);
     DownloadRequest->OnProcessRequestComplete().BindUObject(
-        this, &UInoNeuTtsNanoSubsystem::HandleDownloadComplete);
+        this, &UInoNeuTtsNanoNativeSubsystem::HandleDownloadComplete);
 
     DownloadRequest->ProcessRequest();
 }
 
-void UInoNeuTtsNanoSubsystem::HandleDownloadProgress(
+void UInoNeuTtsNanoNativeSubsystem::HandleDownloadProgress(
     FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
 {
     check(IsInGameThread());
@@ -806,7 +806,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadProgress(
     BroadcastDownloadProgress();
 }
 
-void UInoNeuTtsNanoSubsystem::HandleDownloadHeader(
+void UInoNeuTtsNanoNativeSubsystem::HandleDownloadHeader(
     FHttpRequestPtr /*Request*/,
     const FString& HeaderName,
     const FString& HeaderValue)
@@ -828,7 +828,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadHeader(
         return;
     }
 
-    FInoNeuTtsNanoDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoNeuTtsNanoNativeDownloadFile& File = DownloadQueue[DownloadCursor];
     if (File.ExpectedBytes > 0 && File.ExpectedBytes == Parsed)
     {
         return;   // HEAD already told us; nothing new.
@@ -836,7 +836,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadHeader(
     if (File.ExpectedBytes <= 0)
     {
         UE_LOG(LogInoAgents, Verbose,
-               TEXT("NeuTtsNano: Download: GET %d/%d learned Content-Length=%lld from GET response "
+               TEXT("NeuTtsNanoNative: Download: GET %d/%d learned Content-Length=%lld from GET response "
                     "(HEAD didn't give us one)"),
                DownloadCursor + 1, DownloadQueue.Num(), Parsed);
     }
@@ -844,7 +844,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadHeader(
     BroadcastDownloadProgress();
 }
 
-void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
+void UInoNeuTtsNanoNativeSubsystem::HandleDownloadComplete(
     FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
 {
     check(IsInGameThread());
@@ -855,14 +855,14 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
         return;   // teardown during request
     }
 
-    FInoNeuTtsNanoDownloadFile& File = DownloadQueue[DownloadCursor];
+    FInoNeuTtsNanoNativeDownloadFile& File = DownloadQueue[DownloadCursor];
     const int32 Code = Response.IsValid() ? Response->GetResponseCode() : 0;
 
     // Hard errors — both files required, any non-200 is fatal.
     if (!bSucceeded || !Response.IsValid() || Code != 200)
     {
         FinishDownloadError(FString::Printf(
-            TEXT("NeuTtsNano: Download: GET %d/%d failed: %s (HTTP %d)"),
+            TEXT("NeuTtsNanoNative: Download: GET %d/%d failed: %s (HTTP %d)"),
             DownloadCursor + 1, DownloadQueue.Num(), *File.Url, Code));
         return;
     }
@@ -871,7 +871,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
     const TArray<uint8>& Content = Response->GetContent();
     if (DownloadFileHandle == nullptr)
     {
-        FinishDownloadError(TEXT("NeuTtsNano: Download: file handle closed before write."));
+        FinishDownloadError(TEXT("NeuTtsNanoNative: Download: file handle closed before write."));
         return;
     }
     if (Content.Num() > 0)
@@ -887,7 +887,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
     {
         IFileManager::Get().Delete(*PartialPath);
         FinishDownloadError(FString::Printf(
-            TEXT("NeuTtsNano: Download: failed to rename %s → %s"),
+            TEXT("NeuTtsNanoNative: Download: failed to rename %s → %s"),
             *PartialPath, *File.TargetPath));
         return;
     }
@@ -895,7 +895,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
     File.BytesWritten = Content.Num();
     File.bDone        = true;
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Download: GET %d/%d OK, %lld bytes → %s"),
+           TEXT("NeuTtsNanoNative: Download: GET %d/%d OK, %lld bytes → %s"),
            DownloadCursor + 1, DownloadQueue.Num(),
            File.BytesWritten, *File.TargetPath);
 
@@ -905,7 +905,7 @@ void UInoNeuTtsNanoSubsystem::HandleDownloadComplete(
     StartNextFileDownload();
 }
 
-void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
+void UInoNeuTtsNanoNativeSubsystem::BroadcastDownloadProgress()
 {
     // Same two-strategy approach Chatterbox uses:
     //   1. Byte-weighted (preferred) when every size is known.
@@ -927,7 +927,7 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
 
     for (int32 i = 0; i < FileCount; ++i)
     {
-        const FInoNeuTtsNanoDownloadFile& F = DownloadQueue[i];
+        const FInoNeuTtsNanoNativeDownloadFile& F = DownloadQueue[i];
         if (F.bDone)
         {
             ++DoneFiles;
@@ -967,7 +967,7 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
         if (DownloadCursor >= 0 && DownloadCursor < FileCount
             && !DownloadQueue[DownloadCursor].bDone)
         {
-            const FInoNeuTtsNanoDownloadFile& Cur = DownloadQueue[DownloadCursor];
+            const FInoNeuTtsNanoNativeDownloadFile& Cur = DownloadQueue[DownloadCursor];
             if (Cur.ExpectedBytes > 0)
             {
                 CurrentFraction = FMath::Clamp(
@@ -991,11 +991,11 @@ void UInoNeuTtsNanoSubsystem::BroadcastDownloadProgress()
         Percent, AggregateReceived, TotalBytes, /*bCompleted=*/ false);
 }
 
-void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
+void UInoNeuTtsNanoNativeSubsystem::FinishDownloadSuccess()
 {
     check(IsInGameThread());
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Download: complete — all %d files staged"),
+           TEXT("NeuTtsNanoNative: Download: complete — all %d files staged"),
            DownloadQueue.Num());
 
     // Terminal download-progress broadcast — bCompleted=true. Fires
@@ -1007,7 +1007,7 @@ void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
     int64 FinalReceived = 0;
     int64 FinalTotal    = 0;
     bool  bAllKnown     = true;
-    for (const FInoNeuTtsNanoDownloadFile& F : DownloadQueue)
+    for (const FInoNeuTtsNanoNativeDownloadFile& F : DownloadQueue)
     {
         FinalReceived += F.BytesWritten;
         if (F.ExpectedBytes > 0) { FinalTotal += F.ExpectedBytes; }
@@ -1022,14 +1022,14 @@ void UInoNeuTtsNanoSubsystem::FinishDownloadSuccess()
     DispatchLoadWorker();
 }
 
-void UInoNeuTtsNanoSubsystem::FinishDownloadError(const FString& Err)
+void UInoNeuTtsNanoNativeSubsystem::FinishDownloadError(const FString& Err)
 {
     check(IsInGameThread());
-    UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano: Download: FAILED: %s"), *Err);
+    UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNanoNative: Download: FAILED: %s"), *Err);
 
     // Read PendingOnLoaded into a local and clear it BEFORE firing so
     // a handler that re-calls LoadModelAsync doesn't double-fire.
-    FOnInoNeuTtsNanoModelLoaded Cb = PendingOnLoaded;
+    FOnInoNeuTtsNanoNativeModelLoaded Cb = PendingOnLoaded;
     PendingOnLoaded.Unbind();
     bLoadInFlight = false;
 
@@ -1038,7 +1038,7 @@ void UInoNeuTtsNanoSubsystem::FinishDownloadError(const FString& Err)
     Cb.ExecuteIfBound(false, Err);
 }
 
-void UInoNeuTtsNanoSubsystem::CleanupDownload()
+void UInoNeuTtsNanoNativeSubsystem::CleanupDownload()
 {
     if (DownloadFileHandle != nullptr)
     {
@@ -1073,39 +1073,39 @@ void UInoNeuTtsNanoSubsystem::CleanupDownload()
 // cleans up the native resources).
 // ============================================================================
 
-void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
+void UInoNeuTtsNanoNativeSubsystem::DispatchLoadWorker()
 {
     check(IsInGameThread());
 
     // Resolve file paths we'll hand to the ThreadPool task.
     const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
-    const FInoNeuTtsNanoModelEntry* Entry =
-        Settings ? Settings->FindNeuTtsNanoModel(PendingConfig.Variant) : nullptr;
+    const FInoNeuTtsNanoNativeModelEntry* Entry =
+        Settings ? Settings->FindNeuTtsNanoNativeModel(PendingConfig.Variant) : nullptr;
     if (Entry == nullptr)
     {
         // Shouldn't happen — LoadModelAsync already verified this — but
         // be defensive.
         FString Err = FString::Printf(
             TEXT("Settings entry disappeared during load for variant %s."),
-            *NeuTtsNanoVariantToString(PendingConfig.Variant));
-        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNano: Subsystem: load FAILED: %s"), *Err);
+            *NeuTtsNanoNativeVariantToString(PendingConfig.Variant));
+        UE_LOG(LogInoAgents, Error, TEXT("NeuTtsNanoNative: Subsystem: load FAILED: %s"), *Err);
 
-        FOnInoNeuTtsNanoModelLoaded Cb = PendingOnLoaded;
+        FOnInoNeuTtsNanoNativeModelLoaded Cb = PendingOnLoaded;
         PendingOnLoaded.Unbind();
         bLoadInFlight = false;
         Cb.ExecuteIfBound(false, Err);
         return;
     }
 
-    const FString Dir          = NeuTtsNanoResolveModelDir(PendingConfig.Variant);
+    const FString Dir          = NeuTtsNanoNativeResolveModelDir(PendingConfig.Variant);
     const FString BackbonePath = FPaths::Combine(Dir, Entry->BackboneFileName);
     const FString CodecPath    = FPaths::Combine(Dir, Entry->CodecFileName);
-    const FInoNeuTtsNanoModelConfig ConfigCopy = PendingConfig;
+    const FInoNeuTtsNanoNativeModelConfig ConfigCopy = PendingConfig;
 
-    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSelf(this);
+    TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> WeakSelf(this);
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("NeuTtsNano: Subsystem: DispatchLoadWorker — async load "
+           TEXT("NeuTtsNanoNative: Subsystem: DispatchLoadWorker — async load "
                 "(backbone=%s, codec=%s, n_gpu_layers=%d, n_ctx=%d)"),
            *BackbonePath, *CodecPath,
            ConfigCopy.NumGpuLayers, ConfigCopy.NumContextTokens);
@@ -1117,8 +1117,8 @@ void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
         {
             // -- ThreadPool thread --
             FString LocalErr;
-            TUniquePtr<FInoNeuTtsNanoRunner> NewRunner =
-                FInoNeuTtsNanoRunner::Create(
+            TUniquePtr<FInoNeuTtsNanoNativeRunner> NewRunner =
+                FInoNeuTtsNanoNativeRunner::Create(
                     BackbonePath, CodecPath, ConfigCopy, LocalErr);
 
             const double LoadElapsed = FPlatformTime::Seconds() - LoadStartTime;
@@ -1128,28 +1128,28 @@ void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
                 [WeakSelf, Runner = MoveTemp(NewRunner),
                  LocalErr = MoveTemp(LocalErr), LoadElapsed]() mutable
                 {
-                    UInoNeuTtsNanoSubsystem* Self = WeakSelf.Get();
+                    UInoNeuTtsNanoNativeSubsystem* Self = WeakSelf.Get();
                     if (Self == nullptr)
                     {
                         // Subsystem torn down while the load was in
                         // flight. Runner's dtor will clean up cleanly
                         // as the temporary goes out of scope.
                         UE_LOG(LogInoAgents, Warning,
-                               TEXT("NeuTtsNano: Subsystem: load completed but subsystem is gone; "
+                               TEXT("NeuTtsNanoNative: Subsystem: load completed but subsystem is gone; "
                                     "discarding Runner"));
                         return;
                     }
 
-                    FOnInoNeuTtsNanoModelLoaded Cb = Self->PendingOnLoaded;
+                    FOnInoNeuTtsNanoNativeModelLoaded Cb = Self->PendingOnLoaded;
                     Self->PendingOnLoaded.Unbind();
                     Self->bLoadInFlight = false;
                     UE_LOG(LogInoAgents, Verbose,
-                           TEXT("NeuTtsNano: Subsystem: state transition — bLoadInFlight=true→false"));
+                           TEXT("NeuTtsNanoNative: Subsystem: state transition — bLoadInFlight=true→false"));
 
                     if (!Runner)
                     {
                         UE_LOG(LogInoAgents, Error,
-                               TEXT("NeuTtsNano: Subsystem: load FAILED after %.2f s: %s"),
+                               TEXT("NeuTtsNanoNative: Subsystem: load FAILED after %.2f s: %s"),
                                LoadElapsed, *LocalErr);
                         Cb.ExecuteIfBound(false, LocalErr);
                         return;
@@ -1158,16 +1158,16 @@ void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
                     // Happy path — stash Runner, start worker skeleton,
                     // flip loaded flag.
                     Self->Runner       = MoveTemp(Runner);
-                    Self->Worker       = MakeUnique<FInoNeuTtsNanoSynthesisWorker>(
+                    Self->Worker       = MakeUnique<FInoNeuTtsNanoNativeSynthesisWorker>(
                         WeakSelf,
                         Self->Runner.Get(),
                         Self->VoiceRegistry.Get());
                     Self->bModelLoaded = true;
                     UE_LOG(LogInoAgents, Verbose,
-                           TEXT("NeuTtsNano: Subsystem: state transition — bModelLoaded=false→true"));
+                           TEXT("NeuTtsNanoNative: Subsystem: state transition — bModelLoaded=false→true"));
 
                     UE_LOG(LogInoAgents, Log,
-                           TEXT("NeuTtsNano: Subsystem: load OK in %.2f s — Runner + Worker ready"),
+                           TEXT("NeuTtsNanoNative: Subsystem: load OK in %.2f s — Runner + Worker ready"),
                            LoadElapsed);
                     Cb.ExecuteIfBound(true, FString());
                 });

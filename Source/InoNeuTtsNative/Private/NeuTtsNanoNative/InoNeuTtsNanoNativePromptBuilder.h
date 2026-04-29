@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-namespace InoNeuTtsNano
+namespace InoNeuTtsNanoNative
 {
     /**
      * Compose the exact NeuTTS Nano chat-template prompt string.

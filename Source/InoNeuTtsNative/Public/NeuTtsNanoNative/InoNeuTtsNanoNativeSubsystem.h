@@ -7,23 +7,23 @@
 
 #include "Interfaces/IHttpRequest.h"    // FHttpRequestPtr / FHttpResponsePtr typedefs
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"
 
-#include "InoNeuTtsNanoSubsystem.generated.h"
+#include "InoNeuTtsNanoNativeSubsystem.generated.h"
 
 class IFileHandle;
 
 // Forward-declared private types — actual definitions in
-// Private/NeuTtsNano/. The subsystem holds these via TUniquePtr, so
+// Private/NeuTtsNanoNative/. The subsystem holds these via TUniquePtr, so
 // the special members (default ctor, FVTableHelper ctor, dtor) are
 // defined out-of-line in the .cpp where the private headers are fully
 // visible. Same trick UInoLiteRtLmConversation and
 // UInoChatterboxTtsSubsystem use for their forward-declared members —
 // avoids the classic C4150 "cannot delete pointer to incomplete type"
 // UHT .gen.cpp compile error.
-class FInoNeuTtsNanoRunner;
-class FInoNeuTtsNanoSynthesisWorker;
-class FInoNeuTtsNanoVoiceRegistry;
+class FInoNeuTtsNanoNativeRunner;
+class FInoNeuTtsNanoNativeSynthesisWorker;
+class FInoNeuTtsNanoNativeVoiceRegistry;
 
 /**
  * Game-instance-wide NeuTTS Nano on-device TTS runtime owner.
@@ -32,8 +32,8 @@ class FInoNeuTtsNanoVoiceRegistry;
  * game shutdown). Accessed via:
  *
  *     UGameInstance* GI = GetGameInstance();
- *     UInoNeuTtsNanoSubsystem* Subsys =
- *         GI->GetSubsystem<UInoNeuTtsNanoSubsystem>();
+ *     UInoNeuTtsNanoNativeSubsystem* Subsys =
+ *         GI->GetSubsystem<UInoNeuTtsNanoNativeSubsystem>();
  *
  * Milestone 2 scope (this file):
  *   - Subsystem lifecycle (Initialize / Deinitialize)
@@ -47,8 +47,8 @@ class FInoNeuTtsNanoVoiceRegistry;
  *
  * Not wired yet (added in subsequent milestones):
  *   - SynthesizeAsync / CancelSynthesis — Milestone 4
- *   - FInoNeuTtsNanoVoiceRegistry (default voice) — Milestone 3
- *   - FInoNeuTtsNanoSynthesisWorker thread — Milestone 3
+ *   - FInoNeuTtsNanoNativeVoiceRegistry (default voice) — Milestone 3
+ *   - FInoNeuTtsNanoNativeSynthesisWorker thread — Milestone 3
  *
  * Download flow overview:
  *
@@ -71,7 +71,7 @@ class FInoNeuTtsNanoVoiceRegistry;
  * switch, call UnloadModel() then LoadModelAsync() with the new config.
  */
 UCLASS(DisplayName = "NeuTTS Nano Subsystem")
-class INONEUTTSNATIVE_API UInoNeuTtsNanoSubsystem : public UGameInstanceSubsystem
+class INONEUTTSNATIVE_API UInoNeuTtsNanoNativeSubsystem : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
 
@@ -79,9 +79,9 @@ public:
     // Out-of-line special members needed because TUniquePtr<Forward>
     // members below would otherwise try to instantiate their default
     // deleter against an incomplete type in the generated .gen.cpp.
-    UInoNeuTtsNanoSubsystem();
-    UInoNeuTtsNanoSubsystem(FVTableHelper& Helper);
-    virtual ~UInoNeuTtsNanoSubsystem();
+    UInoNeuTtsNanoNativeSubsystem();
+    UInoNeuTtsNanoNativeSubsystem(FVTableHelper& Helper);
+    virtual ~UInoNeuTtsNanoNativeSubsystem();
 
     //~ UGameInstanceSubsystem
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -111,9 +111,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "InoAgents|NeuTTS Nano",
               meta = (AutoCreateRefTerm = "OnDownloadProgress,OnLoaded"))
     void LoadModelAsync(
-        const FInoNeuTtsNanoModelConfig&        Config,
-        const FOnInoNeuTtsNanoDownloadProgress& OnDownloadProgress,
-        const FOnInoNeuTtsNanoModelLoaded&      OnLoaded);
+        const FInoNeuTtsNanoNativeModelConfig&        Config,
+        const FOnInoNeuTtsNanoNativeDownloadProgress& OnDownloadProgress,
+        const FOnInoNeuTtsNanoNativeModelLoaded&      OnLoaded);
 
     /** Tear down any loaded model + abort any in-flight download. Safe
      *  to call whether or not a load is active. */
@@ -124,7 +124,7 @@ public:
      *  file-stat probe; safe to call from Tick. Does NOT verify
      *  checksums. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
-    bool IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Variant) const;
+    bool IsModelDownloaded(EInoNeuTtsNanoNativeBackboneVariant Variant) const;
 
     /** True when a model is currently loaded in memory and ready for
      *  SynthesizeAsync calls (once synthesis lands in Milestone 4). */
@@ -134,7 +134,7 @@ public:
     /** Which variant is currently loaded. Only meaningful when
      *  IsModelLoaded() returns true. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "InoAgents|NeuTTS Nano")
-    EInoNeuTtsNanoBackboneVariant GetLoadedVariant() const { return LoadedVariant; }
+    EInoNeuTtsNanoNativeBackboneVariant GetLoadedVariant() const { return LoadedVariant; }
 
     /**
      * Output sample rate for all NeuTTS Nano synthesis. ALWAYS returns
@@ -155,7 +155,7 @@ public:
     int32 GetOutputSampleRate() const { return 24000; }
 
     /** Names of voices registered with the subsystem. In v1 this
-     *  contains "Default" (baked-in from NeuTtsNano/Resources/
+     *  contains "Default" (baked-in from NeuTtsNanoNative/Resources/
      *  default_voice.nvoice.json) or is empty if the JSON failed to
      *  load. A follow-up milestone will scan a user-provided voices/
      *  directory for additional entries. */
@@ -183,8 +183,8 @@ public:
     void SynthesizeAsync(
         const FString& PhonemesText,
         FName VoiceName,
-        const FInoNeuTtsNanoSynthesisOptions& Options,
-        const FOnInoNeuTtsNanoSynthesisComplete& OnComplete);
+        const FInoNeuTtsNanoNativeSynthesisOptions& Options,
+        const FOnInoNeuTtsNanoNativeSynthesisComplete& OnComplete);
 
     /**
      * Streaming counterpart of SynthesizeAsync. Fires OnAudioChunk
@@ -207,7 +207,7 @@ public:
      * end-of-stream detection, not to OnAudioChunk's bIsFinal flag.
      *
      * Chunk cadence is controlled by Options.StreamChunkTokens (see
-     * FInoNeuTtsNanoSynthesisOptions for the tradeoff discussion).
+     * FInoNeuTtsNanoNativeSynthesisOptions for the tradeoff discussion).
      * Passing StreamChunkTokens=0 falls back to one-shot semantics —
      * exactly one OnAudioChunk fires with the full waveform and
      * bIsFinal=true immediately before OnComplete.
@@ -222,9 +222,9 @@ public:
     void SynthesizeStreamAsync(
         const FString& PhonemesText,
         FName VoiceName,
-        const FInoNeuTtsNanoSynthesisOptions& Options,
-        const FOnInoNeuTtsNanoAudioChunk& OnAudioChunk,
-        const FOnInoNeuTtsNanoSynthesisComplete& OnComplete);
+        const FInoNeuTtsNanoNativeSynthesisOptions& Options,
+        const FOnInoNeuTtsNanoNativeAudioChunk& OnAudioChunk,
+        const FOnInoNeuTtsNanoNativeSynthesisComplete& OnComplete);
 
     /** Cooperatively abort the currently-synthesising request (if any).
      *  The worker acknowledges at the next cancel-check point inside
@@ -255,29 +255,29 @@ private:
 
     /** Variant most recently requested. Set at LoadModelAsync entry;
      *  promoted to "loaded" on DispatchLoadWorker success. */
-    EInoNeuTtsNanoBackboneVariant LoadedVariant = EInoNeuTtsNanoBackboneVariant::Q4;
+    EInoNeuTtsNanoNativeBackboneVariant LoadedVariant = EInoNeuTtsNanoNativeBackboneVariant::Q4;
 
     /** Snapshot of the config passed to LoadModelAsync, read by the
      *  load worker. */
-    FInoNeuTtsNanoModelConfig PendingConfig;
+    FInoNeuTtsNanoNativeModelConfig PendingConfig;
 
     /** Dynamic delegate to fire exactly once when LoadModelAsync
      *  resolves. Zeroed after firing. */
-    FOnInoNeuTtsNanoModelLoaded PendingOnLoaded;
+    FOnInoNeuTtsNanoNativeModelLoaded PendingOnLoaded;
 
     /** Per-call download-progress handler stashed at LoadModelAsync
      *  entry. Every progress tick (including the bCompleted=true
      *  terminal tick inside FinishDownloadSuccess) fires through this
      *  delegate. Reassigned at each LoadModelAsync so stale delegates
      *  from prior loads can't fire against a fresh one. */
-    FOnInoNeuTtsNanoDownloadProgress PendingOnDownloadProgress;
+    FOnInoNeuTtsNanoNativeDownloadProgress PendingOnDownloadProgress;
 
     // ==================================================================
     // Download state (game-thread only — all callbacks route through
     // the HTTP module's game-thread callback path)
     // ==================================================================
 
-    TArray<FInoNeuTtsNanoDownloadFile> DownloadQueue;
+    TArray<FInoNeuTtsNanoNativeDownloadFile> DownloadQueue;
 
     /** Index into DownloadQueue of the file currently being probed
      *  (HEAD phase) or downloaded (GET phase). INDEX_NONE between
@@ -327,7 +327,7 @@ private:
     // it never holds native resources so teardown ordering doesn't matter.
     // ==================================================================
 
-    TUniquePtr<FInoNeuTtsNanoRunner>           Runner;
-    TUniquePtr<FInoNeuTtsNanoSynthesisWorker>  Worker;
-    TUniquePtr<FInoNeuTtsNanoVoiceRegistry>    VoiceRegistry;
+    TUniquePtr<FInoNeuTtsNanoNativeRunner>           Runner;
+    TUniquePtr<FInoNeuTtsNanoNativeSynthesisWorker>  Worker;
+    TUniquePtr<FInoNeuTtsNanoNativeVoiceRegistry>    VoiceRegistry;
 };

@@ -4,7 +4,7 @@ encode-default-voice.py
 
 Offline helper that runs Neuphonic's PyTorch NeuCodec encoder on a WAV
 file + transcript and emits the .nvoice.json file that
-UInoNeuTtsNanoSubsystem's voice registry loads at runtime.
+UInoNeuTtsNanoNativeSubsystem's voice registry loads at runtime.
 
 NeuTTS Nano's voice-cloning flow needs a pre-encoded sequence of FSQ
 speech tokens derived from a reference audio sample (3-15 seconds of
@@ -51,11 +51,11 @@ Typical usage (default output path is the plugin's baked-in voice):
         --ref-text "My name is Andy. I just moved to London."
 
 That overwrites ../Resources/default_voice.nvoice.json which is then
-loaded by UInoNeuTtsNanoSubsystem at Initialize time as the "Default"
+loaded by UInoNeuTtsNanoNativeSubsystem at Initialize time as the "Default"
 voice.
 
 Custom voices (future) will live at
-Plugins/InoAgents/NeuTtsNano/Resources/voices/<voice-name>.nvoice.json
+Plugins/InoAgents/NeuTtsNanoNative/Resources/voices/<voice-name>.nvoice.json
 — this script can output there too via --output + --display-name.
 
 ------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def main() -> None:
     parser.add_argument(
         "--output", type=pathlib.Path, default=None,
         help="Output JSON path. Defaults to "
-             "Plugins/InoAgents/NeuTtsNano/Resources/default_voice.nvoice.json "
+             "Plugins/InoAgents/NeuTtsNanoNative/Resources/default_voice.nvoice.json "
              "relative to this script.",
     )
     parser.add_argument(

@@ -5,7 +5,7 @@
 # first LoadModelAsync call doesn't have to wait ~2 minutes for ~1 GB
 # of downloads.
 #
-# Not required for correctness: UInoNeuTtsNanoSubsystem downloads both
+# Not required for correctness: UInoNeuTtsNanoNativeSubsystem downloads both
 # files at runtime on first use. This script just warms the cache for
 # faster dev iteration.
 #
@@ -15,9 +15,9 @@
 #
 # Destination:
 #   %LOCALAPPDATA%/InoProject/Saved/PersistentDownloadDir/InoAgents/
-#       Models/NeuTtsNano/q4/neutts-nano-Q4_0.gguf
+#       Models/NeuTtsNanoNative/q4/neutts-nano-Q4_0.gguf
 #   %LOCALAPPDATA%/InoProject/Saved/PersistentDownloadDir/InoAgents/
-#       Models/NeuTtsNano/q4/model.onnx
+#       Models/NeuTtsNanoNative/q4/model.onnx
 #
 # (Path is derived from FPaths::ProjectPersistentDownloadDir() for the
 # InoProject project; if your project name differs, pass -ProjectName.)
@@ -37,7 +37,7 @@ $NeuTtsDir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 # PersistentDownloadDir (what UE's FPaths::ProjectPersistentDownloadDir() returns on Win64):
 #   %LOCALAPPDATA%/<ProjectName>/Saved/PersistentDownloadDir/
 $LocalAppData = [Environment]::GetFolderPath("LocalApplicationData")
-$StageDir = Join-Path $LocalAppData "$ProjectName\Saved\PersistentDownloadDir\InoAgents\Models\NeuTtsNano\q4"
+$StageDir = Join-Path $LocalAppData "$ProjectName\Saved\PersistentDownloadDir\InoAgents\Models\NeuTtsNanoNative\q4"
 
 Write-Host ""
 Write-Host "=== NeuTTS Nano model pre-stage ===" -ForegroundColor Cyan
@@ -82,5 +82,5 @@ Download-IfMissing `
 
 Write-Host ""
 Write-Host "=== Pre-stage complete ===" -ForegroundColor Green
-Write-Host "UInoNeuTtsNanoSubsystem::LoadModelAsync will find these files"
+Write-Host "UInoNeuTtsNanoNativeSubsystem::LoadModelAsync will find these files"
 Write-Host "on first use and skip the runtime download."

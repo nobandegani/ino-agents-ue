@@ -1,3 +1,3 @@
 # Download cache populated by setup-neutts-nano.ps1. Safe to wipe
-# (runtime download path in UInoNeuTtsNanoSubsystem will re-fetch).
+# (runtime download path in UInoNeuTtsNanoNativeSubsystem will re-fetch).
 .cache/

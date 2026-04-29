@@ -9,12 +9,12 @@
 
 #include "UObject/WeakObjectPtr.h"
 
-#include "NeuTtsNano/InoNeuTtsNanoTypes.h"   // FInoNeuTtsNanoSynthesisOptions, FOn*
+#include "NeuTtsNanoNative/InoNeuTtsNanoNativeTypes.h"   // FInoNeuTtsNanoNativeSynthesisOptions, FOn*
 
 // Forward-decls — the worker's .cpp pulls in the real types.
-class FInoNeuTtsNanoRunner;
-class FInoNeuTtsNanoVoiceRegistry;
-class UInoNeuTtsNanoSubsystem;
+class FInoNeuTtsNanoNativeRunner;
+class FInoNeuTtsNanoNativeVoiceRegistry;
+class UInoNeuTtsNanoNativeSubsystem;
 class FEvent;
 
 /**
@@ -29,12 +29,12 @@ class FEvent;
  * OnAudioChunk repeatedly during the AR loop with delta waveforms and
  * fires OnComplete at the end with the full concatenated audio.
  */
-struct FInoNeuTtsNanoPendingSynth
+struct FInoNeuTtsNanoNativePendingSynth
 {
     FString PhonemesText;                              // pre-phonemized IPA
     FName   VoiceName;
-    FInoNeuTtsNanoSynthesisOptions     Options;
-    FOnInoNeuTtsNanoSynthesisComplete  OnComplete;     // dynamic — invoke on GT
+    FInoNeuTtsNanoNativeSynthesisOptions     Options;
+    FOnInoNeuTtsNanoNativeSynthesisComplete  OnComplete;     // dynamic — invoke on GT
 
     /** True when the subsystem's SynthesizeStreamAsync entry point was
      *  used. When false, OnAudioChunk is left default-constructed and
@@ -46,11 +46,11 @@ struct FInoNeuTtsNanoPendingSynth
     /** Dynamic delegate for per-chunk audio deltas. Only consulted
      *  when bStreamingEnabled==true. FString / TArray params by const
      *  ref per UE BindDynamic rules (same as OnComplete). */
-    FOnInoNeuTtsNanoAudioChunk OnAudioChunk;
+    FOnInoNeuTtsNanoNativeAudioChunk OnAudioChunk;
 };
 
 /**
- * Dedicated synthesis worker thread for UInoNeuTtsNanoSubsystem.
+ * Dedicated synthesis worker thread for UInoNeuTtsNanoNativeSubsystem.
  *
  * Single-thread-serializing consumer of:
  *   - llama_context (not thread-safe — only one decode at a time)
@@ -59,7 +59,7 @@ struct FInoNeuTtsNanoPendingSynth
  *
  * Threading contract (Milestone 3 scope — expanded in Milestone 4):
  *   - One pinned FRunnableThread per worker instance.
- *   - Created + Stopped by UInoNeuTtsNanoSubsystem on the game thread.
+ *   - Created + Stopped by UInoNeuTtsNanoNativeSubsystem on the game thread.
  *   - The dtor waits for the worker thread to exit before returning.
  *   - Cancellation is cooperative: SignalCancel() sets an atomic the
  *     AR loop checks between sampler iterations.
@@ -70,18 +70,18 @@ struct FInoNeuTtsNanoPendingSynth
  *   - No actual synthesis path yet — Milestone 4 adds Enqueue + the
  *     full prompt → decode → sample → codec → PCM pipeline.
  */
-class FInoNeuTtsNanoSynthesisWorker : public FRunnable
+class FInoNeuTtsNanoNativeSynthesisWorker : public FRunnable
 {
 public:
-    FInoNeuTtsNanoSynthesisWorker(
-        TWeakObjectPtr<UInoNeuTtsNanoSubsystem> InOwner,
-        FInoNeuTtsNanoRunner* InRunner,
-        const FInoNeuTtsNanoVoiceRegistry* InVoiceRegistry);
+    FInoNeuTtsNanoNativeSynthesisWorker(
+        TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> InOwner,
+        FInoNeuTtsNanoNativeRunner* InRunner,
+        const FInoNeuTtsNanoNativeVoiceRegistry* InVoiceRegistry);
 
-    virtual ~FInoNeuTtsNanoSynthesisWorker();
+    virtual ~FInoNeuTtsNanoNativeSynthesisWorker();
 
-    FInoNeuTtsNanoSynthesisWorker(const FInoNeuTtsNanoSynthesisWorker&) = delete;
-    FInoNeuTtsNanoSynthesisWorker& operator=(const FInoNeuTtsNanoSynthesisWorker&) = delete;
+    FInoNeuTtsNanoNativeSynthesisWorker(const FInoNeuTtsNanoNativeSynthesisWorker&) = delete;
+    FInoNeuTtsNanoNativeSynthesisWorker& operator=(const FInoNeuTtsNanoNativeSynthesisWorker&) = delete;
 
     //~ FRunnable
     virtual uint32 Run() override;
@@ -96,15 +96,15 @@ public:
     /** Game-thread entry point — copies the pending synth into the
      *  queue and wakes the worker. Consumes one Spsc slot; serialised
      *  in the subsystem (never called from multiple threads). */
-    void Enqueue(FInoNeuTtsNanoPendingSynth Pending);
+    void Enqueue(FInoNeuTtsNanoNativePendingSynth Pending);
 
 private:
     // Non-owning references. The subsystem guarantees these outlive
     // the worker (dtor order: worker first via Worker.Reset(), then
     // Runner.Reset(), then VoiceRegistry.Reset()).
-    TWeakObjectPtr<UInoNeuTtsNanoSubsystem> WeakSubsystem;
-    FInoNeuTtsNanoRunner*                   Runner        = nullptr;
-    const FInoNeuTtsNanoVoiceRegistry*      VoiceRegistry = nullptr;
+    TWeakObjectPtr<UInoNeuTtsNanoNativeSubsystem> WeakSubsystem;
+    FInoNeuTtsNanoNativeRunner*                   Runner        = nullptr;
+    const FInoNeuTtsNanoNativeVoiceRegistry*      VoiceRegistry = nullptr;
 
     // Thread + queue-signalling event.
     FRunnableThread* Thread     = nullptr;
@@ -115,17 +115,17 @@ private:
     TAtomic<bool> bStreamCancelled{false};
 
     // Spsc producer: subsystem game-thread Enqueue. Consumer: Run().
-    TQueue<FInoNeuTtsNanoPendingSynth, EQueueMode::Spsc> Queue;
+    TQueue<FInoNeuTtsNanoNativePendingSynth, EQueueMode::Spsc> Queue;
 
     // Core synthesis pipeline — runs on the worker thread.
-    void ProcessSynth(FInoNeuTtsNanoPendingSynth& Pending);
+    void ProcessSynth(FInoNeuTtsNanoNativePendingSynth& Pending);
 
     // Game-thread marshal — dispatches OnComplete via AsyncTask so the
     // dynamic delegate fires on the correct thread. No SampleRate
     // param: NeuTTS Nano's output rate is fixed at 24 kHz (see
-    // UInoNeuTtsNanoSubsystem::GetOutputSampleRate).
+    // UInoNeuTtsNanoNativeSubsystem::GetOutputSampleRate).
     void DispatchCompleteOnGameThread(
-        FOnInoNeuTtsNanoSynthesisComplete OnComplete,
+        FOnInoNeuTtsNanoNativeSynthesisComplete OnComplete,
         bool             bSuccess,
         TArray<uint8>    PcmInt16LE,
         FString          ErrorMessage);
@@ -135,7 +135,7 @@ private:
     // move the bytes into the lambda, verify the subsystem is still
     // alive at invocation time.
     void DispatchAudioChunkOnGameThread(
-        FOnInoNeuTtsNanoAudioChunk OnAudioChunk,
+        FOnInoNeuTtsNanoNativeAudioChunk OnAudioChunk,
         TArray<uint8>              AudioChunk,
         bool                       bIsFinal,
         int32                      NumSpeechIds);

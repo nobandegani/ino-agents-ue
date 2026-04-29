@@ -10,7 +10,7 @@ void FInoNeuTtsNativeModule::StartupModule()
     // are pre-loaded by sibling plugins (InoLlama, InoOnnx) at
     // PreLoadingScreen, so both vtables are already callable. Models
     // load lazily off the game thread via
-    // UInoNeuTtsNanoSubsystem::LoadModelAsync.
+    // UInoNeuTtsNanoNativeSubsystem::LoadModelAsync.
 }
 
 void FInoNeuTtsNativeModule::ShutdownModule()
