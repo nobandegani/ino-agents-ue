@@ -4,7 +4,7 @@
 // Misc/SecureHash.h) and Blake3 (in Hash/Blake3.h) but no first-class
 // SHA-256. We only need SHA-256 here to verify downloaded .litertlm model
 // files against the ExpectedSha256 stored per-model in
-// UInoAgentsSettings::Models — so rather than pull another runtime
+// UInoLiteRtLmSettings::Models — so rather than pull another runtime
 // dependency or prototype an OpenSSL bind, we bundle a public-domain
 // reference implementation adapted from Brad Conte's
 // https://github.com/B-Con/crypto-algorithms (sha256.c).

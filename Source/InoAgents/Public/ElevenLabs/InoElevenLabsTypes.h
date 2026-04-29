@@ -108,7 +108,7 @@ struct FInoElevenLabsDialogueRequest
 //
 // Parameter-passing convention:
 //   - FString / enum / int64 / float / POD structs -> BY VALUE, matching
-//     the LiteRtLm plugin convention (see InoAgentsLiteRtLmConversation
+//     the LiteRtLm plugin convention (see InoLiteRtLmConversation
 //     ToolTest.cpp:126, 146, 166, 206).
 //   - TArray<T> and other containers -> `const TArray<T>&` (by const ref).
 //     Passing TArray<uint8> by value here produces a cryptic Blueprint-time
