@@ -12,8 +12,8 @@
 	"SupportURL": "",
 	"CanContainContent": true,
 	"IsBetaVersion": true,
-	"IsExperimentalVersion": false,
-	"Installed": false,
+	"IsExperimentalVersion": true,
+	"Installed": true,
 	"Plugins": [
 		{
 			"Name": "JsonBlueprintUtilities",
