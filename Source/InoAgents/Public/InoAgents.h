@@ -12,7 +12,7 @@
  * Default-phase StartupModule:
  *   - LiteRT + LiteRT-LM — provided by the `InoLiteRT` plugin.
  *   - ONNX Runtime — provided by the `InoOnnx` plugin (consumed via
- *     InoAgents::Onnx::GetApi() — see "InoOnnx.h").
+ *     InoOnnx::GetApi() — see "InoOnnx.h").
  *   - llama.cpp — provided by the `InoLlama` plugin (consumed via
  *     InoAgents::LlamaCpp::GetApi() — see "InoLlama.h").
  *

@@ -9,7 +9,7 @@
 #include "Onnx/InoOnnxTypes.h"
 #include "Onnx/InoOnnxTensor.h"
 #include "Onnx/InoOnnxSession.h"
-#include "InoOnnx.h"              // for InoAgents::Onnx::GetApi() sanity check (from sibling InoOnnx plugin)
+#include "InoOnnx.h"              // for InoOnnx::GetApi() sanity check (from sibling InoOnnx plugin)
 
 #include "onnxruntime_c_api.h"     // for OrtApi::GetAvailableProviders in ProvidersTest
 
@@ -47,7 +47,7 @@ namespace
 
     void RunProvidersTest(const TArray<FString>& /*Args*/)
     {
-        const OrtApi* Api = InoAgents::Onnx::GetApi();
+        const OrtApi* Api = InoOnnx::GetApi();
         if (Api == nullptr)
         {
             UE_LOG(LogInoAgents, Error,

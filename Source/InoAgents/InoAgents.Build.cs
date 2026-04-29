@@ -47,12 +47,6 @@ public class InoAgents : ModuleRules
 				// and similar private headers without relative paths.
 				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 
-				// Subdirectory of Private/ that holds ORT-consuming code
-				// (session wrapper, internal helpers, TTS workers). The
-				// runtime DLL loader + InoAgents::Onnx::GetApi() accessor
-				// itself lives in the sibling InoOnnx plugin's InoOnnx.h.
-				Path.Combine(ModuleDirectory, "Private", "Onnx"),
-
 				// Subdirectory of Private/ that holds the Slate chat-panel
 				// implementation (private widgets, style, bridge .cpp).
 				// Added so sibling .cpps can #include "InoChatStyle.h"
@@ -102,7 +96,7 @@ public class InoAgents : ModuleRules
 				"InoOnnx",           // ONNX Runtime (Ort::Session / Env / Value) supplied by the
 				                     // sibling InoOnnx plugin. Exposes:
 				                     //   #include "onnxruntime_c_api.h"   (ORT C API)
-				                     //   #include "InoOnnx.h"             (InoAgents::Onnx::GetApi() accessor)
+				                     //   #include "InoOnnx.h"             (InoOnnx::GetApi() accessor)
 				                     // and stages the runtime DLLs/.so for packaging. The plugin
 				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
 				                     // are callable by the time this module's StartupModule runs.

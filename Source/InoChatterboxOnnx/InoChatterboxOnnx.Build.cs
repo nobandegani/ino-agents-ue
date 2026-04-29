@@ -64,7 +64,7 @@ public class InoChatterboxOnnx : ModuleRules
 
 				"InoOnnx",          // ONNX Runtime — the entire reason this
 				                    // module exists. Provides
-				                    // InoAgents::Onnx::GetApi() + the OrtApi*
+				                    // InoOnnx::GetApi() + the OrtApi*
 				                    // vtable used by FInoChatterboxRunner.
 
 				"DeveloperSettings", // UDeveloperSettings base class for
