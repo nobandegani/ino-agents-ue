@@ -410,7 +410,7 @@ public:
      * re-scanned.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
-              meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmSentenceSplit"))
+              meta = (Bitmask, BitmaskEnum = "/Script/InoLiteRtLm.EInoLiteRtLmSentenceSplit"))
     int32 SentenceSplitFlags =
           static_cast<int32>(EInoLiteRtLmSentenceSplit::Newline)
         | static_cast<int32>(EInoLiteRtLmSentenceSplit::Period)
@@ -422,7 +422,7 @@ public:
      *  EInoLiteRtLmSentenceSplit values OR'd into an int32. */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void SetSentenceSplitFlags(
-        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmSentenceSplit"))
+        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoLiteRtLm.EInoLiteRtLmSentenceSplit"))
         int32 NewFlags);
 
     /** Current split flags as an int32 bitmask. */
@@ -443,7 +443,7 @@ public:
      * inside a tag of that type still closes it cleanly.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
-              meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmTagStrip"))
+              meta = (Bitmask, BitmaskEnum = "/Script/InoLiteRtLm.EInoLiteRtLmTagStrip"))
     int32 TagStripFlags =
           static_cast<int32>(EInoLiteRtLmTagStrip::SquareBrackets)
         | static_cast<int32>(EInoLiteRtLmTagStrip::CurlyBraces);
@@ -452,7 +452,7 @@ public:
      *  EInoLiteRtLmTagStrip values OR'd into an int32. */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM")
     void SetTagStripFlags(
-        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoAgents.EInoLiteRtLmTagStrip"))
+        UPARAM(meta = (Bitmask, BitmaskEnum = "/Script/InoLiteRtLm.EInoLiteRtLmTagStrip"))
         int32 NewFlags);
 
     /** Current tag-strip flags as an int32 bitmask. */
