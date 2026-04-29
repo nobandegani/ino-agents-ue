@@ -7,7 +7,6 @@
 #include "Engine/GameInstance.h"
 
 class FJsonObject;
-class UInoLiteRtLmSubsystem;
 class UInoElevenLabsSubsystem;
 
 /**
@@ -52,11 +51,11 @@ namespace InoSmokeTest
 
     /**
      * Typed wrappers for subsystems that live in InoAgents core. Sub-
-     * modules whose subsystem lives elsewhere (e.g. Chatterbox via
-     * InoChatterboxNative) should call FindGameInstanceSubsystem<T>()
-     * directly to avoid pulling InoAgents core into a dep cycle.
+     * modules whose subsystem lives elsewhere (e.g. LiteRT-LM via
+     * InoLiteRtLm, Chatterbox via InoChatterboxNative) should call
+     * FindGameInstanceSubsystem<T>() directly to avoid pulling
+     * InoAgents core into a dep cycle.
      */
-    INOAGENTS_API UInoLiteRtLmSubsystem*  FindLiteRtLmSubsystem();
     INOAGENTS_API UInoElevenLabsSubsystem* FindElevenLabsSubsystem();
 
     /**

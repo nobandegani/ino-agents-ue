@@ -25,7 +25,7 @@
 
 static void RunLiteRtLmToolRegistryTest(const TArray<FString>& /*Args*/)
 {
-    UInoLiteRtLmSubsystem* const Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
+    UInoLiteRtLmSubsystem* const Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

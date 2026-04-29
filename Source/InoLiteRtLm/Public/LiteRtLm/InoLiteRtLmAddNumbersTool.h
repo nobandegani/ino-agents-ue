@@ -28,7 +28,7 @@
  * it must construct and register it explicitly.
  */
 UCLASS(BlueprintType)
-class INOAGENTS_API UInoLiteRtLmAddNumbersTool : public UInoLiteRtLmToolBase
+class INOLITERTLM_API UInoLiteRtLmAddNumbersTool : public UInoLiteRtLmToolBase
 {
     GENERATED_BODY()
 

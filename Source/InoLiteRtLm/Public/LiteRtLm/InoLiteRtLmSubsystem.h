@@ -63,7 +63,7 @@ extern "C" {
  *                    Clears the tool registry.
  */
 UCLASS()
-class INOAGENTS_API UInoLiteRtLmSubsystem : public UGameInstanceSubsystem
+class INOLITERTLM_API UInoLiteRtLmSubsystem : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
 

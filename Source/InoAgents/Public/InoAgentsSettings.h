@@ -6,17 +6,21 @@
 #include "Engine/DeveloperSettings.h"
 
 #include "ElevenLabs/InoElevenLabsTypes.h"
-#include "LiteRtLm/InoLiteRtLmTypes.h"
 
 #include "InoAgentsSettings.generated.h"
 
 /**
- * Project-wide InoAgents configuration.
+ * Project-wide InoAgents core configuration (ElevenLabs cloud TTS).
  *
  * Visible under Edit -> Project Settings -> Plugins -> InoAgents.
- * One page with three sections: ElevenLabs, LiteRT-LM, Chatterbox.
  * Persisted to Config/DefaultGame.ini under
  * [/Script/InoAgents.InoAgentsSettings].
+ *
+ * Sub-module-specific settings live in their own UDeveloperSettings
+ * pages owned by their module (UInoLiteRtLmSettings,
+ * UInoChatterboxNativeSettings, UInoNeuTtsNativeSettings) — that way
+ * deleting a sub-module's directory + its .uplugin entry also removes
+ * its settings page automatically.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "InoAgents"))
 class INOAGENTS_API UInoAgentsSettings : public UDeveloperSettings
@@ -56,16 +60,6 @@ public:
     EInoElevenLabsOutputFormat ElevenLabsDefaultOutputFormat = EInoElevenLabsOutputFormat::Mp3_44100_128;
 
     // =============================================================
-    // LiteRT-LM
-    // =============================================================
-
-    /** Available models and their download URLs. The agent component
-     *  matches its ModelConfig.ModelFileName against this array to find
-     *  the download URL when the model isn't on disk yet. */
-    UPROPERTY(EditAnywhere, Config, Category = "LiteRT-LM|Models")
-    TArray<FInoLiteRtLmModelEntry> Models;
-
-    // =============================================================
     // Accessors
     // =============================================================
 
@@ -74,16 +68,4 @@ public:
     /** Effective ElevenLabs base URL (override or hardcoded default).
      *  Trailing slashes are stripped. */
     FString GetEffectiveElevenLabsBaseUrl() const;
-
-    /** Look up a model entry by filename. Returns nullptr if not found. */
-    const FInoLiteRtLmModelEntry* FindModelByFileName(const FString& FileName) const;
-
-    /** Look up a model entry by either its DisplayName ("Gemma 4 E2B") or its
-     *  ModelFileName ("gemma-4-E2B-it.litertlm"). Case-insensitive. Returns
-     *  nullptr if no entry matches either field. This is the forgiving
-     *  lookup used by UInoLiteRtLmSubsystem::LoadModelAsync so Blueprint
-     *  users don't have to memorize the exact on-disk filename — they can
-     *  use the friendlier display name and the subsystem canonicalizes
-     *  transparently. */
-    const FInoLiteRtLmModelEntry* FindModel(const FString& NameOrFileName) const;
 };

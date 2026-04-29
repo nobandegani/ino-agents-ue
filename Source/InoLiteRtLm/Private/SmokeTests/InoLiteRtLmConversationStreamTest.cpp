@@ -193,7 +193,7 @@ void UInoLiteRtLmConversationStreamTestObserver::Finish()
 
 static void RunLiteRtLmConversationStreamTest(const TArray<FString>& Args)
 {
-    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

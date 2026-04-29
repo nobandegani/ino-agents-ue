@@ -4,7 +4,7 @@
 
 #include "InoAgentsLog.h"
 #include "LiteRtLm/InoLiteRtLmConversation.h"
-#include "InoAgentsSettings.h"
+#include "InoLiteRtLmSettings.h"
 #include "LiteRtLm/InoLiteRtLmToolBase.h"
 #include "LiteRtLm/InoLiteRtLmTypes.h"
 #include "LiteRtLm/InoSha256.h"
@@ -125,9 +125,9 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
     // canonicalize the file name in a local config copy so the rest of
     // this function (disk check, download target path, download callback's
     // rename step, smoke-test paths) all use one consistent on-disk name.
-    const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get();
-    const FInoLiteRtLmModelEntry* Entry = AgentSettings
-        ? AgentSettings->FindModel(Config.ModelFileName)
+    const UInoLiteRtLmSettings* LrlSettings = UInoLiteRtLmSettings::Get();
+    const FInoLiteRtLmModelEntry* Entry = LrlSettings
+        ? LrlSettings->FindModel(Config.ModelFileName)
         : nullptr;
 
     FInoLiteRtLmModelConfig ResolvedConfig = Config;
@@ -329,9 +329,9 @@ bool UInoLiteRtLmSubsystem::IsModelDownloaded(const FString& ModelNameOrFileName
     // If settings aren't available (shouldn't happen at runtime, but guard
     // anyway) or the name isn't registered, fall through with the raw input.
     FString FileName = ModelNameOrFileName;
-    if (const UInoAgentsSettings* AgentSettings = UInoAgentsSettings::Get())
+    if (const UInoLiteRtLmSettings* LrlSettings = UInoLiteRtLmSettings::Get())
     {
-        if (const FInoLiteRtLmModelEntry* Entry = AgentSettings->FindModel(ModelNameOrFileName))
+        if (const FInoLiteRtLmModelEntry* Entry = LrlSettings->FindModel(ModelNameOrFileName))
         {
             FileName = Entry->ModelFileName;
         }
@@ -834,9 +834,9 @@ void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
     // before handing it to the native engine. bAllowRedownloadOnMismatch=false
     // so that a corrupt upstream can't put us in an infinite redownload loop —
     // if a just-downloaded file fails verification we treat it as a hard error.
-    const UInoAgentsSettings*     PostSettings = UInoAgentsSettings::Get();
-    const FInoLiteRtLmModelEntry* PostEntry    = PostSettings
-        ? PostSettings->FindModelByFileName(LoadedConfig.ModelFileName)
+    const UInoLiteRtLmSettings*     LrlSettings = UInoLiteRtLmSettings::Get();
+    const FInoLiteRtLmModelEntry* PostEntry    = LrlSettings
+        ? LrlSettings->FindModelByFileName(LoadedConfig.ModelFileName)
         : nullptr;
     VerifyAndLoad(PendingDownloadTargetPath, PostEntry, PendingOnLoaded,
                   /*bAllowRedownloadOnMismatch=*/ false);

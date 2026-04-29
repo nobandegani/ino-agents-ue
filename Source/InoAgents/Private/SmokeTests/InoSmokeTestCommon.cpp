@@ -4,7 +4,6 @@
 
 #include "InoAgentsLog.h"
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
-#include "LiteRtLm/InoLiteRtLmSubsystem.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -17,11 +16,6 @@
 
 namespace InoSmokeTest
 {
-
-UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
-{
-    return FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
-}
 
 UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
 {

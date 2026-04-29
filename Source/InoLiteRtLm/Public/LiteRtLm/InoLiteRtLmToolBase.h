@@ -61,7 +61,7 @@ struct FInoLiteRtLmToolParameter
  * freely touch UObjects, actors, components, and world state.
  */
 UCLASS(Blueprintable, BlueprintType, Abstract)
-class INOAGENTS_API UInoLiteRtLmToolBase : public UObject
+class INOLITERTLM_API UInoLiteRtLmToolBase : public UObject
 {
     GENERATED_BODY()
 

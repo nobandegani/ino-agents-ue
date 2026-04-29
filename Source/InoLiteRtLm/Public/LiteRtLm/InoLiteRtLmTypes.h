@@ -24,7 +24,7 @@ enum class EInoLiteRtLmBackend : uint8
  * pointer is a static string literal — do not free it, do not copy it, its
  * lifetime is the module's lifetime.
  */
-INOAGENTS_API const char* LiteRtLmBackendToString(EInoLiteRtLmBackend Backend);
+INOLITERTLM_API const char* LiteRtLmBackendToString(EInoLiteRtLmBackend Backend);
 
 // ============================================================================
 // Sampler + activation enums/structs
@@ -216,7 +216,7 @@ struct FInoLiteRtLmModelEntry
  *  1. PersistentDownloadDir/InoAgents/Models/ (downloaded/cached)
  *  2. Plugins/InoAgents/Models/ (legacy dev path)
  *  Returns empty string if not found anywhere. */
-INOAGENTS_API FString LiteRtLmResolveModelPath(const FString& ModelFileName);
+INOLITERTLM_API FString LiteRtLmResolveModelPath(const FString& ModelFileName);
 
 // ============================================================================
 // Delegates

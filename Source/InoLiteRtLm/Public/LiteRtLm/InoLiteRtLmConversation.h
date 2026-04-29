@@ -123,7 +123,7 @@ ENUM_CLASS_FLAGS(EInoLiteRtLmTagStrip);
  * passed to OnComplete.
  */
 UCLASS(BlueprintType)
-class INOAGENTS_API UInoLiteRtLmConversation : public UObject
+class INOLITERTLM_API UInoLiteRtLmConversation : public UObject
 {
     GENERATED_BODY()
 

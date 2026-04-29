@@ -225,7 +225,7 @@ void UInoLiteRtLmConversationToolTestObserver::Finish()
 
 static void RunLiteRtLmConversationToolTest(const TArray<FString>& Args)
 {
-    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindLiteRtLmSubsystem();
+    UInoLiteRtLmSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

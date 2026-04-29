@@ -43,6 +43,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "InoLiteRtLm",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "InoChatterboxNative",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"

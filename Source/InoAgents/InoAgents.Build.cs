@@ -33,19 +33,13 @@ public class InoAgents : ModuleRules
 
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				// Subdirectory of Private/ that holds the phase-1 smoke test
-				// .cpp source files. The shared helpers
-				// (InoSmokeTestCommon.h) live in Public/SmokeTests/ so
-				// sub-modules can reuse them; InoAgentsLog.h is also in
-				// Public/ now. This entry exists for any header-only
+				// Subdirectory of Private/ that holds smoke-test impl
+				// for InoAgents-core sub-systems (ElevenLabs). The shared
+				// helpers (InoSmokeTestCommon.h) live in Public/SmokeTests/
+				// so sub-modules can reuse them; InoAgentsLog.h is in
+				// Public/ too. This entry exists for any header-only
 				// helpers private to the test sources themselves.
 				Path.Combine(ModuleDirectory, "Private", "SmokeTests"),
-
-				// Subdirectory of Private/ that holds the LiteRT-LM backend
-				// implementation (workers, tool impls, etc.). Added so that
-				// InoLiteRtLmSubsystem.cpp can #include "InoLiteRtLmConversationWorker.h"
-				// and similar private headers without relative paths.
-				Path.Combine(ModuleDirectory, "Private", "LiteRtLm"),
 
 				// Subdirectory of Private/ that holds the ElevenLabs HTTP
 				// backend implementation (subsystem, async actions, request
@@ -70,15 +64,9 @@ public class InoAgents : ModuleRules
 				"Core",
 				"CoreUObject",       // UObject, UCLASS, UENUM, dynamic delegate macros — used throughout
 				                     // Source/InoAgents/Public/LiteRtLm/ starting at Milestone D.1.
-				"Engine",            // UDataAsset, UGameInstanceSubsystem, GEngine, FWorldContext —
-				                     // used in ULiteRtLmModelConfig and UInoLiteRtLmSubsystem.
-				"InoLiteRT",         // LiteRT + LiteRT-LM C APIs, supplied by the sibling
-				                     // InoLiteRT plugin. Exposes:
-				                     //   #include "litert/c/litert_*.h"  (LiteRT TFLite runtime)
-				                     //   #include "litert/lm/engine.h"   (LiteRT-LM LLM runtime)
-				                     // and stages the runtime DLLs/.so for packaging. The plugin
-				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
-				                     // are callable by the time this module's StartupModule runs.
+				"Engine",            // UGameInstanceSubsystem, GEngine, FWorldContext —
+				                     // used by UInoElevenLabsSubsystem and the smoke
+				                     // test helpers in InoSmokeTestCommon.
 				"InoOnnx",           // ONNX Runtime (Ort::Session / Env / Value) supplied by the
 				                     // sibling InoOnnx plugin. Exposes:
 				                     //   #include "onnxruntime_c_api.h"   (ORT C API)
