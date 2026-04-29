@@ -71,7 +71,7 @@ class FInoNeuTtsNanoVoiceRegistry;
  * switch, call UnloadModel() then LoadModelAsync() with the new config.
  */
 UCLASS(DisplayName = "NeuTTS Nano Subsystem")
-class INOAGENTS_API UInoNeuTtsNanoSubsystem : public UGameInstanceSubsystem
+class INONEUTTSNATIVE_API UInoNeuTtsNanoSubsystem : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
 

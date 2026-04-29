@@ -3,7 +3,7 @@
 #include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
 
 #include "InoAgentsLog.h"
-#include "InoAgentsSettings.h"
+#include "InoNeuTtsNativeSettings.h"
 
 // Private NeuTtsNano implementation headers. Fully visible here so the
 // forward-declared TUniquePtr<> members' deleter can instantiate
@@ -245,12 +245,12 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
     }
 
     // Look up the settings entry for the requested variant.
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     if (Settings == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
-               TEXT("NeuTtsNano: Subsystem: LoadModelAsync FAILED — UInoAgentsSettings unavailable"));
-        OnLoaded.ExecuteIfBound(false, TEXT("UInoAgentsSettings unavailable."));
+               TEXT("NeuTtsNano: Subsystem: LoadModelAsync FAILED — UInoNeuTtsNativeSettings unavailable"));
+        OnLoaded.ExecuteIfBound(false, TEXT("UInoNeuTtsNativeSettings unavailable."));
         return;
     }
     const FInoNeuTtsNanoModelEntry* Entry = Settings->FindNeuTtsNanoModel(Config.Variant);
@@ -260,7 +260,7 @@ void UInoNeuTtsNanoSubsystem::LoadModelAsync(
                TEXT("NeuTtsNano: Subsystem: LoadModelAsync FAILED — no settings entry for variant %s"),
                *NeuTtsNanoVariantToString(Config.Variant));
         OnLoaded.ExecuteIfBound(false, FString::Printf(
-            TEXT("No UInoAgentsSettings entry for NeuTTS Nano variant '%s'. "
+            TEXT("No UInoNeuTtsNativeSettings entry for NeuTTS Nano variant '%s'. "
                  "Add one under Edit → Project Settings → Plugins → InoAgents → NeuTTS Nano."),
             *NeuTtsNanoVariantToString(Config.Variant)));
         return;
@@ -525,7 +525,7 @@ void UInoNeuTtsNanoSubsystem::CancelSynthesis()
 
 bool UInoNeuTtsNanoSubsystem::IsModelDownloaded(EInoNeuTtsNanoBackboneVariant Variant) const
 {
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     if (Settings == nullptr)
     {
         return false;
@@ -594,7 +594,7 @@ void UInoNeuTtsNanoSubsystem::StartDownload()
 {
     check(IsInGameThread());
 
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     const FInoNeuTtsNanoModelEntry* Entry =
         Settings ? Settings->FindNeuTtsNanoModel(PendingConfig.Variant) : nullptr;
     if (Entry == nullptr)
@@ -1078,7 +1078,7 @@ void UInoNeuTtsNanoSubsystem::DispatchLoadWorker()
     check(IsInGameThread());
 
     // Resolve file paths we'll hand to the ThreadPool task.
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     const FInoNeuTtsNanoModelEntry* Entry =
         Settings ? Settings->FindNeuTtsNanoModel(PendingConfig.Variant) : nullptr;
     if (Entry == nullptr)

@@ -5,7 +5,6 @@
 #include "InoAgentsLog.h"
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
-#include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -27,11 +26,6 @@ UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
 UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
 {
     return FindGameInstanceSubsystem<UInoElevenLabsSubsystem>();
-}
-
-UInoNeuTtsNanoSubsystem* FindNeuTtsNanoSubsystem()
-{
-    return FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
 }
 
 FString ResolveDefaultModelPath()

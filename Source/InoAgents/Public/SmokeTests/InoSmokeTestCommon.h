@@ -9,7 +9,6 @@
 class FJsonObject;
 class UInoLiteRtLmSubsystem;
 class UInoElevenLabsSubsystem;
-class UInoNeuTtsNanoSubsystem;
 
 /**
  * Helpers shared between smoke test console commands across the
@@ -59,7 +58,6 @@ namespace InoSmokeTest
      */
     INOAGENTS_API UInoLiteRtLmSubsystem*  FindLiteRtLmSubsystem();
     INOAGENTS_API UInoElevenLabsSubsystem* FindElevenLabsSubsystem();
-    INOAGENTS_API UInoNeuTtsNanoSubsystem* FindNeuTtsNanoSubsystem();
 
     /**
      * Resolve the default phase-1 Gemma 4 E2B model path:

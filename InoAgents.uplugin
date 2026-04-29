@@ -46,6 +46,11 @@
 			"Name": "InoChatterboxOnnx",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "InoNeuTtsNative",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	]
 }

@@ -28,7 +28,7 @@
 #include "InoNeuTtsNanoDownloadTest.h"
 
 #include "InoAgentsLog.h"
-#include "InoAgentsSettings.h"
+#include "InoNeuTtsNativeSettings.h"
 #include "InoSmokeTestCommon.h"
 #include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
 
@@ -97,7 +97,7 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleLoaded(
            Elapsed);
 
     // File-stat check: both expected files should exist on disk now.
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoNeuTtsNativeSettings* Settings = UInoNeuTtsNativeSettings::Get();
     const FInoNeuTtsNanoModelEntry* Entry =
         Settings ? Settings->FindNeuTtsNanoModel(Config.Variant) : nullptr;
     if (Entry != nullptr)
@@ -148,7 +148,7 @@ void UInoNeuTtsNanoDownloadTestObserver::HandleLoaded(
 
 static void RunNeuTtsNanoDownloadTest(const TArray<FString>& /*Args*/)
 {
-    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindNeuTtsNanoSubsystem();
+    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,

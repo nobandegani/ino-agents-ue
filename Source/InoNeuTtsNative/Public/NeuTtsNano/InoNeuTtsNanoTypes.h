@@ -35,7 +35,7 @@ enum class EInoNeuTtsNanoBackboneVariant : uint8
  * Seeded in the UInoAgentsSettings constructor with the Q4 defaults.
  */
 USTRUCT(BlueprintType)
-struct INOAGENTS_API FInoNeuTtsNanoModelEntry
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelEntry
 {
     GENERATED_BODY()
 
@@ -98,7 +98,7 @@ struct INOAGENTS_API FInoNeuTtsNanoModelEntry
  * benchmarking shows the defaults leave performance on the table.
  */
 USTRUCT(BlueprintType)
-struct INOAGENTS_API FInoNeuTtsNanoPerformanceOptions
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoPerformanceOptions
 {
     GENERATED_BODY()
 
@@ -269,7 +269,7 @@ struct INOAGENTS_API FInoNeuTtsNanoPerformanceOptions
  * else has sensible defaults.
  */
 USTRUCT(BlueprintType)
-struct INOAGENTS_API FInoNeuTtsNanoModelConfig
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoModelConfig
 {
     GENERATED_BODY()
 
@@ -305,7 +305,7 @@ struct INOAGENTS_API FInoNeuTtsNanoModelConfig
  * max_tokens=max_context).
  */
 USTRUCT(BlueprintType)
-struct INOAGENTS_API FInoNeuTtsNanoSynthesisOptions
+struct INONEUTTSNATIVE_API FInoNeuTtsNanoSynthesisOptions
 {
     GENERATED_BODY()
 
@@ -495,7 +495,7 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoAudioChunk,
  * Returns "q4" / "q8" (or similar short tokens) for a variant. Used to
  * build variant-scoped paths and directory names.
  */
-INOAGENTS_API FString NeuTtsNanoVariantToString(EInoNeuTtsNanoBackboneVariant Variant);
+INONEUTTSNATIVE_API FString NeuTtsNanoVariantToString(EInoNeuTtsNanoBackboneVariant Variant);
 
 /**
  * Absolute directory where model files for a given variant live:
@@ -506,4 +506,4 @@ INOAGENTS_API FString NeuTtsNanoVariantToString(EInoNeuTtsNanoBackboneVariant Va
  * per-variant directory pattern — makes a future multi-variant install
  * (Q4 + Q8 coexisting) trivial.
  */
-INOAGENTS_API FString NeuTtsNanoResolveModelDir(EInoNeuTtsNanoBackboneVariant Variant);
+INONEUTTSNATIVE_API FString NeuTtsNanoResolveModelDir(EInoNeuTtsNanoBackboneVariant Variant);

@@ -166,7 +166,7 @@ void UInoNeuTtsNanoSynthTestObserver::Finish()
 
 static void RunNeuTtsNanoSynthTest(const TArray<FString>& Args)
 {
-    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindNeuTtsNanoSubsystem();
+    UInoNeuTtsNanoSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoNeuTtsNanoSubsystem>();
     if (Subsys == nullptr)
     {
         UE_LOG(LogInoAgents, Error,
