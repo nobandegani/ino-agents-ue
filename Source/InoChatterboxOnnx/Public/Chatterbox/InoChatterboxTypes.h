@@ -60,7 +60,7 @@ enum class EInoChatterboxVariant : uint8
  *   q4 ↔ fp32 ↔ quantized     : compatible (all fp32)
  *   q4f16/fp16  vs  q4/fp32/quantized : INCOMPATIBLE — synth will fail
  */
-INOAGENTS_API bool ChatterboxVariantsAreDtypeCompatible(
+INOCHATTERBOXONNX_API bool ChatterboxVariantsAreDtypeCompatible(
     EInoChatterboxVariant A, EInoChatterboxVariant B);
 
 /**
@@ -68,7 +68,7 @@ INOAGENTS_API bool ChatterboxVariantsAreDtypeCompatible(
  * the value would appear in the "fp16 group" — Q4F16 or FP16). Useful
  * to classify before mixing sessions.
  */
-INOAGENTS_API bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V);
+INOCHATTERBOXONNX_API bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V);
 
 /** Convert a variant enum to its canonical lowercase string
  *  ("q4f16", "fp16", "q4", "fp32", "quantized"). The returned value
@@ -82,7 +82,7 @@ INOAGENTS_API bool ChatterboxVariantHasFp16Activations(EInoChatterboxVariant V);
  *  requires the local filenames to match what's embedded in the
  *  .onnx — so URLs + local paths both drop the suffix for fp32 even
  *  though the directory name still says "fp32". */
-INOAGENTS_API FString ChatterboxVariantToString(EInoChatterboxVariant Variant);
+INOCHATTERBOXONNX_API FString ChatterboxVariantToString(EInoChatterboxVariant Variant);
 
 /** Filename suffix (including the leading underscore) for a variant's
  *  ONNX / ONNX_DATA files. Empty for fp32 (matches HF's naming);
@@ -99,11 +99,11 @@ INOAGENTS_API FString ChatterboxVariantToString(EInoChatterboxVariant Variant);
  *  external-data lookup will fail when loading the .onnx_data
  *  companion — the .onnx file embeds its companion path as a relative
  *  string. */
-INOAGENTS_API FString ChatterboxVariantToFileSuffix(EInoChatterboxVariant Variant);
+INOCHATTERBOXONNX_API FString ChatterboxVariantToFileSuffix(EInoChatterboxVariant Variant);
 
 /** Parse a variant string (case-insensitive) into an enum value.
  *  Returns false on unknown input and leaves OutVariant untouched. */
-INOAGENTS_API bool ChatterboxVariantFromString(
+INOCHATTERBOXONNX_API bool ChatterboxVariantFromString(
     const FString& InString,
     EInoChatterboxVariant& OutVariant);
 
@@ -122,7 +122,7 @@ INOAGENTS_API bool ChatterboxVariantFromString(
  * and runtime populate the same path. Does NOT check existence — that
  * is UInoChatterboxTtsSubsystem::IsModelDownloaded's job.
  */
-INOAGENTS_API FString ChatterboxResolveVariantDir(EInoChatterboxVariant Variant);
+INOCHATTERBOXONNX_API FString ChatterboxResolveVariantDir(EInoChatterboxVariant Variant);
 
 // ============================================================================
 // Load-time performance tuning
@@ -431,7 +431,7 @@ struct FInoChatterboxModelConfig
  * calls this once at LoadModelsAsync time and threads the resolved
  * variants through download + load + subsystem state.
  */
-INOAGENTS_API void ChatterboxResolveSessionVariants(
+INOCHATTERBOXONNX_API void ChatterboxResolveSessionVariants(
     const FInoChatterboxModelConfig& Config,
     EInoChatterboxVariant&           OutSpeechEncoder,
     EInoChatterboxVariant&           OutEmbedTokens,

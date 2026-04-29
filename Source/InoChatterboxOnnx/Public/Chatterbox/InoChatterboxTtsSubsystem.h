@@ -109,7 +109,7 @@ struct FInoChatterboxDownloadFile
  * file-IO and useful for Blueprint dev work.
  */
 UCLASS()
-class INOAGENTS_API UInoChatterboxTtsSubsystem : public UGameInstanceSubsystem
+class INOCHATTERBOXONNX_API UInoChatterboxTtsSubsystem : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
 

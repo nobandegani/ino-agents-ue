@@ -41,6 +41,11 @@
 			"Name": "InoAgents",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "InoChatterboxOnnx",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	]
 }

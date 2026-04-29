@@ -117,7 +117,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FInoChatterboxStreamSynthesizeOnErro
  *   reclaim the worker's CPU.
  */
 UCLASS()
-class INOAGENTS_API UInoChatterboxStreamSynthesize : public UBlueprintAsyncActionBase
+class INOCHATTERBOXONNX_API UInoChatterboxStreamSynthesize : public UBlueprintAsyncActionBase
 {
     GENERATED_BODY()
 

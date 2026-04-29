@@ -35,7 +35,7 @@ namespace InoChatterbox
      * message to *OutError when provided. OutSamples is cleared on
      * failure so partial reads never leak upward.
      */
-    bool ReadMonoWavAsFloat32(
+    INOAGENTS_API bool ReadMonoWavAsFloat32(
         const FString& Path,
         TArray<float>& OutSamples,
         int32& OutSampleRate,
@@ -57,7 +57,7 @@ namespace InoChatterbox
      * and as a debugging aid in the subsystem when SynthesizeAsync's
      * caller wants to save a waveform to disk.
      */
-    bool WriteMonoInt16Wav(
+    INOAGENTS_API bool WriteMonoInt16Wav(
         const FString& Path,
         TArrayView<const float> Samples,
         int32 SampleRate);
@@ -73,7 +73,7 @@ namespace InoChatterbox
      * Runs a pure memcpy into the WAV body after writing the 44-byte
      * RIFF/fmt/data header — no per-sample work, O(N) bytes total.
      */
-    bool WriteInt16PcmBytesAsWav(
+    INOAGENTS_API bool WriteInt16PcmBytesAsWav(
         const FString& Path,
         TArrayView<const uint8> PcmBytes,
         int32 SampleRate);
@@ -90,7 +90,7 @@ namespace InoChatterbox
      *
      * O(NumSamples) linear scan; ~20 µs for a 5-second reference clip.
      */
-    bool Int16PcmBytesToFloat32Mono(
+    INOAGENTS_API bool Int16PcmBytesToFloat32Mono(
         TArrayView<const uint8> PcmBytes,
         TArray<float>& OutSamples,
         FString* OutError = nullptr);
@@ -103,7 +103,7 @@ namespace InoChatterbox
      * policy as WriteMonoInt16Wav: Clamp(v, -1, +1) * 32767, rounded
      * to nearest. No header, no padding.
      */
-    void Float32ToInt16PcmBytesMono(
+    INOAGENTS_API void Float32ToInt16PcmBytesMono(
         TArrayView<const float> Samples,
         TArray<uint8>& OutBytes);
 

@@ -1,17 +1,14 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
-#include "InoSmokeTestCommon.h"
+#include "SmokeTests/InoSmokeTestCommon.h"
 
 #include "InoAgentsLog.h"
-#include "Chatterbox/InoChatterboxTtsSubsystem.h"
 #include "ElevenLabs/InoElevenLabsSubsystem.h"
 #include "LiteRtLm/InoLiteRtLmSubsystem.h"
 #include "NeuTtsNano/InoNeuTtsNanoSubsystem.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "Interfaces/IPluginManager.h"
@@ -22,31 +19,6 @@
 namespace InoSmokeTest
 {
 
-namespace
-{
-    // Shared world-context walker. Returns the first GameInstance-owned
-    // subsystem of type T across every FWorldContext UE knows about.
-    template <typename TSubsystem>
-    TSubsystem* FindGameInstanceSubsystem()
-    {
-        if (GEngine == nullptr)
-        {
-            return nullptr;
-        }
-        for (const FWorldContext& Context : GEngine->GetWorldContexts())
-        {
-            if (UGameInstance* GI = Context.OwningGameInstance)
-            {
-                if (TSubsystem* Subsys = GI->GetSubsystem<TSubsystem>())
-                {
-                    return Subsys;
-                }
-            }
-        }
-        return nullptr;
-    }
-}
-
 UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
 {
     return FindGameInstanceSubsystem<UInoLiteRtLmSubsystem>();
@@ -55,11 +27,6 @@ UInoLiteRtLmSubsystem* FindLiteRtLmSubsystem()
 UInoElevenLabsSubsystem* FindElevenLabsSubsystem()
 {
     return FindGameInstanceSubsystem<UInoElevenLabsSubsystem>();
-}
-
-UInoChatterboxTtsSubsystem* FindChatterboxSubsystem()
-{
-    return FindGameInstanceSubsystem<UInoChatterboxTtsSubsystem>();
 }
 
 UInoNeuTtsNanoSubsystem* FindNeuTtsNanoSubsystem()

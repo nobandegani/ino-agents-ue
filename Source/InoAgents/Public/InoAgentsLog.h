@@ -97,4 +97,4 @@
  * When adding new logs: err on the side of more, not less. Runtime
  * cost of UE_LOG is nil when the verbosity is below the active level.
  */
-DECLARE_LOG_CATEGORY_EXTERN(LogInoAgents, Log, All);
+INOAGENTS_API DECLARE_LOG_CATEGORY_EXTERN(LogInoAgents, Log, All);

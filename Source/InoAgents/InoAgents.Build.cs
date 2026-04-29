@@ -11,7 +11,22 @@ public class InoAgents : ModuleRules
 
 		PublicIncludePaths.AddRange(
 			new string[] {
-				// ... add public include paths required here ...
+				// Subdirectory of Public/ that holds the smoke-test helper
+				// header (InoSmokeTestCommon.h). Exposed as a Public include
+				// path so:
+				//   - InoAgents Private/SmokeTests/*.cpp can keep their bare
+				//     #include "InoSmokeTestCommon.h" without a subdir prefix.
+				//   - sub-modules (e.g. InoChatterboxOnnx) that depend on
+				//     InoAgents inherit the path and can use the same bare
+				//     include for cross-module smoke-test reuse.
+				Path.Combine(ModuleDirectory, "Public", "SmokeTests"),
+
+				// Subdirectory of Public/ that holds shared audio helpers
+				// (InoChatterboxAudioIO.h — mono WAV reader / writer + PCM
+				// helpers used by InoAudioFunctionLibrary AND by sub-modules
+				// like InoChatterboxOnnx). Exposed so the bare
+				// #include "InoChatterboxAudioIO.h" resolves from anywhere.
+				Path.Combine(ModuleDirectory, "Public", "Audio"),
 			}
 			);
 
@@ -19,10 +34,11 @@ public class InoAgents : ModuleRules
 		PrivateIncludePaths.AddRange(
 			new string[] {
 				// Subdirectory of Private/ that holds the phase-1 smoke test
-				// source files and their shared helpers. Adding it here lets
-				// the test .cpp files #include "InoSmokeTestCommon.h"
-				// and #include "InoAgentsLog.h" (the latter resolves via
-				// Private/ which UBT already adds automatically).
+				// .cpp source files. The shared helpers
+				// (InoSmokeTestCommon.h) live in Public/SmokeTests/ so
+				// sub-modules can reuse them; InoAgentsLog.h is also in
+				// Public/ now. This entry exists for any header-only
+				// helpers private to the test sources themselves.
 				Path.Combine(ModuleDirectory, "Private", "SmokeTests"),
 
 				// Subdirectory of Private/ that holds the LiteRT-LM backend
@@ -36,13 +52,6 @@ public class InoAgents : ModuleRules
 				// runtime DLL loader + InoAgents::Onnx::GetApi() accessor
 				// itself lives in the sibling InoOnnx plugin's InoOnnx.h.
 				Path.Combine(ModuleDirectory, "Private", "Onnx"),
-
-				// Subdirectory of Private/ that holds the Chatterbox Turbo
-				// TTS pipeline (model bundle, tokenizer, runners, worker).
-				// Added so sibling .cpp files under Private/ (smoke tests,
-				// future subsystem impl) can #include "InoChatterboxModels.h"
-				// and similar without relative paths.
-				Path.Combine(ModuleDirectory, "Private", "Chatterbox"),
 
 				// Subdirectory of Private/ that holds the Slate chat-panel
 				// implementation (private widgets, style, bridge .cpp).

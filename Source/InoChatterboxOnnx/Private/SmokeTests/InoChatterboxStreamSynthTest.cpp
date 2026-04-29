@@ -362,7 +362,7 @@ namespace
             return;
         }
 
-        UInoChatterboxTtsSubsystem* Subsys = InoSmokeTest::FindChatterboxSubsystem();
+        UInoChatterboxTtsSubsystem* Subsys = InoSmokeTest::FindGameInstanceSubsystem<UInoChatterboxTtsSubsystem>();
         if (Subsys == nullptr)
         {
             UE_LOG(LogInoAgents, Error,

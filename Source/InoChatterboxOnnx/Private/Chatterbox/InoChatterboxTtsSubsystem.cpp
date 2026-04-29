@@ -11,7 +11,7 @@
 #include "Misc/Paths.h"
 
 #include "InoAgentsLog.h"
-#include "InoAgentsSettings.h"
+#include "InoChatterboxOnnxSettings.h"
 #include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxSynthesisWorker.h"
@@ -999,7 +999,7 @@ namespace
      *  dir — the speech_encoder's — since they're identical across
      *  variants. */
     TArray<FInoChatterboxDownloadFile> BuildDownloadQueue(
-        const UInoAgentsSettings*        Settings,
+        const UInoChatterboxOnnxSettings*        Settings,
         const FInoChatterboxModelConfig& Config)
     {
         TArray<FInoChatterboxDownloadFile> Queue;
@@ -1088,11 +1088,11 @@ void UInoChatterboxTtsSubsystem::StartDownload()
     // sessions) and per-session cases. It looks up the settings entry
     // per variant, builds per-session + shared file URLs, and skips
     // files already cached on disk.
-    const UInoAgentsSettings* Settings = UInoAgentsSettings::Get();
+    const UInoChatterboxOnnxSettings* Settings = UInoChatterboxOnnxSettings::Get();
     if (Settings == nullptr)
     {
         FinishDownloadError(
-            TEXT("UInoAgentsSettings unavailable."));
+            TEXT("UInoChatterboxOnnxSettings unavailable."));
         return;
     }
 

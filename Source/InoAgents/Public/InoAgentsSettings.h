@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
 
-#include "Chatterbox/InoChatterboxTypes.h"
 #include "ElevenLabs/InoElevenLabsTypes.h"
 #include "LiteRtLm/InoLiteRtLmTypes.h"
 #include "NeuTtsNano/InoNeuTtsNanoTypes.h"
@@ -68,17 +67,6 @@ public:
     TArray<FInoLiteRtLmModelEntry> Models;
 
     // =============================================================
-    // Chatterbox Turbo TTS
-    // =============================================================
-
-    /** Available Chatterbox Turbo variants and their download URLs.
-     *  UInoChatterboxTtsSubsystem::LoadModelsAsync matches its
-     *  FInoChatterboxModelConfig::Variant against this array to find
-     *  the HuggingFace repo URL + revision to pull missing files from. */
-    UPROPERTY(EditAnywhere, Config, Category = "Chatterbox|Models")
-    TArray<FInoChatterboxModelEntry> ChatterboxModels;
-
-    // =============================================================
     // NeuTTS Nano TTS
     // =============================================================
 
@@ -112,12 +100,6 @@ public:
      *  use the friendlier display name and the subsystem canonicalizes
      *  transparently. */
     const FInoLiteRtLmModelEntry* FindModel(const FString& NameOrFileName) const;
-
-    /** Look up a Chatterbox model entry by variant. Returns nullptr if
-     *  no matching entry is configured — UInoChatterboxTtsSubsystem
-     *  treats that as "no download URL for this variant" and fails
-     *  LoadModelsAsync with a clear error. */
-    const FInoChatterboxModelEntry* FindChatterboxModel(EInoChatterboxVariant Variant) const;
 
     /** Look up a NeuTTS Nano model entry by backbone variant. Returns
      *  nullptr if no matching entry is configured — UInoNeuTtsNanoSubsystem
