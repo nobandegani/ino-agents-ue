@@ -7,8 +7,8 @@
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
 
+#include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
-#include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxRunner.h"
 #include "InoChatterboxTokenizer.h"
@@ -300,7 +300,7 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
             // bytes by move — no extra copy when the lambda body runs
             // on the game thread.
             TArray<uint8> PcmBytes;
-            InoChatterbox::Float32ToInt16PcmBytesMono(NewSamples, PcmBytes);
+            UInoAudioFunctionLibrary::Float32ToInt16PcmBytesMono(NewSamples, PcmBytes);
 
             AsyncTask(ENamedThreads::GameThread,
                 [OnAudioChunkCopy,
@@ -356,7 +356,7 @@ void FInoChatterboxSynthesisWorker::ProcessSynth(FPendingSynth& Item)
     // AudioSamples's documented format. A 1-2 s utterance quantizes in
     // well under a millisecond on a worker thread.
     FInoChatterboxSynthesisResult BpResult;
-    InoChatterbox::Float32ToInt16PcmBytesMono(
+    UInoAudioFunctionLibrary::Float32ToInt16PcmBytesMono(
         MakeArrayView(NativeResult.AudioSamples), BpResult.AudioSamples);
     // SampleRate is not a field on BpResult — consumers pull it from
     // UInoChatterboxTtsSubsystem::GetOutputSampleRate() instead (single

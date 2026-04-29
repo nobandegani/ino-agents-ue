@@ -197,7 +197,6 @@ Plugins/InoAgents/
 │   │       │   ├── InoChatterboxRunner.{h,cpp}    ← 4-session pipeline orchestrator
 │   │       │   ├── InoChatterboxModels.{h,cpp}    ← session bundle loader (per-session DML routing)
 │   │       │   ├── InoChatterboxTokenizer.{h,cpp} ← GPT-2 BPE + paralinguistic tags
-│   │       │   ├── InoChatterboxAudioIO.{h,cpp}   ← 24 kHz WAV reader
 │   │       │   ├── InoChatterboxSynthesisWorker.{h,cpp} ← FRunnable + FIFO queue
 │   │       │   ├── InoChatterboxDecoderWorker.{h,cpp}   ← parallel decoder for streaming
 │   │       │   ├── InoChatterboxTypes.cpp
@@ -452,8 +451,10 @@ Plugins/InoAgents/
         │                                            CPU / DML overrides applied
         ├── InoChatterboxTokenizer.{h,cpp}         ← GPT-2 BPE + paralinguistic-tag
         │                                            handling, parsed from tokenizer.json
-        ├── InoChatterboxAudioIO.{h,cpp}           ← 24 kHz mono WAV reader (used to
-        │                                            resolve FInoChatterboxVoice::WavFilePath)
+        ├── (mono WAV reader / writer + PCM helpers used to resolve
+        │    FInoChatterboxVoice::WavFilePath / ::ReferenceSamples are
+        │    static methods on UInoAudioFunctionLibrary, in InoAgents
+        │    Public/Audio/ — shared with any future TTS sub-module)
         ├── InoChatterboxSynthesisWorker.{h,cpp}   ← FRunnable + FIFO queue
         ├── InoChatterboxDecoderWorker.{h,cpp}     ← parallelises conditional_decoder
         │                                            chunks during streaming so the AR

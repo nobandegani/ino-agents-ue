@@ -12,11 +12,28 @@
 #include "InoAudioFunctionLibrary.generated.h"
 
 /**
- * Audio helper functions exposed to Blueprint.
+ * Audio helper functions exposed to Blueprint, plus a small set of
+ * C++-only static helpers for mono WAV / int16 PCM I/O.
  *
- * Currently scoped to small utilities that pair well with the
- * RuntimeAudioImporter UStreamingSoundWave's AppendAudioDataFromRAW
- * path (Int16 PCM bytes).
+ * Blueprint surface (UFUNCTION):
+ *   - GenerateEmptyRawAudio       — silent PCM in any ERuntimeRAWAudioFormat
+ *   - GenerateDitheredSilence     — silent-sounding noise floor
+ *   - SaveInt16PcmAsWav           — write a TArray<uint8> as a WAV file
+ *
+ * C++-only surface (static methods, INOAGENTS_API via the class
+ * decoration; consumed cross-module from InoChatterboxOnnx and any
+ * future TTS / audio submodule):
+ *   - ReadMonoWavAsFloat32        — strict mono WAV reader (PCM16 + IEEE32)
+ *   - WriteMonoInt16Wav           — float -> int16 LE -> WAV
+ *   - WriteInt16PcmBytesAsWav     — int16 LE bytes -> WAV (TArrayView variant)
+ *   - Int16PcmBytesToFloat32Mono  — int16 LE bytes -> float32 [-1, +1]
+ *   - Float32ToInt16PcmBytesMono  — float32 -> clamped int16 LE bytes
+ *
+ * The C++-only helpers take TArrayView / pointer-out-error parameters
+ * that aren't Blueprint-compatible, so they're plain `static` methods
+ * rather than UFUNCTIONs. They were promoted here from the (now-deleted)
+ * InoChatterboxAudioIO.h so a single library owns the WAV / PCM
+ * primitives instead of a TTS-flavoured side header.
  */
 UCLASS()
 class INOAGENTS_API UInoAudioFunctionLibrary : public UBlueprintFunctionLibrary
@@ -129,4 +146,106 @@ public:
         const FString& FilePath,
         const TArray<uint8>& PcmBytes,
         int32 SampleRate = 24000);
+
+    // ---------------------------------------------------------------
+    // C++-only static helpers (not BlueprintCallable — TArrayView /
+    // pointer-out-error parameters aren't Blueprint-compatible).
+    //
+    // Promoted here from InoChatterboxAudioIO so a single library
+    // owns the WAV / PCM primitives. Used cross-module from
+    // InoChatterboxOnnx (and any future TTS / audio submodule) via
+    // the INOAGENTS_API class decoration above.
+    // ---------------------------------------------------------------
+
+    /**
+     * Read a mono WAV file from disk as float32 in [-1, +1].
+     *
+     * Accepted formats (strict):
+     *
+     *   AudioFormat=1 (PCM)        + BitsPerSample=16   → int16 scaled by 1/32768
+     *   AudioFormat=3 (IEEE float) + BitsPerSample=32   → memcpy, already [-1, +1]
+     *
+     * Channel count MUST be 1. Sample rate is reported via
+     * OutSampleRate but NOT validated — the caller decides whether a
+     * mismatch vs the model's required rate is a warning or a hard
+     * error. UInoChatterboxTtsSubsystem::SynthesizeAsync errors hard
+     * on mismatch; smoke tests warn and feed through.
+     *
+     * Tolerant of extra 'LIST' / 'fact' / 'JUNK' chunks between the
+     * fmt and data chunks (common for AudioFormat=3).
+     *
+     * Returns false on any parse / IO failure, writing a human-readable
+     * message to *OutError when provided. OutSamples is cleared on
+     * failure so partial reads never leak upward.
+     */
+    static bool ReadMonoWavAsFloat32(
+        const FString& Path,
+        TArray<float>& OutSamples,
+        int32& OutSampleRate,
+        FString* OutError = nullptr);
+
+    /**
+     * Write a mono PCM int16 WAV file at the given sample rate from
+     * float32 input.
+     *
+     * Samples outside [-1, +1] are clamped before quantization. Returns
+     * false on write failure. Self-contained WAV writer — doesn't
+     * require the UE audio module to be initialized.
+     *
+     * Internally converts to int16 bytes via Float32ToInt16PcmBytesMono
+     * and delegates the WAV-header framing to WriteInt16PcmBytesAsWav
+     * below, so both the float and byte entry points produce identical
+     * output.
+     */
+    static bool WriteMonoInt16Wav(
+        const FString& Path,
+        TArrayView<const float> Samples,
+        int32 SampleRate);
+
+    /**
+     * Write a mono PCM int16 WAV file from already-int16-PCM bytes
+     * (TArrayView variant — used by both the Blueprint-friendly
+     * SaveInt16PcmAsWav above and direct C++ callers).
+     *
+     * Input is little-endian int16 samples packed as bytes (same shape
+     * as FInoChatterboxSynthesisResult::AudioSamples). Byte count MUST
+     * be a multiple of 2; returns false otherwise. Self-contained
+     * writer (no UE audio module dependency).
+     *
+     * Runs a pure memcpy into the WAV body after writing the 44-byte
+     * RIFF/fmt/data header — no per-sample work, O(N) bytes total.
+     */
+    static bool WriteInt16PcmBytesAsWav(
+        const FString& Path,
+        TArrayView<const uint8> PcmBytes,
+        int32 SampleRate);
+
+    /**
+     * Convert int16 PCM little-endian bytes (typically 24 kHz mono, as
+     * passed in FInoChatterboxVoice::ReferenceSamples) into float32
+     * samples in [-1, +1] for the ONNX pipeline.
+     *
+     * Byte count must be a multiple of 2 (int16-aligned). Returns false
+     * on alignment failure, with *OutError populated if non-null;
+     * OutSamples is cleared on failure. x86_64 and ARM64 are both
+     * little-endian, so we can reinterpret directly without a swap.
+     *
+     * O(NumSamples) linear scan; ~20 µs for a 5-second reference clip.
+     */
+    static bool Int16PcmBytesToFloat32Mono(
+        TArrayView<const uint8> PcmBytes,
+        TArray<float>& OutSamples,
+        FString* OutError = nullptr);
+
+    /**
+     * Convert float32 samples in [-1, +1] (or anywhere; clamped
+     * internally) into int16 PCM little-endian bytes, mono.
+     *
+     * Output byte count is exactly 2 × Samples.Num(). Same quantization
+     * policy as WriteMonoInt16Wav: Clamp(v, -1, +1) * 32767, rounded
+     * to nearest. No header, no padding.
+     */
+    static void Float32ToInt16PcmBytesMono(
+        TArrayView<const float> Samples,
+        TArray<uint8>& OutBytes);
 };

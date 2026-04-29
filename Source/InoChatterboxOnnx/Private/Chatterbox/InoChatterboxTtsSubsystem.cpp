@@ -10,9 +10,9 @@
 #include "Interfaces/IHttpResponse.h"
 #include "Misc/Paths.h"
 
+#include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
 #include "InoChatterboxOnnxSettings.h"
-#include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxSynthesisWorker.h"
 #include "InoChatterboxTokenizer.h"
@@ -734,7 +734,7 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
         // rate metadata, so we document the 24 kHz contract in the
         // struct's header and rely on callers honoring it.
         FString PcmError;
-        if (!InoChatterbox::Int16PcmBytesToFloat32Mono(
+        if (!UInoAudioFunctionLibrary::Int16PcmBytesToFloat32Mono(
                 Voice.ReferenceSamples, ReferenceAudio, &PcmError))
         {
             FailNow(FString::Printf(
@@ -775,7 +775,7 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
 
         int32 WavSampleRate = 0;
         FString WavError;
-        if (!InoChatterbox::ReadMonoWavAsFloat32(
+        if (!UInoAudioFunctionLibrary::ReadMonoWavAsFloat32(
                 ResolvedWavPath, ReferenceAudio, WavSampleRate, &WavError))
         {
             FailNow(FString::Printf(
@@ -783,7 +783,7 @@ void UInoChatterboxTtsSubsystem::EnqueueSynth(
                 *ResolvedWavPath, *WavError));
             return;
         }
-        if (WavSampleRate != InoChatterbox::kSampleRate)
+        if (WavSampleRate != GetOutputSampleRate())
         {
             FailNow(FString::Printf(
                 TEXT("Reference WAV '%s' is %d Hz; Chatterbox Turbo requires 24000 Hz. ")

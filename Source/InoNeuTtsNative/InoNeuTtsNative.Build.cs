@@ -54,8 +54,8 @@ public class InoNeuTtsNative : ModuleRules
 
 				"InoAgents",         // For the shared LogInoAgents category +
 				                     // InoSmokeTestCommon helper +
-				                     // InoChatterboxAudioIO (mono WAV / PCM
-				                     // helpers in InoAgents Public/Audio).
+				                     // UInoAudioFunctionLibrary (mono WAV /
+				                     // PCM helpers in InoAgents Public/Audio).
 
 				"InoOnnx",           // ONNX Runtime — for FInoOnnxSession that
 				                     // the NeuCodec decoder runs on.

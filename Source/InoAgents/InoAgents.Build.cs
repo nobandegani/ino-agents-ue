@@ -19,14 +19,14 @@ public class InoAgents : ModuleRules
 				//   - sub-modules (e.g. InoChatterboxOnnx) that depend on
 				//     InoAgents inherit the path and can use the same bare
 				//     include for cross-module smoke-test reuse.
+				//
+				// NOTE: The shared audio helpers (UInoAudioFunctionLibrary —
+				// mono WAV reader / writer + PCM helpers consumed by
+				// InoChatterboxOnnx and any future TTS sub-module) live in
+				// Public/Audio/ but are NOT given a bare include path here —
+				// callers use the explicit "Audio/InoAudioFunctionLibrary.h"
+				// path to keep their includes greppable as cross-module.
 				Path.Combine(ModuleDirectory, "Public", "SmokeTests"),
-
-				// Subdirectory of Public/ that holds shared audio helpers
-				// (InoChatterboxAudioIO.h — mono WAV reader / writer + PCM
-				// helpers used by InoAudioFunctionLibrary AND by sub-modules
-				// like InoChatterboxOnnx). Exposed so the bare
-				// #include "InoChatterboxAudioIO.h" resolves from anywhere.
-				Path.Combine(ModuleDirectory, "Public", "Audio"),
 			}
 			);
 

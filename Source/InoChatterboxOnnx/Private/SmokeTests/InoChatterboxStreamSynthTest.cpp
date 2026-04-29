@@ -36,8 +36,8 @@
 
 #include "InoChatterboxStreamSynthTest.h"
 
+#include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
-#include "InoChatterboxAudioIO.h"
 #include "InoSmokeTestCommon.h"
 #include "Chatterbox/InoChatterboxStreamSynthesize.h"
 #include "Chatterbox/InoChatterboxTtsSubsystem.h"
@@ -248,7 +248,7 @@ void UInoChatterboxStreamSynthTestObserver::HandleComplete(
             IFileManager::Get().MakeDirectory(*OutputDir, /*Tree=*/ true);
         }
 
-        const bool bWrote = InoChatterbox::WriteInt16PcmBytesAsWav(
+        const bool bWrote = UInoAudioFunctionLibrary::WriteInt16PcmBytesAsWav(
             OutputWavPath,
             MakeArrayView(AccumulatedBytes),
             Subsystem ? Subsystem->GetOutputSampleRate() : 24000);

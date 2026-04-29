@@ -21,7 +21,7 @@
 //      second dynamic-delegate callback.
 //   6. OnSynthComplete success → run waveform sanity checks (NaN /
 //      inf / range), save to <Saved>/Chatterbox/subsystem_synth_test.wav
-//      via InoChatterbox::WriteMonoInt16Wav, log per-stage timings.
+//      via UInoAudioFunctionLibrary::WriteInt16PcmBytesAsWav, log per-stage timings.
 //   7. UnloadModels + RemoveFromRoot so the observer + its held
 //      references can be collected.
 //
@@ -45,8 +45,8 @@
 
 #include "InoChatterboxSubsystemTest.h"
 
+#include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
-#include "InoChatterboxAudioIO.h"
 #include "InoSmokeTestCommon.h"
 #include "Chatterbox/InoChatterboxTtsSubsystem.h"
 
@@ -183,7 +183,7 @@ void UInoChatterboxSubsystemTestObserver::HandleSynthComplete(
                 IFileManager::Get().MakeDirectory(*OutputDir, /*Tree=*/ true);
             }
 
-            const bool bWrote = InoChatterbox::WriteInt16PcmBytesAsWav(
+            const bool bWrote = UInoAudioFunctionLibrary::WriteInt16PcmBytesAsWav(
                 OutputWavPath,
                 MakeArrayView(Result.AudioSamples),
                 Subsystem ? Subsystem->GetOutputSampleRate() : 24000);

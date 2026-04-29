@@ -492,8 +492,9 @@ struct FInoChatterboxSynthesisOptions
  * Four input paths, in priority order:
  *
  *   1. WavFilePath — absolute or project-relative WAV file on disk.
- *      The subsystem reads it off the game thread via the internal
- *      InoChatterboxAudioIO reader. Must be 24 kHz mono PCM int16 or
+ *      The subsystem reads it off the game thread via
+ *      UInoAudioFunctionLibrary::ReadMonoWavAsFloat32. Must be 24 kHz
+ *      mono PCM int16 or
  *      IEEE float32. Other sample rates / channel layouts cause
  *      SynthesizeAsync to error out with a clear message (no silent
  *      resampling — voice cloning quality is extremely sensitive to

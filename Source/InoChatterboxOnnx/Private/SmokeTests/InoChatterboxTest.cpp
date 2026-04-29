@@ -7,8 +7,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
+#include "Audio/InoAudioFunctionLibrary.h"
 #include "InoAgentsLog.h"
-#include "InoChatterboxAudioIO.h"
 #include "InoChatterboxModels.h"
 #include "InoChatterboxRunner.h"
 #include "InoChatterboxTokenizer.h"
@@ -1679,13 +1679,10 @@ namespace
         return Names;
     }
 
-    // WriteMonoInt16Wav / ReadMonoWavAsFloat32 live in
-    // Private/Chatterbox/InoChatterboxAudioIO.h since Phase D Commit 1
-    // so the subsystem, the runner's user-facing layer, and these smoke
-    // tests can all share one implementation. The local using-declarations
-    // below let existing call sites below (WriteMonoInt16Wav(...), etc.)
-    // continue to compile unchanged.
-    using InoChatterbox::WriteMonoInt16Wav;
+    // WriteMonoInt16Wav / ReadMonoWavAsFloat32 are static methods on
+    // UInoAudioFunctionLibrary (in InoAgents Public/Audio/) so the
+    // subsystem, the runner's user-facing layer, and these smoke tests
+    // can all share one implementation.
 
     void RunDecodeTest(const TArray<FString>& Args)
     {
@@ -2140,7 +2137,8 @@ namespace
             // ---- Write WAV to disk ----
             IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
             TArrayView<const float> SampleView(WavData, (int32)SampleCount);
-            if (!WriteMonoInt16Wav(OutWavPath, SampleView, kChatterboxSampleRate))
+            if (!UInoAudioFunctionLibrary::WriteMonoInt16Wav(
+                    OutWavPath, SampleView, kChatterboxSampleRate))
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("Ino.Chatterbox.DecodeTest: FAILED to write WAV to %s"), *OutWavPath);
@@ -2186,11 +2184,10 @@ namespace
     //   cond_emb, prompt_token, speaker_embeddings, speaker_features =
     //       speech_encoder_session.run(None, {"audio_values": audio_values})
 
-    // ReadMonoWavAsFloat32 moved to Private/Chatterbox/InoChatterboxAudioIO.h
-    // (Phase D Commit 1) so the subsystem and smoke tests share one
-    // implementation. See the header for the supported format list + the
-    // "no silent resampling" rationale.
-    using InoChatterbox::ReadMonoWavAsFloat32;
+    // ReadMonoWavAsFloat32 is a static method on UInoAudioFunctionLibrary
+    // (in InoAgents Public/Audio/) so the subsystem and smoke tests share
+    // one implementation. See the header for the supported format list +
+    // the "no silent resampling" rationale.
 
     void RunEncoderTest(const TArray<FString>& Args)
     {
@@ -2215,7 +2212,8 @@ namespace
             // ---- 1) Load WAV ----
             TArray<float> Samples;
             int32 SampleRate = 0;
-            if (!ReadMonoWavAsFloat32(WavPath, Samples, SampleRate, &Err))
+            if (!UInoAudioFunctionLibrary::ReadMonoWavAsFloat32(
+                    WavPath, Samples, SampleRate, &Err))
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("Ino.Chatterbox.EncoderTest: FAILED wav read: %s"), *Err);
@@ -2496,7 +2494,8 @@ namespace
             // ---- 3) Read the reference voice WAV ----
             TArray<float> RefSamples;
             int32 RefSampleRate = 0;
-            if (!ReadMonoWavAsFloat32(WavInPath, RefSamples, RefSampleRate, &Err))
+            if (!UInoAudioFunctionLibrary::ReadMonoWavAsFloat32(
+                    WavInPath, RefSamples, RefSampleRate, &Err))
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("Ino.Chatterbox.SynthTest: FAILED wav read: %s"), *Err);
@@ -2565,8 +2564,9 @@ namespace
 
             // ---- 6) Write the result to disk ----
             IFileManager::Get().MakeDirectory(*OutDir, /*Tree=*/true);
-            if (!WriteMonoInt16Wav(OutWavPath, MakeArrayView(Result.AudioSamples),
-                                   Result.SampleRate))
+            if (!UInoAudioFunctionLibrary::WriteMonoInt16Wav(
+                    OutWavPath, MakeArrayView(Result.AudioSamples),
+                    Result.SampleRate))
             {
                 UE_LOG(LogInoAgents, Error,
                        TEXT("Ino.Chatterbox.SynthTest: FAILED to write WAV to %s"), *OutWavPath);
