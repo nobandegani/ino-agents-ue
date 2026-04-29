@@ -6,7 +6,7 @@ using UnrealBuildTool;
 /// <summary>
 /// NeuTTS Nano TTS — Neuphonic's Qwen2-derived ~117M-param GGUF backbone
 /// + NeuCodec ONNX decoder. Sub-module of the InoAgents plugin, sibling
-/// to InoChatterboxOnnx.
+/// to InoChatterboxNative.
 ///
 /// Self-contained deletion unit: rm this folder + drop the entry from
 /// InoAgents.uplugin's Modules array and the entire NeuTTS Nano impl
@@ -20,7 +20,7 @@ public class InoNeuTtsNative : ModuleRules
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		// Disable unity build for this module: same reason as
-		// InoChatterboxOnnx — this small module's .cpps are likelier to
+		// InoChatterboxNative — this small module's .cpps are likelier to
 		// hit anonymous-namespace name collisions when merged into one
 		// unity TU than they were when buried among the InoAgents core
 		// files. Build-time hit is small (~10 .cpps).

@@ -7,7 +7,7 @@
 /**
  * InoNeuTtsNative — Neuphonic NeuTTS Nano TTS via llama.cpp + NeuCodec.
  *
- * Sub-module of the InoAgents plugin, sibling to InoChatterboxOnnx.
+ * Sub-module of the InoAgents plugin, sibling to InoChatterboxNative.
  * Each backend implementation is a self-contained deprecation unit:
  * deleting this folder + dropping the entry in InoAgents.uplugin
  * removes the entire NeuTTS Nano impl cleanly.

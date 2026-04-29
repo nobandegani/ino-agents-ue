@@ -158,10 +158,10 @@ Plugins/InoAgents/
 │   │   │   │   ├── InoOnnxTensor.h                ← FInoOnnxTensor (move-only OrtValue wrapper)
 │   │   │   │   └── InoOnnxSession.h               ← FInoOnnxSession (Create, Run, RunAsync)
 │   │   │   ├── Chatterbox/                        ← Chatterbox TTS Blueprint surface
-│   │   │   │   ├── InoChatterboxTypes.h           ← variant enum, voice/options/result USTRUCTs,
-│   │   │   │   │                                    FInoChatterboxPerformanceOptions (DML overrides)
-│   │   │   │   ├── InoChatterboxTtsSubsystem.h    ← UInoChatterboxTtsSubsystem
-│   │   │   │   └── InoChatterboxStreamSynthesize.h ← async-action wrapper
+│   │   │   │   ├── InoChatterboxTurboNativeTypes.h           ← variant enum, voice/options/result USTRUCTs,
+│   │   │   │   │                                    FInoChatterboxTurboNativePerformanceOptions (DML overrides)
+│   │   │   │   ├── InoChatterboxTurboNativeSubsystem.h    ← UInoChatterboxTurboNativeSubsystem
+│   │   │   │   └── InoChatterboxTurboNativeStreamSynthesize.h ← async-action wrapper
 │   │   │   ├── ElevenLabs/                        ← Cloud TTS Blueprint surface
 │   │   │   │   ├── InoElevenLabsTypes.h           ← request struct, output-format enum, delegates
 │   │   │   │   ├── InoElevenLabsSubsystem.h       ← settings cache + live-action registry
@@ -193,14 +193,14 @@ Plugins/InoAgents/
 │   │       │   ├── InoOnnxTensor.cpp
 │   │       │   └── InoOnnxSession.cpp
 │   │       ├── Chatterbox/                        ← Chatterbox TTS impl (see "Chatterbox" section)
-│   │       │   ├── InoChatterboxTtsSubsystem.cpp  ← Blueprint glue + multi-file download
-│   │       │   ├── InoChatterboxRunner.{h,cpp}    ← 4-session pipeline orchestrator
-│   │       │   ├── InoChatterboxModels.{h,cpp}    ← session bundle loader (per-session DML routing)
-│   │       │   ├── InoChatterboxTokenizer.{h,cpp} ← GPT-2 BPE + paralinguistic tags
-│   │       │   ├── InoChatterboxSynthesisWorker.{h,cpp} ← FRunnable + FIFO queue
-│   │       │   ├── InoChatterboxDecoderWorker.{h,cpp}   ← parallel decoder for streaming
-│   │       │   ├── InoChatterboxTypes.cpp
-│   │       │   └── InoChatterboxStreamSynthesize.cpp
+│   │       │   ├── InoChatterboxTurboNativeSubsystem.cpp  ← Blueprint glue + multi-file download
+│   │       │   ├── InoChatterboxTurboNativeRunner.{h,cpp}    ← 4-session pipeline orchestrator
+│   │       │   ├── InoChatterboxTurboNativeModels.{h,cpp}    ← session bundle loader (per-session DML routing)
+│   │       │   ├── InoChatterboxTurboNativeTokenizer.{h,cpp} ← GPT-2 BPE + paralinguistic tags
+│   │       │   ├── InoChatterboxTurboNativeSynthesisWorker.{h,cpp} ← FRunnable + FIFO queue
+│   │       │   ├── InoChatterboxTurboNativeDecoderWorker.{h,cpp}   ← parallel decoder for streaming
+│   │       │   ├── InoChatterboxTurboNativeTypes.cpp
+│   │       │   └── InoChatterboxTurboNativeStreamSynthesize.cpp
 │   │       ├── ElevenLabs/                        ← Cloud TTS impl
 │   │       │   ├── InoElevenLabsSubsystem.cpp
 │   │       │   └── InoElevenLabsTextToDialogueStream.cpp
@@ -233,9 +233,9 @@ Plugins/InoAgents/
 │   │           ├── InoOnnxListDmlAdaptersTest.cpp ← Ino.Onnx.ListDmlAdaptersTest
 │   │           ├── InoLlamaCppBackendInfoTest.cpp ← Ino.LlamaCpp.BackendInfoTest
 │   │           ├── InoLlamaCppVtableTest.cpp      ← Ino.LlamaCpp.VtableTest
-│   │           ├── InoChatterboxTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
-│   │           ├── InoChatterboxSubsystemTest.{h,cpp}    ← Ino.Chatterbox.SubsystemSynthTest
-│   │           ├── InoChatterboxStreamSynthTest.{h,cpp}  ← Ino.Chatterbox.StreamSynthTest
+│   │           ├── InoChatterboxTurboNativeTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
+│   │           ├── InoChatterboxTurboNativeSubsystemTest.{h,cpp}    ← Ino.Chatterbox.SubsystemSynthTest
+│   │           ├── InoChatterboxTurboNativeStreamSynthTest.{h,cpp}  ← Ino.Chatterbox.StreamSynthTest
 │   │           ├── InoNeuTtsNanoNativeDownloadTest.{h,cpp}     ← Ino.NeuTtsNanoNative.DownloadTest
 │   │           ├── InoNeuTtsNanoNativeSynthTest.{h,cpp}        ← Ino.NeuTtsNanoNative.SynthTest
 │   │           └── InoElevenLabsDialogueStreamTest.{h,cpp} ← Ino.ElevenLabsDialogueStreamTest
@@ -281,7 +281,7 @@ Private helpers under `Source/InoAgents/Private/Onnx/`:
 
 **Design principles worth preserving:**
 
-- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTtsSubsystem`, `UInoNeuTtsNanoNativeSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
+- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTurboNativeSubsystem`, `UInoNeuTtsNanoNativeSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
 - Sessions are thread-safe for `Run()` per ORT guarantees; FInoOnnxTensors are move-only to avoid surprise-cost deep clones on the LLM streaming hot path.
 - Exception-free — uses the C API (`onnxruntime_c_api.h`), not the C++ API (`onnxruntime_cxx_api.h` throws `Ort::Exception`). UE modules default `bEnableExceptions=false`; keeping the whole stack exception-free avoids per-module opt-ins.
 - Positional I/O ordering for `Run()`. A named-map variant would cost a hash lookup per inference which matters on AR token loops — callers who need names can wrap trivially at their own layer.
@@ -304,7 +304,7 @@ Three console commands under `Source/InoAgents/Private/SmokeTests/`, auto-regist
 |---|---|---|
 | `Ino.Onnx.ProvidersTest` | none | Calls `OrtApi::GetAvailableProviders` via the cached API vtable and logs every entry. Doubles the module-startup check; useful after Live Coding or as a first diagnostic. |
 | `Ino.Onnx.SessionFromFileTest <abs-path-to-model.onnx>` | 1 | Loads the ONNX model, calls `FInoOnnxSession::LogMetadata()` (dumps I/O shapes + dtypes + active providers). If all inputs have concrete shapes, allocates zero-filled inputs and runs one forward pass; reports load time + run time + output shapes. Exercises the full Session + Tensor API end-to-end with no per-model code. |
-| `Ino.Onnx.ListDmlAdaptersTest` | none | Enumerates D3D12 adapters via `IDXGIFactory` and logs each one's description, vendor, and dedicated VRAM, alongside the `DirectMlAdapterIndex` value that selects it. Use this when a machine has multiple GPUs or an NPU and you need to pick the right index for `FInoChatterboxPerformanceOptions::DirectMlAdapterIndex` (or any other DML-using session). |
+| `Ino.Onnx.ListDmlAdaptersTest` | none | Enumerates D3D12 adapters via `IDXGIFactory` and logs each one's description, vendor, and dedicated VRAM, alongside the `DirectMlAdapterIndex` value that selects it. Use this when a machine has multiple GPUs or an NPU and you need to pick the right index for `FInoChatterboxTurboNativePerformanceOptions::DirectMlAdapterIndex` (or any other DML-using session). |
 
 ## Chatterbox Turbo TTS (the first ONNX consumer — shipping)
 
@@ -437,30 +437,30 @@ Plugins/InoAgents/
 │
 └── Source/InoAgents/
     ├── Public/Chatterbox/
-    │   ├── InoChatterboxTypes.h                   ← variant enum, voice / options /
-    │   │                                            result USTRUCTs, FInoChatterboxModelEntry
+    │   ├── InoChatterboxTurboNativeTypes.h                   ← variant enum, voice / options /
+    │   │                                            result USTRUCTs, FInoChatterboxTurboNativeModelEntry
     │   │                                            (Project Settings registry), all delegates
-    │   ├── InoChatterboxTtsSubsystem.h            ← UInoChatterboxTtsSubsystem
-    │   └── InoChatterboxStreamSynthesize.h        ← Blueprint async-action wrapper
+    │   ├── InoChatterboxTurboNativeSubsystem.h            ← UInoChatterboxTurboNativeSubsystem
+    │   └── InoChatterboxTurboNativeStreamSynthesize.h        ← Blueprint async-action wrapper
     └── Private/Chatterbox/
-        ├── InoChatterboxRunner.{h,cpp}            ← 4-session orchestrator (encoder →
+        ├── InoChatterboxTurboNativeRunner.{h,cpp}            ← 4-session orchestrator (encoder →
         │                                            embed → AR loop → decoder),
         │                                            owns per-call KV-cache state
-        ├── InoChatterboxModels.{h,cpp}            ← LoadFromDir: builds the 4 ORT
+        ├── InoChatterboxTurboNativeModels.{h,cpp}            ← LoadFromDir: builds the 4 ORT
         │                                            sessions with the per-session
         │                                            CPU / DML overrides applied
-        ├── InoChatterboxTokenizer.{h,cpp}         ← GPT-2 BPE + paralinguistic-tag
+        ├── InoChatterboxTurboNativeTokenizer.{h,cpp}         ← GPT-2 BPE + paralinguistic-tag
         │                                            handling, parsed from tokenizer.json
         ├── (mono WAV reader / writer + PCM helpers used to resolve
-        │    FInoChatterboxVoice::WavFilePath / ::ReferenceSamples are
+        │    FInoChatterboxTurboNativeVoice::WavFilePath / ::ReferenceSamples are
         │    static methods on UInoAudioFunctionLibrary, in InoAgents
         │    Public/Audio/ — shared with any future TTS sub-module)
-        ├── InoChatterboxSynthesisWorker.{h,cpp}   ← FRunnable + FIFO queue
-        ├── InoChatterboxDecoderWorker.{h,cpp}     ← parallelises conditional_decoder
+        ├── InoChatterboxTurboNativeSynthesisWorker.{h,cpp}   ← FRunnable + FIFO queue
+        ├── InoChatterboxTurboNativeDecoderWorker.{h,cpp}     ← parallelises conditional_decoder
         │                                            chunks during streaming so the AR
         │                                            loop and decode overlap
-        ├── InoChatterboxStreamSynthesize.cpp
-        ├── InoChatterboxTtsSubsystem.cpp          ← Blueprint glue + multi-file
+        ├── InoChatterboxTurboNativeStreamSynthesize.cpp
+        ├── InoChatterboxTurboNativeSubsystem.cpp          ← Blueprint glue + multi-file
         │                                            download flow (HEAD probe + GET +
         │                                            .partial staging)
         └── (smoke tests live under Private/SmokeTests/, see Smoke tests section)
@@ -470,7 +470,7 @@ None of this touches `Source/InoAgents/Public/Onnx/` or its Private siblings —
 
 ### Quantization variants the subsystem can load
 
-`EInoChatterboxVariant` covers the five dtypes published in the HF repo. Approximate on-disk size for the four runtime files (the four `<name>` columns above) plus weights companions:
+`EInoChatterboxTurboNativeVariant` covers the five dtypes published in the HF repo. Approximate on-disk size for the four runtime files (the four `<name>` columns above) plus weights companions:
 
 | Enum value | HF dtype string | On-disk | Notes |
 |---|---|---|---|
@@ -484,7 +484,7 @@ Only one variant is resident at a time — switching is `UnloadModels()` then a 
 
 ### Subsystem API surface
 
-`UInoChatterboxTtsSubsystem` mirrors `UInoLiteRtLmSubsystem`'s ergonomics — game-instance-scoped, async load with progress, async synth with cancellation. Public methods that matter:
+`UInoChatterboxTurboNativeSubsystem` mirrors `UInoLiteRtLmSubsystem`'s ergonomics — game-instance-scoped, async load with progress, async synth with cancellation. Public methods that matter:
 
 - `LoadModelsAsync(Config, OnLoaded)` — resolves missing files via the Project Settings entry (`UInoAgentsSettings::ChatterboxModels`), downloads them sequentially with `OnDownloadProgress` (HEAD-probe pass for aggregate total → GET pass with `.partial` staging + atomic rename → ThreadPool dispatch into `Models::LoadFromDir` + tokenizer parse), then fires `OnLoaded(true, "")` on the game thread. Optional `default_voice.wav` (~714 KB) is downloaded as a non-required file alongside the model, so the minimal "load + synth" flow can be a no-args `SynthesizeAsync` call (no reference voice required from the caller).
 - `SynthesizeAsync(Text, Voice, Options, OnComplete)` — one-shot synthesis. Worker dispatches the runner, runner produces the full 24 kHz mono int16 PCM LE waveform in `Result.AudioSamples`, marshals back to the game thread.
@@ -492,11 +492,11 @@ Only one variant is resident at a time — switching is `UnloadModels()` then a 
 - `CancelSynthesis()` — cooperative abort. Currently-running AR iteration finishes (tens of ms), worker unwinds, every queued + in-flight item terminates with `OnComplete(false, ..., "Cancelled")`. Auto-fired by `UnloadModels` and PIE end.
 - `IsModelDownloaded(Variant)` — pure file-stat probe. Safe to poll from a UMG widget (no SHA check, no I/O beyond directory enumeration). Returns true when the four `.onnx` files + `tokenizer.json` exist non-empty in the variant's resolved directory; the `.onnx_data` companions and `config.json` / `generation_config.json` are not part of the required set.
 
-`FInoChatterboxVoice` resolution priority (per call): `WavFilePath` (24 kHz mono PCM int16 or float32 — no silent resampling) → `ReferenceSamples` (24 kHz mono int16 PCM LE bytes) → `PrecomputedConditioningPath` (RESERVED for Phase E; setting this in Phase D errors with a clear message) → `<variant_dir>/default_voice.wav` (auto-downloaded, MIT-licensed).
+`FInoChatterboxTurboNativeVoice` resolution priority (per call): `WavFilePath` (24 kHz mono PCM int16 or float32 — no silent resampling) → `ReferenceSamples` (24 kHz mono int16 PCM LE bytes) → `PrecomputedConditioningPath` (RESERVED for Phase E; setting this in Phase D errors with a clear message) → `<variant_dir>/default_voice.wav` (auto-downloaded, MIT-licensed).
 
 ### Per-session execution-provider overrides (DirectML caveats)
 
-Chatterbox's four ORT sessions don't all behave well on every accelerator. `FInoChatterboxPerformanceOptions` exposes a "force CPU" flag per session, **all defaulting to true**, plus a global `bPreferDirectMl` (Windows) and `DirectMlAdapterIndex`. The defaults are deliberately conservative — flip individual flags only after verifying on the target hardware.
+Chatterbox's four ORT sessions don't all behave well on every accelerator. `FInoChatterboxTurboNativePerformanceOptions` exposes a "force CPU" flag per session, **all defaulting to true**, plus a global `bPreferDirectMl` (Windows) and `DirectMlAdapterIndex`. The defaults are deliberately conservative — flip individual flags only after verifying on the target hardware.
 
 Empirical state with ORT 1.24.3:
 
@@ -511,7 +511,7 @@ Confirmed upstream-side via a minimal Python repro using stock `onnxruntime-dire
 
 ### Streaming via incremental decoder runs
 
-`FInoChatterboxRunner`'s streaming path keeps the language-model AR loop running on its own thread while a parallel `FInoChatterboxDecoderWorker` re-runs `conditional_decoder` on rolling chunks of generated speech tokens. The first chunk fires `OnAudioChunk` once `StreamChunkTokens` (default 20, ~0.6 s of audio) tokens are ready, dropping the typical first-audio latency from "max_new_tokens × per_token_ms + decoder_ms" to roughly "20 × per_token_ms + first decoder_ms" — under a second for short utterances on a modern desktop. The decoder worker exists because `conditional_decoder` is the most expensive single op in the pipeline; running it inline on the AR thread would stall token generation while audio rendered, defeating the latency win.
+`FInoChatterboxTurboNativeRunner`'s streaming path keeps the language-model AR loop running on its own thread while a parallel `FInoChatterboxTurboNativeDecoderWorker` re-runs `conditional_decoder` on rolling chunks of generated speech tokens. The first chunk fires `OnAudioChunk` once `StreamChunkTokens` (default 20, ~0.6 s of audio) tokens are ready, dropping the typical first-audio latency from "max_new_tokens × per_token_ms + decoder_ms" to roughly "20 × per_token_ms + first decoder_ms" — under a second for short utterances on a modern desktop. The decoder worker exists because `conditional_decoder` is the most expensive single op in the pipeline; running it inline on the AR thread would stall token generation while audio rendered, defeating the latency win.
 
 ## NeuTTS Nano TTS (the second on-device TTS — shipping)
 
@@ -564,7 +564,7 @@ UInoNeuTtsNanoNativeSubsystem (UGameInstanceSubsystem)
 | Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `FInoOnnxSession` layer (MIT-licensed, ~5 MB). |
 | Default voice | **Baked in** — `NeuTtsNanoNative/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoNativeVoiceRegistry` + scanning a user-provided voices dir. |
 | Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
-| Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxDecoderWorker`. |
+| Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxTurboNativeDecoderWorker`. |
 
 ### Why phonemization is offline-only
 
@@ -682,7 +682,7 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │     UInoLiteRtLmAddNumbersTool ships as the canonical example
                  │     (used by Ino.LiteRtLm.ConversationToolTest).
                  │
-                 ├─ UInoChatterboxTtsSubsystem      (UGameInstanceSubsystem)
+                 ├─ UInoChatterboxTurboNativeSubsystem      (UGameInstanceSubsystem)
                  │     On-device TTS. Owns the 4 ORT sessions
                  │     (speech_encoder / embed_tokens / language_model /
                  │     conditional_decoder) plus the GPT-2 BPE tokenizer.
@@ -699,7 +699,7 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │     (RuntimeAudioImporter) or save via SaveInt16PcmAsWav.
                  │     CancelSynthesis cooperatively aborts queued + in-flight.
                  │
-                 ├─ UInoChatterboxStreamSynthesize  (UBlueprintAsyncActionBase)
+                 ├─ UInoChatterboxTurboNativeStreamSynthesize  (UBlueprintAsyncActionBase)
                  │     Latent Blueprint node ("Chatterbox Stream Synthesize")
                  │     that wraps SynthesizeStreamAsync with three exec pins:
                  │     OnAudioChunk / OnComplete / OnError.
@@ -848,7 +848,7 @@ All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2�
 
 ### Chatterbox (TTS) API
 
-All under `Source/InoAgents/Private/SmokeTests/InoChatterboxTest.cpp`, `InoChatterboxSubsystemTest.cpp`, and `InoChatterboxStreamSynthTest.cpp`. The granular tests stage on intermediate steps so a regression at any layer of the pipeline is bisectable without running a full synth.
+All under `Source/InoAgents/Private/SmokeTests/InoChatterboxTurboNativeTest.cpp`, `InoChatterboxTurboNativeSubsystemTest.cpp`, and `InoChatterboxTurboNativeStreamSynthTest.cpp`. The granular tests stage on intermediate steps so a regression at any layer of the pipeline is bisectable without running a full synth.
 
 | Command | What it proves | PIE? |
 |---|---|---|
@@ -859,8 +859,8 @@ All under `Source/InoAgents/Private/SmokeTests/InoChatterboxTest.cpp`, `InoChatt
 | `Ino.Chatterbox.ARLoopTest` | Full autoregressive loop with no voice — proves the KV-cache wiring + dtype discovery. | no |
 | `Ino.Chatterbox.EncoderTest` | `speech_encoder` against a staged 24 kHz WAV. | no |
 | `Ino.Chatterbox.DecodeTest` | AR loop + `conditional_decoder` with synthetic conditioning. | no |
-| `Ino.Chatterbox.SynthTest` | End-to-end one-shot via `FInoChatterboxRunner` (bypasses the subsystem). | no |
-| `Ino.Chatterbox.SubsystemSynthTest [variant] [max_new_tokens] [text...]` | End-to-end via `UInoChatterboxTtsSubsystem::SynthesizeAsync`. Exercises the public game-instance API end-to-end. | **yes** |
+| `Ino.Chatterbox.SynthTest` | End-to-end one-shot via `FInoChatterboxTurboNativeRunner` (bypasses the subsystem). | no |
+| `Ino.Chatterbox.SubsystemSynthTest [variant] [max_new_tokens] [text...]` | End-to-end via `UInoChatterboxTurboNativeSubsystem::SynthesizeAsync`. Exercises the public game-instance API end-to-end. | **yes** |
 | `Ino.Chatterbox.StreamSynthTest [variant] [chunk_tokens] [max_new_tokens] [text...]` | Streaming variant — logs each `OnAudioChunk` arrival with token count + delta byte size, verifies `bIsFinal=true` lands exactly once before `OnComplete`. | **yes** |
 
 ### ElevenLabs (cloud TTS) API

@@ -43,7 +43,7 @@
 			"LoadingPhase": "Default"
 		},
 		{
-			"Name": "InoChatterboxOnnx",
+			"Name": "InoChatterboxNative",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		},

@@ -33,7 +33,7 @@
 // incomplete type") because it doesn't include the private
 // NeuTtsNanoNative/ headers. Defining them here, where the full types are
 // visible, resolves the TDefaultDelete instantiation cleanly.
-// Same trick UInoChatterboxTtsSubsystem + UInoLiteRtLmConversation use.
+// Same trick UInoChatterboxTurboNativeSubsystem + UInoLiteRtLmConversation use.
 // ============================================================================
 
 UInoNeuTtsNanoNativeSubsystem::UInoNeuTtsNanoNativeSubsystem() = default;
@@ -582,7 +582,7 @@ void UInoNeuTtsNanoNativeSubsystem::CancelDownload()
 //
 // This block ports the Chatterbox multi-file download pattern
 // (Plugins/InoAgents/Source/InoAgents/Private/Chatterbox/
-//  InoChatterboxTtsSubsystem.cpp, StartDownload → StartHeadProbe →
+//  InoChatterboxTurboNativeSubsystem.cpp, StartDownload → StartHeadProbe →
 //  StartNextFileDownload → HandleDownloadComplete chain) minus the
 // optional-file / 404-tolerance branch that NeuTTS doesn't need.
 //

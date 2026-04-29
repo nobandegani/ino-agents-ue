@@ -16,13 +16,13 @@ public class InoAgents : ModuleRules
 				// path so:
 				//   - InoAgents Private/SmokeTests/*.cpp can keep their bare
 				//     #include "InoSmokeTestCommon.h" without a subdir prefix.
-				//   - sub-modules (e.g. InoChatterboxOnnx) that depend on
+				//   - sub-modules (e.g. InoChatterboxNative) that depend on
 				//     InoAgents inherit the path and can use the same bare
 				//     include for cross-module smoke-test reuse.
 				//
 				// NOTE: The shared audio helpers (UInoAudioFunctionLibrary —
 				// mono WAV reader / writer + PCM helpers consumed by
-				// InoChatterboxOnnx and any future TTS sub-module) live in
+				// InoChatterboxNative and any future TTS sub-module) live in
 				// Public/Audio/ but are NOT given a bare include path here —
 				// callers use the explicit "Audio/InoAudioFunctionLibrary.h"
 				// path to keep their includes greppable as cross-module.

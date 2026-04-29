@@ -8,7 +8,7 @@
 // IDXGIFactory::EnumAdapters and logs each one's index, description,
 // vendor / device ID, and memory stats. The index printed here is the
 // exact value to pass as
-// FInoChatterboxPerformanceOptions::DirectMlAdapterIndex (or the
+// FInoChatterboxTurboNativePerformanceOptions::DirectMlAdapterIndex (or the
 // low-level FInoOnnxSessionOptions::DirectMlAdapterIndex) to pick a
 // specific GPU / iGPU / NPU / WARP for DirectML inference.
 //
@@ -154,7 +154,7 @@ namespace
         TEXT("Ino.Onnx.ListDmlAdapters"),
         TEXT("List D3D12 adapters visible to IDXGIFactory::EnumAdapters1, in the ")
         TEXT("exact order DirectML uses for device_id. Pair the printed index with ")
-        TEXT("FInoChatterboxPerformanceOptions::DirectMlAdapterIndex (or the low-level ")
+        TEXT("FInoChatterboxTurboNativePerformanceOptions::DirectMlAdapterIndex (or the low-level ")
         TEXT("FInoOnnxSessionOptions::DirectMlAdapterIndex) to pick a specific ")
         TEXT("GPU / iGPU / NPU / WARP adapter for DirectML inference. Windows-only."),
         FConsoleCommandWithArgsDelegate::CreateStatic(&RunOnnxListDmlAdapters));

@@ -19,7 +19,7 @@
  * This module's StartupModule is currently a no-op — every runtime's
  * lifecycle is owned upstream. Subsystem-level work (model loading,
  * conversation lifecycle) happens lazily off the game thread in
- * UInoLiteRtLmSubsystem::LoadModelAsync, UInoChatterboxTtsSubsystem,
+ * UInoLiteRtLmSubsystem::LoadModelAsync, UInoChatterboxTurboNativeSubsystem,
  * UInoNeuTtsNanoNativeSubsystem, etc.
  *
  * See Plugins/InoAgents/README.md for the plugin's user-facing API and

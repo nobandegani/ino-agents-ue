@@ -18,7 +18,7 @@ class IFileHandle;
 // the special members (default ctor, FVTableHelper ctor, dtor) are
 // defined out-of-line in the .cpp where the private headers are fully
 // visible. Same trick UInoLiteRtLmConversation and
-// UInoChatterboxTtsSubsystem use for their forward-declared members —
+// UInoChatterboxTurboNativeSubsystem use for their forward-declared members —
 // avoids the classic C4150 "cannot delete pointer to incomplete type"
 // UHT .gen.cpp compile error.
 class FInoNeuTtsNanoNativeRunner;
@@ -62,7 +62,7 @@ class FInoNeuTtsNanoNativeVoiceRegistry;
  *             └─ HandleDownloadComplete → last file?
  *                 └─ FinishDownloadSuccess → DispatchLoadWorker
  *
- * Mirrors UInoChatterboxTtsSubsystem's multi-file pattern, minus the
+ * Mirrors UInoChatterboxTurboNativeSubsystem's multi-file pattern, minus the
  * optional-file / 404-tolerance branch (both NeuTTS files are strictly
  * required). The duplication is flagged tech debt for a future
  * shared Private/InoHttpDownload/ helper.

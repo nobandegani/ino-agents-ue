@@ -382,7 +382,7 @@ struct INONEUTTSNATIVE_API FInoNeuTtsNanoNativeSynthesisOptions
  * UInoNeuTtsNanoNativeSubsystem) so the build-queue helper in the subsystem's
  * .cpp anonymous namespace can reference it without friending.
  *
- * Mirrors FInoChatterboxDownloadFile — same semantics, different
+ * Mirrors FInoChatterboxTurboNativeDownloadFile — same semantics, different
  * containing subsystem. The duplication is flagged tech debt; a future
  * refactor will factor both into Private/InoHttpDownload/FDownloadFile.
  */
@@ -430,7 +430,7 @@ DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoNativeSynthesisComplete,
 // UE's BP reflection can't pass TArray-by-value through a dynamic delegate —
 // it errors out with "No value will be returned by reference. Parameter
 // 'PcmInt16LE'" when you try to bind a CustomEvent. Matches the pattern
-// FOnInoChatterboxAudioChunk uses for the same AudioChunk byte buffer.
+// FOnInoChatterboxTurboNativeAudioChunk uses for the same AudioChunk byte buffer.
 
 /**
  * Multicast download-progress signal.
@@ -480,7 +480,7 @@ DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoNeuTtsNanoNativeDownloadProgress,
  * dynamic delegate — the BindDynamic path fails with "No value will be
  * returned by reference. Parameter 'AudioChunk'". Same reason
  * FOnInoNeuTtsNanoNativeSynthesisComplete above uses a const ref; matches
- * Chatterbox's FOnInoChatterboxAudioChunk shape exactly.
+ * Chatterbox's FOnInoChatterboxTurboNativeAudioChunk shape exactly.
  */
 DECLARE_DYNAMIC_DELEGATE_ThreeParams(FOnInoNeuTtsNanoNativeAudioChunk,
     const TArray<uint8>&, AudioChunk,

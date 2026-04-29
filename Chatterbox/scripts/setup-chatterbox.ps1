@@ -4,7 +4,7 @@
 # project's PersistentDownloadDir so editor-side smoke tests
 # (Ino.Chatterbox.LoadModelsTest, SynthTest, RoundTripTest) can find them.
 #
-# Shipping games do NOT call this script — the UInoChatterboxSubsystem
+# Shipping games do NOT call this script — the UInoChatterboxTurboNativeSubsystem
 # handles the download at first-run on the player's device, using the
 # same URLs and the same PersistentDownloadDir layout. This script
 # exists only so developers can skip that first-run wait during
@@ -53,7 +53,7 @@
 #               default_voice.wav                    (only if -IncludeDefaultVoice; cross-borrowed from
 #                                                     onnx-community/chatterbox-ONNX; 24 kHz mono)
 #
-# UInoChatterboxSubsystem uses FPaths::ProjectPersistentDownloadDir() +
+# UInoChatterboxTurboNativeSubsystem uses FPaths::ProjectPersistentDownloadDir() +
 # "InoAgents/Models/Chatterbox/<variant>/" to resolve this path at runtime,
 # independent of whether the script or the subsystem populated it.
 

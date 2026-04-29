@@ -13,7 +13,7 @@ class UInoElevenLabsSubsystem;
 /**
  * Helpers shared between smoke test console commands across the
  * InoAgents plugin and its sub-modules. Exposed under Public/ so
- * sub-modules (e.g. InoChatterboxOnnx) can reuse the generic
+ * sub-modules (e.g. InoChatterboxNative) can reuse the generic
  * FindGameInstanceSubsystem<T>() template without depending on
  * InoAgents core's Private/.
  *
@@ -53,7 +53,7 @@ namespace InoSmokeTest
     /**
      * Typed wrappers for subsystems that live in InoAgents core. Sub-
      * modules whose subsystem lives elsewhere (e.g. Chatterbox via
-     * InoChatterboxOnnx) should call FindGameInstanceSubsystem<T>()
+     * InoChatterboxNative) should call FindGameInstanceSubsystem<T>()
      * directly to avoid pulling InoAgents core into a dep cycle.
      */
     INOAGENTS_API UInoLiteRtLmSubsystem*  FindLiteRtLmSubsystem();

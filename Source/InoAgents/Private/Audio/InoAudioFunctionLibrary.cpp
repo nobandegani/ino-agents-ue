@@ -266,7 +266,7 @@ bool UInoAudioFunctionLibrary::SaveInt16PcmAsWav(
 }
 
 // ---------------------------------------------------------------------
-// C++-only static helpers (promoted from InoChatterboxAudioIO).
+// C++-only static helpers (promoted from InoChatterboxTurboNativeAudioIO).
 // ---------------------------------------------------------------------
 
 bool UInoAudioFunctionLibrary::ReadMonoWavAsFloat32(

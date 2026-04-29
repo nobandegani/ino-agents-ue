@@ -21,7 +21,7 @@
  *   - SaveInt16PcmAsWav           — write a TArray<uint8> as a WAV file
  *
  * C++-only surface (static methods, INOAGENTS_API via the class
- * decoration; consumed cross-module from InoChatterboxOnnx and any
+ * decoration; consumed cross-module from InoChatterboxNative and any
  * future TTS / audio submodule):
  *   - ReadMonoWavAsFloat32        — strict mono WAV reader (PCM16 + IEEE32)
  *   - WriteMonoInt16Wav           — float -> int16 LE -> WAV
@@ -32,7 +32,7 @@
  * The C++-only helpers take TArrayView / pointer-out-error parameters
  * that aren't Blueprint-compatible, so they're plain `static` methods
  * rather than UFUNCTIONs. They were promoted here from the (now-deleted)
- * InoChatterboxAudioIO.h so a single library owns the WAV / PCM
+ * InoChatterboxTurboNativeAudioIO.h so a single library owns the WAV / PCM
  * primitives instead of a TTS-flavoured side header.
  */
 UCLASS()
@@ -118,7 +118,7 @@ public:
      * Save a 16-bit PCM mono byte buffer to disk as a playable WAV file.
      *
      * Intended as a diagnostic / debug helper: paste
-     * FInoChatterboxSynthesisResult::AudioSamples straight in and get a
+     * FInoChatterboxTurboNativeSynthesisResult::AudioSamples straight in and get a
      * file you can open in any media player. Useful for verifying the
      * synth output when a streaming-audio pipeline somewhere else is
      * misbehaving ("is the problem my playback setup, or the bytes I
@@ -132,7 +132,7 @@ public:
      *                     to. Parent directory must exist (use
      *                     FPaths::ProjectSavedDir() for scratch).
      * @param PcmBytes     Int16 PCM LE bytes, typically straight from
-     *                     FInoChatterboxSynthesisResult::AudioSamples.
+     *                     FInoChatterboxTurboNativeSynthesisResult::AudioSamples.
      * @param SampleRate   Typically 24000 for Chatterbox output. Stored
      *                     in the WAV header so media players know the
      *                     playback rate.
@@ -151,9 +151,9 @@ public:
     // C++-only static helpers (not BlueprintCallable — TArrayView /
     // pointer-out-error parameters aren't Blueprint-compatible).
     //
-    // Promoted here from InoChatterboxAudioIO so a single library
+    // Promoted here from InoChatterboxTurboNativeAudioIO so a single library
     // owns the WAV / PCM primitives. Used cross-module from
-    // InoChatterboxOnnx (and any future TTS / audio submodule) via
+    // InoChatterboxNative (and any future TTS / audio submodule) via
     // the INOAGENTS_API class decoration above.
     // ---------------------------------------------------------------
 
@@ -168,7 +168,7 @@ public:
      * Channel count MUST be 1. Sample rate is reported via
      * OutSampleRate but NOT validated — the caller decides whether a
      * mismatch vs the model's required rate is a warning or a hard
-     * error. UInoChatterboxTtsSubsystem::SynthesizeAsync errors hard
+     * error. UInoChatterboxTurboNativeSubsystem::SynthesizeAsync errors hard
      * on mismatch; smoke tests warn and feed through.
      *
      * Tolerant of extra 'LIST' / 'fact' / 'JUNK' chunks between the
@@ -208,7 +208,7 @@ public:
      * SaveInt16PcmAsWav above and direct C++ callers).
      *
      * Input is little-endian int16 samples packed as bytes (same shape
-     * as FInoChatterboxSynthesisResult::AudioSamples). Byte count MUST
+     * as FInoChatterboxTurboNativeSynthesisResult::AudioSamples). Byte count MUST
      * be a multiple of 2; returns false otherwise. Self-contained
      * writer (no UE audio module dependency).
      *
@@ -222,7 +222,7 @@ public:
 
     /**
      * Convert int16 PCM little-endian bytes (typically 24 kHz mono, as
-     * passed in FInoChatterboxVoice::ReferenceSamples) into float32
+     * passed in FInoChatterboxTurboNativeVoice::ReferenceSamples) into float32
      * samples in [-1, +1] for the ONNX pipeline.
      *
      * Byte count must be a multiple of 2 (int16-aligned). Returns false

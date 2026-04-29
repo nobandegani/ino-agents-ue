@@ -39,7 +39,7 @@ Chatterbox/
 └── README.md                     ← this file
 ```
 
-At runtime the UInoChatterboxSubsystem downloads the same files on the
+At runtime the UInoChatterboxTurboNativeSubsystem downloads the same files on the
 player's device into `PersistentDownloadDir/InoAgents/Models/Chatterbox/
 <variant>/`. The script in this folder is the dev-time equivalent — it
 populates the exact same path on the dev machine so editor smoke tests
@@ -125,7 +125,7 @@ is missing or stale (compares local size vs HuggingFace Content-Length).
 
 ## Shipping games
 
-At ship time, the `UInoChatterboxSubsystem::LoadModelsAsync` call on
+At ship time, the `UInoChatterboxTurboNativeSubsystem::LoadModelsAsync` call on
 first boot downloads the same files to the same layout on the player's
 device via `FHttpModule`. No pre-staging is required on the player's
 machine. Download progress fires through `OnDownloadProgress` delegates
