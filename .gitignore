@@ -14,3 +14,5 @@ Models/
 # Staged LiteRT-LM artifacts (produced by LiteRtLm/scripts/build-win64.ps1, not tracked)
 #Source/ThirdParty/InoAgentsLibrary/Public/litert/
 #Source/ThirdParty/InoAgentsLibrary/Win64/LiteRtLm.lib
+
+Chatterbox/LiteRT/*
