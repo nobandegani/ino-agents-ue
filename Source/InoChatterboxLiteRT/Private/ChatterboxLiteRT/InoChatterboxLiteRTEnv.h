@@ -5,10 +5,20 @@
 #include "CoreMinimal.h"
 
 // Forward decl — full definition lives in litert/c/litert_common.h. Keeping
-// the LiteRT include out of public-facing headers avoids dragging the C API
-// surface into every TU that consumes the runner.
-struct LiteRtEnvironmentT;
-typedef struct LiteRtEnvironmentT* LiteRtEnvironment;
+// the LiteRT include out of this public-facing header avoids dragging the C
+// API surface into every TU that consumes the env singleton.
+//
+// Use the EXACT typedef form upstream's LITERT_DEFINE_HANDLE macro emits in
+// C++ mode (litert_common.h:55-58):
+//     typedef class LiteRtEnvironmentT* LiteRtEnvironment;
+//
+// Critical: must use `class`, NOT `struct LiteRtEnvironmentT;` + a separate
+// typedef. MSVC otherwise mangles the type differently across TUs that see
+// `struct` first (this header) vs ones that see `class` first (via
+// litert_common.h directly), producing PEAU-vs-PEAV name mangling and
+// link-time "unresolved external" failures on every function that takes a
+// LiteRtEnvironment parameter.
+typedef class LiteRtEnvironmentT* LiteRtEnvironment;
 
 /**
  * Process-wide singleton holding one LiteRtEnvironment for the

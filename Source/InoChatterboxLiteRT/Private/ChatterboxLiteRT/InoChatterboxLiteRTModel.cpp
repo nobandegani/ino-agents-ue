@@ -438,6 +438,139 @@ bool FInoChatterboxLiteRTModel::IsFullyAccelerated() const
     return bAccel;
 }
 
+bool FInoChatterboxLiteRTModel::ResizeInputTensor(
+    int32 SignatureIndex,
+    int32 InputIndex,
+    TArrayView<const int32> NewDims)
+{
+    if (!CompiledModel)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("ResizeInputTensor: model not loaded."));
+        return false;
+    }
+    if (NewDims.Num() == 0)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("ResizeInputTensor: empty dims array."));
+        return false;
+    }
+    // Use the NonStrict variant — its docs explicitly state it "should be
+    // paired with LiteRtGetCompiledModelOutputTensorLayouts(...,
+    // update_allocation=true) to propagate shape changes to outputs", which
+    // is exactly the pattern our runner needs. The strict variant does not
+    // reliably propagate shape changes through the compiled model's output
+    // layout query for the chatterbox-turbo text_emb / speech_emb / decoder
+    // graphs (verified empirically: strict resize to [1, 3] still resolved
+    // output to [1, 1, 1024] instead of the expected [1, 3, 1024], causing
+    // RunCompiledModel to fail with kLiteRtStatusErrorRuntimeFailure).
+    const LiteRtStatus Status = LiteRtCompiledModelResizeInputTensorNonStrict(
+        CompiledModel,
+        static_cast<LiteRtParamIndex>(SignatureIndex),
+        static_cast<LiteRtParamIndex>(InputIndex),
+        NewDims.GetData(),
+        static_cast<size_t>(NewDims.Num()));
+    if (Status != kLiteRtStatusOk)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("LiteRtCompiledModelResizeInputTensorNonStrict(sig=%d, in=%d) failed: %s."),
+            SignatureIndex, InputIndex,
+            *InoChatterboxLiteRT::StatusToString(Status));
+        return false;
+    }
+    return true;
+}
+
+bool FInoChatterboxLiteRTModel::GetOutputTensorLayout(
+    int32 SignatureIndex,
+    int32 OutputIndex,
+    TArray<int32>& OutDims,
+    bool bUpdateAllocation)
+{
+    OutDims.Reset();
+    if (!CompiledModel)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("GetOutputTensorLayout: model not loaded."));
+        return false;
+    }
+    const FInoChatterboxLiteRTSignatureInfo* Info = GetSignatureInfo(SignatureIndex);
+    if (!Info)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("GetOutputTensorLayout: invalid signature index %d."), SignatureIndex);
+        return false;
+    }
+    if (!Info->Outputs.IsValidIndex(OutputIndex))
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("GetOutputTensorLayout: invalid output index %d (signature has %d)."),
+            OutputIndex, Info->Outputs.Num());
+        return false;
+    }
+
+    // The All-Outputs form requires us to allocate enough Layout slots for
+    // every output; it then writes them all in one call. We only care about
+    // OutputIndex but pulling all outputs at once is the only API surface.
+    TArray<LiteRtLayout, TInlineAllocator<8>> Layouts;
+    Layouts.SetNumZeroed(Info->Outputs.Num());
+    const LiteRtStatus Status = LiteRtGetCompiledModelOutputTensorLayouts(
+        CompiledModel,
+        static_cast<LiteRtParamIndex>(SignatureIndex),
+        static_cast<size_t>(Layouts.Num()),
+        Layouts.GetData(),
+        bUpdateAllocation);
+    if (Status != kLiteRtStatusOk)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("LiteRtGetCompiledModelOutputTensorLayouts(sig=%d) failed: %s."),
+            SignatureIndex,
+            *InoChatterboxLiteRT::StatusToString(Status));
+        return false;
+    }
+
+    const LiteRtLayout& L = Layouts[OutputIndex];
+    OutDims.Reserve(L.rank);
+    for (unsigned int i = 0; i < L.rank; ++i)
+    {
+        OutDims.Add(L.dimensions[i]);
+    }
+    return true;
+}
+
+bool FInoChatterboxLiteRTModel::GetInputTensorLayout(
+    int32 SignatureIndex,
+    int32 InputIndex,
+    TArray<int32>& OutDims)
+{
+    OutDims.Reset();
+    if (!CompiledModel)
+    {
+        return false;
+    }
+    LiteRtLayout L;
+    FMemory::Memzero(L);
+    const LiteRtStatus Status = LiteRtGetCompiledModelInputTensorLayout(
+        CompiledModel,
+        static_cast<LiteRtParamIndex>(SignatureIndex),
+        static_cast<LiteRtParamIndex>(InputIndex),
+        &L);
+    if (Status != kLiteRtStatusOk)
+    {
+        UE_LOG(LogInoChatterboxLiteRT, Error,
+            TEXT("LiteRtGetCompiledModelInputTensorLayout(sig=%d, in=%d) failed: %s."),
+            SignatureIndex, InputIndex,
+            *InoChatterboxLiteRT::StatusToString(Status));
+        return false;
+    }
+    OutDims.Reserve(L.rank);
+    for (unsigned int i = 0; i < L.rank; ++i)
+    {
+        OutDims.Add(L.dimensions[i]);
+    }
+    return true;
+}
+
 #endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
 
 void FInoChatterboxLiteRTModel::LogSignatures() const

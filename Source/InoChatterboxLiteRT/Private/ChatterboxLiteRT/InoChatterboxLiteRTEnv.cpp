@@ -3,6 +3,7 @@
 #include "InoChatterboxLiteRTEnv.h"
 
 #include "InoChatterboxLiteRT.h"
+#include "InoChatterboxLiteRTTensor.h"  // for InoChatterboxLiteRT::StatusToString
 
 // LiteRT C API — staged into Source/ThirdParty/Public/litert/c/ by the
 // sibling InoLiteRT plugin's build scripts. PublicSystemIncludePaths in
@@ -46,10 +47,9 @@ namespace InoChatterboxLiteRT
         if (Status != kLiteRtStatusOk)
         {
             UE_LOG(LogInoChatterboxLiteRT, Error,
-                TEXT("LiteRtCreateEnvironment failed: status=%d (%s). Subsequent "
-                     "model loads will return nullptr."),
-                static_cast<int32>(Status),
-                ANSI_TO_TCHAR(LiteRtGetStatusString(Status)));
+                TEXT("LiteRtCreateEnvironment failed: %s. Subsequent model "
+                     "loads will return nullptr."),
+                *InoChatterboxLiteRT::StatusToString(Status));
             GEnv = nullptr;
             return nullptr;
         }

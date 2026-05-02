@@ -81,6 +81,10 @@ public class InoChatterboxLiteRT : ModuleRules
                 "Json",          // FJsonObject / FJsonSerializer for parsing
                                  // tokenizer.json (Phase 2).
                 "JsonUtilities",
+
+                "Projects",      // IPluginManager::Get — used by smoke tests
+                                 // and runner to resolve InoAgents plugin's
+                                 // BaseDir for staged Chatterbox model files.
             }
             );
 

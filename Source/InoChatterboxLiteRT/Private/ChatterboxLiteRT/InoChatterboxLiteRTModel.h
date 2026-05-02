@@ -103,6 +103,50 @@ public:
         TArrayView<FInoChatterboxLiteRTTensor*> Inputs,
         TArrayView<FInoChatterboxLiteRTTensor*> Outputs);
 
+    /**
+     * Resize an input tensor to a concrete shape (for models with dynamic
+     * dimensions in the signature). REQUIRED before Run() if the input has
+     * any dynamic dim — the LiteRT compiled-model runtime uses this to
+     * allocate internal pipeline buffers and to infer the output shape.
+     *
+     * After calling this, you should:
+     *   1. (Re)allocate input tensor buffers matching the new shape
+     *   2. Call GetOutputTensorLayout() to learn the now-concrete output shape
+     *   3. (Re)allocate output tensor buffers matching that shape
+     *   4. Run()
+     *
+     * Returns true on success.
+     */
+    bool ResizeInputTensor(
+        int32 SignatureIndex,
+        int32 InputIndex,
+        TArrayView<const int32> NewDims);
+
+    /**
+     * Get the current (post-resize) layout of an output tensor for the given
+     * signature. Pass `bUpdateAllocation=true` after a fresh ResizeInputTensor
+     * call so the runtime propagates the shape change before reporting.
+     *
+     * Returns true on success and fills `OutDims` with the concrete dimensions
+     * (negative entries indicate any dimensions that are still dynamic; for
+     * a properly-resized model these should all be > 0).
+     */
+    bool GetOutputTensorLayout(
+        int32 SignatureIndex,
+        int32 OutputIndex,
+        TArray<int32>& OutDims,
+        bool bUpdateAllocation = true);
+
+    /**
+     * Diagnostic: get the current input tensor layout (reflecting the most
+     * recent ResizeInputTensor call, per the LiteRT C API docs). Useful for
+     * verifying that resize calls are actually taking effect.
+     */
+    bool GetInputTensorLayout(
+        int32 SignatureIndex,
+        int32 InputIndex,
+        TArray<int32>& OutDims);
+
     /** Number of signatures cached. */
     int32 NumSignatures() const { return Signatures.Num(); }
 

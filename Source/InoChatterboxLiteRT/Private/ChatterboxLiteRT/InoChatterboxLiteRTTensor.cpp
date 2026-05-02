@@ -281,8 +281,55 @@ namespace InoChatterboxLiteRT
 
     FString StatusToString(LiteRtStatus Status)
     {
-        const char* Msg = LiteRtGetStatusString(Status);
-        return Msg ? FString(ANSI_TO_TCHAR(Msg)) : FString::Printf(TEXT("status=%d"), static_cast<int32>(Status));
+        // Note: we deliberately do NOT call upstream's LiteRtGetStatusString
+        // here. The function is declared in litert/c/litert_common.h:313 but
+        // the prebuilt libLiteRt.dll from LiteRT-LM's prebuilt/windows_x86_64/
+        // does NOT export that symbol — the export table only includes APIs
+        // marked with LITERT_CAPI_EXPORT, which LiteRtGetStatusString isn't on
+        // the current pin. We mirror the upstream switch verbatim so callers
+        // still get a readable string. Update if litert_common.h adds new
+        // status codes; the unknown-default branch keeps it safe meanwhile.
+        const TCHAR* Name = nullptr;
+        switch (Status)
+        {
+        case kLiteRtStatusOk:                                Name = TEXT("Ok"); break;
+        case kLiteRtStatusErrorInvalidArgument:              Name = TEXT("ErrorInvalidArgument"); break;
+        case kLiteRtStatusErrorMemoryAllocationFailure:      Name = TEXT("ErrorMemoryAllocationFailure"); break;
+        case kLiteRtStatusErrorRuntimeFailure:               Name = TEXT("ErrorRuntimeFailure"); break;
+        case kLiteRtStatusErrorMissingInputTensor:           Name = TEXT("ErrorMissingInputTensor"); break;
+        case kLiteRtStatusErrorUnsupported:                  Name = TEXT("ErrorUnsupported"); break;
+        case kLiteRtStatusErrorNotFound:                     Name = TEXT("ErrorNotFound"); break;
+        case kLiteRtStatusErrorTimeoutExpired:               Name = TEXT("ErrorTimeoutExpired"); break;
+        case kLiteRtStatusErrorWrongVersion:                 Name = TEXT("ErrorWrongVersion"); break;
+        case kLiteRtStatusErrorUnknown:                      Name = TEXT("ErrorUnknown"); break;
+        case kLiteRtStatusErrorAlreadyExists:                Name = TEXT("ErrorAlreadyExists"); break;
+        case kLiteRtStatusCancelled:                         Name = TEXT("Cancelled"); break;
+        case kLiteRtStatusErrorFileIO:                       Name = TEXT("ErrorFileIO"); break;
+        case kLiteRtStatusErrorInvalidFlatbuffer:            Name = TEXT("ErrorInvalidFlatbuffer"); break;
+        case kLiteRtStatusErrorDynamicLoading:               Name = TEXT("ErrorDynamicLoading"); break;
+        case kLiteRtStatusErrorSerialization:                Name = TEXT("ErrorSerialization"); break;
+        case kLiteRtStatusErrorCompilation:                  Name = TEXT("ErrorCompilation"); break;
+        case kLiteRtStatusErrorIndexOOB:                     Name = TEXT("ErrorIndexOOB"); break;
+        case kLiteRtStatusErrorInvalidIrType:                Name = TEXT("ErrorInvalidIrType"); break;
+        case kLiteRtStatusErrorInvalidGraphInvariant:        Name = TEXT("ErrorInvalidGraphInvariant"); break;
+        case kLiteRtStatusErrorGraphModification:            Name = TEXT("ErrorGraphModification"); break;
+        case kLiteRtStatusErrorInvalidToolConfig:            Name = TEXT("ErrorInvalidToolConfig"); break;
+        case kLiteRtStatusLegalizeNoMatch:                   Name = TEXT("LegalizeNoMatch"); break;
+        case kLiteRtStatusErrorInvalidLegalization:          Name = TEXT("ErrorInvalidLegalization"); break;
+        case kLiteRtStatusPatternNoMatch:                    Name = TEXT("PatternNoMatch"); break;
+        case kLiteRtStatusInvalidTransformation:             Name = TEXT("InvalidTransformation"); break;
+        case kLiteRtStatusErrorUnsupportedRuntimeVersion:    Name = TEXT("ErrorUnsupportedRuntimeVersion"); break;
+        case kLiteRtStatusErrorUnsupportedCompilerVersion:   Name = TEXT("ErrorUnsupportedCompilerVersion"); break;
+        case kLiteRtStatusErrorIncompatibleByteCodeVersion:  Name = TEXT("ErrorIncompatibleByteCodeVersion"); break;
+        case kLiteRtStatusErrorUnsupportedOpShapeInferer:    Name = TEXT("ErrorUnsupportedOpShapeInferer"); break;
+        case kLiteRtStatusErrorShapeInferenceFailed:         Name = TEXT("ErrorShapeInferenceFailed"); break;
+        default: break;
+        }
+        if (Name)
+        {
+            return FString::Printf(TEXT("%s(%d)"), Name, static_cast<int32>(Status));
+        }
+        return FString::Printf(TEXT("status=%d"), static_cast<int32>(Status));
     }
 
 #endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID

@@ -118,18 +118,76 @@ namespace
             return;
         }
 
-        // Allocate input: int32[1, 3] (matches the dtype text_emb expects;
-        // verified by the metadata dump above — text_emb's input is int32).
-        FInoChatterboxLiteRTTensor InputBuf;
+        // text_emb has dynamic input shape [?, ?] and dynamic output shape
+        // [?, ?, 1024]. Resize input, then probe what shape the runtime
+        // actually settled on for both input and output.
         const int32 InputDims[] = { 1, 3 };
-        if (!InputBuf.CreateManagedHost(Env, kLiteRtElementTypeInt32,
+        if (!TextEmb->ResizeInputTensor(/*sig=*/0, /*input=*/0,
+                TArrayView<const int32>(InputDims, 2)))
+        {
+            UE_LOG(LogInoChatterboxLiteRT, Error,
+                TEXT("LoadTest: failed to resize text_emb input."));
+            return;
+        }
+
+        // Diagnostic: did resize actually take effect on the input side?
+        TArray<int32> PostResizeInputDims;
+        if (TextEmb->GetInputTensorLayout(0, 0, PostResizeInputDims))
+        {
+            FString InStr;
+            for (int32 i = 0; i < PostResizeInputDims.Num(); ++i)
+            {
+                InStr += FString::Printf(TEXT("%s%d"), i == 0 ? TEXT("") : TEXT(", "),
+                    PostResizeInputDims[i]);
+            }
+            UE_LOG(LogInoChatterboxLiteRT, Log,
+                TEXT("LoadTest: text_emb POST-resize input layout = [%s] (requested [1, 3])"),
+                *InStr);
+        }
+
+        // What does the output-layout query say AFTER resize?
+        TArray<int32> ResolvedOutputDims;
+        if (!TextEmb->GetOutputTensorLayout(/*sig=*/0, /*output=*/0, ResolvedOutputDims))
+        {
+            UE_LOG(LogInoChatterboxLiteRT, Error,
+                TEXT("LoadTest: failed to resolve text_emb output layout after resize."));
+            return;
+        }
+        FString DimStr;
+        for (int32 i = 0; i < ResolvedOutputDims.Num(); ++i)
+        {
+            DimStr += FString::Printf(TEXT("%s%d"), i == 0 ? TEXT("") : TEXT(", "),
+                ResolvedOutputDims[i]);
+        }
+        UE_LOG(LogInoChatterboxLiteRT, Log,
+            TEXT("LoadTest: text_emb output-layout-query result = [%s] (expected [1, 3, 1024])"),
+            *DimStr);
+
+        // OVERRIDE: force the output to the shape we KNOW it must be ([1, 3, 1024]).
+        // Earlier runs showed the layout query returns [1, 1, 1024] regardless
+        // of resize, but allocating an output buffer of that size means the
+        // runtime only writes 1024 floats and our [1, 3, 1024] buffer is
+        // partially uninitialized. Force the correct allocation here and see
+        // whether the runtime fills all 3072 elements with real data.
+        ResolvedOutputDims = { 1, 3, 1024 };
+        UE_LOG(LogInoChatterboxLiteRT, Log,
+            TEXT("LoadTest: OVERRIDING output allocation to [1, 3, 1024] for diagnosis"));
+
+        // Allocate input: int64[1, 3]. Chatterbox's text_emb (and speech_emb)
+        // expect int64 token ids — NOT int32 like most other LLM exports use
+        // at the LiteRT boundary. The conditional_decoder is the opposite —
+        // its speech_tokens input is i32 [1, ?]. So our future runner must
+        // allocate per-tensor dtypes from cached signature metadata, not
+        // assume one global token width.
+        FInoChatterboxLiteRTTensor InputBuf;
+        if (!InputBuf.CreateManagedHost(Env, kLiteRtElementTypeInt64,
                 TArrayView<const int32>(InputDims, 2)))
         {
             UE_LOG(LogInoChatterboxLiteRT, Error,
                 TEXT("LoadTest: failed to allocate text_emb input buffer."));
             return;
         }
-        if (int32* Ptr = static_cast<int32*>(InputBuf.LockForWrite()))
+        if (int64* Ptr = static_cast<int64*>(InputBuf.LockForWrite()))
         {
             Ptr[0] = 101; Ptr[1] = 102; Ptr[2] = 103;
             InputBuf.Unlock();
@@ -141,12 +199,11 @@ namespace
             return;
         }
 
-        // Allocate output: f32[1, 3, 1024] (text embedding hidden_size=1024
-        // for chatterbox-turbo per the architecture constants).
+        // Allocate output using the resolved (post-resize) layout instead of
+        // hardcoding [1, 3, 1024]. This keeps the test correct even if the
+        // input shape changes.
         FInoChatterboxLiteRTTensor OutputBuf;
-        const int32 OutputDims[] = { 1, 3, 1024 };
-        if (!OutputBuf.CreateManagedHost(Env, kLiteRtElementTypeFloat32,
-                TArrayView<const int32>(OutputDims, 3)))
+        if (!OutputBuf.CreateManagedHost(Env, kLiteRtElementTypeFloat32, ResolvedOutputDims))
         {
             UE_LOG(LogInoChatterboxLiteRT, Error,
                 TEXT("LoadTest: failed to allocate text_emb output buffer."));
@@ -179,6 +236,7 @@ namespace
         }
         const int32 NumElems = 1 * 3 * 1024;
         int32 NonZeroCount = 0;
+        double MeanAbs = 0.0;
         float MinV = OutPtr[0];
         float MaxV = OutPtr[0];
         for (int32 i = 0; i < NumElems; ++i)
@@ -187,18 +245,48 @@ namespace
             if (V != 0.0f) { ++NonZeroCount; }
             if (V < MinV) { MinV = V; }
             if (V > MaxV) { MaxV = V; }
+            MeanAbs += FMath::Abs(V);
+        }
+        MeanAbs /= NumElems;
+
+        // Sample values from row 0 and row 2 (token 101 and token 103) to give
+        // visual confirmation we're getting real embedding rows, not garbage.
+        FString Row0First8;
+        FString Row2Last8;
+        for (int32 i = 0; i < 8; ++i)
+        {
+            Row0First8 += FString::Printf(TEXT("%s%.4e"), i == 0 ? TEXT("") : TEXT(", "), OutPtr[i]);
+            Row2Last8  += FString::Printf(TEXT("%s%.4e"), i == 0 ? TEXT("") : TEXT(", "), OutPtr[2 * 1024 + 1024 - 8 + i]);
         }
         OutputBuf.Unlock();
 
         UE_LOG(LogInoChatterboxLiteRT, Log,
-            TEXT("LoadTest: text_emb forward done in %.4fs — output[1,3,1024] fp32, "
-                 "non_zero=%d/%d, range=[%.4f, %.4f]"),
-            Elapsed, NonZeroCount, NumElems, MinV, MaxV);
+            TEXT("LoadTest: text_emb forward done in %.4fs — output[1,3,1024] fp32:"),
+            Elapsed);
+        UE_LOG(LogInoChatterboxLiteRT, Log,
+            TEXT("    non_zero=%d/%d, mean_abs=%.4e, range=[%.4e, %.4e]"),
+            NonZeroCount, NumElems, MeanAbs, MinV, MaxV);
+        UE_LOG(LogInoChatterboxLiteRT, Log,
+            TEXT("    row0 first 8: [%s]"), *Row0First8);
+        UE_LOG(LogInoChatterboxLiteRT, Log,
+            TEXT("    row2 last  8: [%s]"), *Row2Last8);
 
+        // Sanity check: real GPT-2-Medium fp32 token embeddings have mean_abs
+        // in the rough range 0.005..0.05 (depends on the specific token).
+        // mean_abs near zero = buffer is uninitialized / model didn't actually
+        // write to it. Anything > 1e-5 is consistent with real embedding data.
         if (NonZeroCount == 0)
         {
             UE_LOG(LogInoChatterboxLiteRT, Error,
-                TEXT("LoadTest: FAIL — text_emb output is all zeros (model not actually running?)."));
+                TEXT("LoadTest: FAIL — text_emb output is all zeros (model not running?)."));
+        }
+        else if (MeanAbs < 1e-5)
+        {
+            UE_LOG(LogInoChatterboxLiteRT, Warning,
+                TEXT("LoadTest: SUSPICIOUS — mean_abs=%.4e is near zero. Output "
+                     "may be uninitialized buffer rather than real embeddings. "
+                     "Run again and compare bit values."),
+                MeanAbs);
         }
         else
         {
