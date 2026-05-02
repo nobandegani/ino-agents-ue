@@ -53,6 +53,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "InoChatterboxLiteRT",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "InoNeuTtsNative",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
