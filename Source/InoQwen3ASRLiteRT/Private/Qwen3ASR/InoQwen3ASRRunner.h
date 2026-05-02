@@ -62,6 +62,9 @@ public:
     bool IsTokenizerLoaded() const { return Tokenizer.IsLoaded(); }
     bool IsReady() const           { return IsModelLoaded() && IsTokenizerLoaded(); }
 
+    /** Read-only tokenizer access for callers that want to decode arbitrary token slices. */
+    const FInoQwen3ASRTokenizer& GetTokenizer() const { return Tokenizer; }
+
     /**
      * Run the full audio→text pipeline on a single audio window.
      *
