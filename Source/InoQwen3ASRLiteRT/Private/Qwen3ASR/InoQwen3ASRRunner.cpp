@@ -247,35 +247,52 @@ bool FInoQwen3ASRRunner::Transcribe(
         if (!Logits.CreateManagedHost(Env, kLiteRtElementTypeFloat32,
                 MakeArrayView(LogitsDims, 3))) return false;
 
-        // Fill input_ids with pad and mask with 0. Decoder starts with no
-        // prefix tokens — its first sampled token comes from logits[:, 0, :]
-        // where the model conditions purely on encoder cross-attention.
+        // Pre-fill input_ids with the chat-template prompt prefix
+        // (<|im_start|>system\n...<|im_start|>assistant\n — see
+        // GetDecoderPromptPrefix() for the exact 16-token sequence).
+        // Positions after the prefix are filled with pad; the mask is 1
+        // for prefix positions and 0 for everything else.
+        const TArrayView<const int32> Prefix = GetDecoderPromptPrefix();
+        const int32 PrefixLen = Prefix.Num();
+        check(PrefixLen < kDecoderMaxTokens);
+
         if (int32* P = static_cast<int32*>(InputIds.LockForWrite()))
         {
-            for (int32 i = 0; i < kDecoderMaxTokens; ++i) { P[i] = kPadTokenId; }
+            for (int32 i = 0; i < PrefixLen; ++i) { P[i] = Prefix[i]; }
+            for (int32 i = PrefixLen; i < kDecoderMaxTokens; ++i) { P[i] = kPadTokenId; }
             InputIds.Unlock();
         }
         else { return false; }
 
         if (int32* P = static_cast<int32*>(AttnMask.LockForWrite()))
         {
-            FMemory::Memzero(P, kDecoderMaxTokens * sizeof(int32));
+            for (int32 i = 0; i < PrefixLen; ++i) { P[i] = 1; }
+            for (int32 i = PrefixLen; i < kDecoderMaxTokens; ++i) { P[i] = 0; }
             AttnMask.Unlock();
         }
         else { return false; }
     }
 
+    const TArrayView<const int32> Prefix = GetDecoderPromptPrefix();
+    const int32 PrefixLen = Prefix.Num();
+
     TArray<int32> Generated;
-    Generated.Reserve(kMaxGeneratedTokens);
+    Generated.Reserve(kMaxGeneratedTokens - PrefixLen);
 
     const double T0Dec = FPlatformTime::Seconds();
 
-    for (int32 Step = 0; Step < kMaxGeneratedTokens; ++Step)
+    // Fill positions PrefixLen, PrefixLen+1, ..., kDecoderMaxTokens-1 with
+    // sampled tokens. At iteration k, the model has seen
+    // input_ids[0..PrefixLen + k - 1] as real (mask = 1 at those positions);
+    // the next-token prediction lives at logits[:, PrefixLen + k - 1, :].
+    const int32 MaxSteps = kDecoderMaxTokens - PrefixLen;
+
+    for (int32 Step = 0; Step < MaxSteps; ++Step)
     {
-        // Decoder inputs in the order declared by the signature:
-        //   args_0 = encoder hidden states (cached)
-        //   args_1 = input_ids
-        //   args_2 = attention_mask
+        // Decoder inputs in the signature-declared order:
+        //   args_0 = encoder hidden states (cached, never changes)
+        //   args_1 = input_ids   (mutated each step at position PrefixLen+Step-1)
+        //   args_2 = attention_mask (mask bit set for that position)
         FInoQwen3ASRLiteRTTensor* DecInArr[]  = { &EncHidden, &InputIds, &AttnMask };
         FInoQwen3ASRLiteRTTensor* DecOutArr[] = { &Logits };
         if (!Model.Run(DecodeSigIndex,
@@ -287,14 +304,18 @@ bool FInoQwen3ASRRunner::Transcribe(
             return false;
         }
 
-        // Sample next token from logits[:, Step, :]. With an all-zero mask
-        // and no prefix, position 0 holds the first emission; subsequent
-        // calls put the next prediction at position `Step`.
+        // Sample next token from logits at the LAST real position. After
+        // pre-fill the last real position is PrefixLen-1; after k-1 sampled
+        // tokens it's PrefixLen-1 + k = PrefixLen + Step - 1 ... wait,
+        // simpler: at the START of step `Step` we've appended `Step` tokens,
+        // so positions 0..PrefixLen+Step-1 are real and we sample from
+        // logits[:, PrefixLen+Step-1, :].
+        const int32 SamplePos = PrefixLen + Step - 1;
         int32 NextTok = 0;
         {
             const float* L = static_cast<const float*>(Logits.LockForRead());
             if (!L) { return false; }
-            const float* Row = L + (Step * kVocabSize);
+            const float* Row = L + (SamplePos * kVocabSize);
             NextTok = Argmax(Row, kVocabSize);
             Logits.Unlock();
         }
@@ -308,17 +329,12 @@ bool FInoQwen3ASRRunner::Transcribe(
 
         Generated.Add(NextTok);
 
-        // Write the new token into position `Step` of input_ids and mark its
-        // mask bit. The next iteration's logits[:, Step+1, :] then predicts
-        // the token after this one.
-        const int32 WritePos = Step;
-        if (WritePos >= kDecoderMaxTokens - 1)
-        {
-            // We've filled the buffer; can't condition any further on this
-            // token in a future step. Stop here rather than emit a token we
-            // can't extend from.
-            break;
-        }
+        // Append the sampled token at position PrefixLen+Step, mark its
+        // mask bit. The next iteration will then sample from
+        // logits[:, PrefixLen+Step, :]. If we've just filled the last slot,
+        // we stop — there's nowhere left to extend.
+        const int32 WritePos = PrefixLen + Step;
+        if (WritePos >= kDecoderMaxTokens) { break; }
         {
             int32* P = static_cast<int32*>(InputIds.LockForWrite());
             if (!P) { return false; }
@@ -336,9 +352,41 @@ bool FInoQwen3ASRRunner::Transcribe(
     const double DecSec = FPlatformTime::Seconds() - T0Dec;
 
     // ----------------------------------------------------------------
-    // Step 4: detokenize
+    // Step 4: strip the language-tag prefix, then detokenize
     // ----------------------------------------------------------------
-    OutText = Tokenizer.Decode(Generated);
+    // Qwen3-ASR's assistant turn always begins with the auto-detected
+    // language tag in the form:
+    //     "language" + " <LangName>" + <special separator> + <transcription>
+    //
+    // Where:
+    //   - "language" is the plain-text BPE token (id 11528)
+    //   - " English" / " Chinese" / etc. is one (or sometimes two) plain
+    //     text tokens that name the detected language
+    //   - the separator is a single special token in the >= kPadTokenId
+    //     range (id 151704 for "English" auto-detection, possibly a
+    //     different special id per language)
+    //   - everything after the separator is the actual transcription
+    //
+    // Strip the prefix when we recognise the marker; keep all tokens
+    // otherwise so we never silently drop real text. The raw IDs are
+    // always handed back via OutTokenIds for debugging.
+    int32 TextStart = 0;
+    if (Generated.Num() >= 3 && Generated[0] == 11528 /* "language" */)
+    {
+        for (int32 i = 1; i < Generated.Num(); ++i)
+        {
+            if (Generated[i] >= kPadTokenId && !IsEosToken(Generated[i]))
+            {
+                TextStart = i + 1;
+                break;
+            }
+        }
+    }
+
+    const TArrayView<const int32> TextSlice =
+        TArrayView<const int32>(Generated.GetData() + TextStart,
+                                Generated.Num() - TextStart);
+    OutText = Tokenizer.Decode(TextSlice);
     if (OutTokenIds) { *OutTokenIds = Generated; }
 
     if (OutStats)
