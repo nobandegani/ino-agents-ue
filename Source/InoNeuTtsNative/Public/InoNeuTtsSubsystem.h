@@ -92,6 +92,27 @@ public:
 		const FInoNeuTtsOptions& Options,
 		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
 
+	/**
+	 * Streaming variant of SynthesizeAsync. Same end-state (OnComplete
+	 * fires with the full waveform), but as the worker generates the
+	 * AR loop it emits overlap-added chunks of `ChunkTokens` codec
+	 * frames each via OnAudioChunk. Set ChunkTokens to 0 to use the
+	 * default of 25 (matches Neuphonic's reference; ~0.5 s per chunk
+	 * at 24 kHz). The final chunk has bIsFinal=true; OnComplete fires
+	 * immediately afterwards.
+	 *
+	 * Errors immediately if a previous synth (one-shot or streaming) is
+	 * still in flight.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
+	void SynthesizeStreamAsync(
+		const FString& Text,
+		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsOptions& Options,
+		int32 ChunkTokens,
+		const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
+		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
+
 	/** Cooperative abort of the in-flight synth. Fires OnComplete with bSuccess=false. */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void CancelSynthesis();

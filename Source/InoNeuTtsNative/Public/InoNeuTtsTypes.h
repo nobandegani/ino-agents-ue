@@ -167,6 +167,19 @@ DECLARE_DYNAMIC_DELEGATE_TwoParams(FInoNeuTtsLoadedDelegate,
 DECLARE_DYNAMIC_DELEGATE_OneParam(FInoNeuTtsSynthesisCompleteDelegate,
 	const FInoNeuTtsResult&, Result);
 
+/**
+ * Streaming chunk callback (subsystem param, single-cast). Fires on the
+ * game thread as the worker emits each completed audio chunk.
+ *
+ *   AudioChunk: 24 kHz mono int16 PCM LE bytes (variable length;
+ *               typically ~24 KB per chunk for ChunkTokens=25)
+ *   bIsFinal:   true on the last chunk of a synthesis (the irregular
+ *               tail). OnComplete fires immediately afterwards with
+ *               the concatenated full waveform.
+ */
+DECLARE_DYNAMIC_DELEGATE_TwoParams(FInoNeuTtsAudioChunkDelegate,
+	const TArray<uint8>&, AudioChunk, bool, bIsFinal);
+
 /** Async-action exec-pin variant (BlueprintAssignable, multicast). Game thread. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoNeuTtsLoaded,
 	bool, bSuccess, FString, ErrorMessage);
@@ -174,3 +187,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoNeuTtsLoaded,
 /** Async-action exec-pin variant (BlueprintAssignable, multicast). Game thread. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoNeuTtsSynthesisComplete,
 	const FInoNeuTtsResult&, Result);
+
+/** Async-action streaming chunk variant (BlueprintAssignable, multicast). Game thread. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoNeuTtsAudioChunk,
+	const TArray<uint8>&, AudioChunk, bool, bIsFinal);

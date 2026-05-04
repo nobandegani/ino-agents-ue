@@ -43,4 +43,49 @@ namespace InoNeuTtsNative
 		const FInoNeuTtsVoice& Voice,
 		const FInoNeuTtsOptions& Options,
 		const std::atomic<bool>* CancelFlag = nullptr);
+
+	/**
+	 * Callbacks fired from the worker thread during streaming synthesis.
+	 * The subsystem marshals these to the game thread before invoking
+	 * Blueprint delegates. OnChunk is invoked once per emitted chunk;
+	 * the final invocation has bIsFinal=true.
+	 */
+	struct FInoNeuTtsStreamCallbacks
+	{
+		TFunction<void(TArray<uint8> ChunkBytes, bool bIsFinal)> OnChunk;
+	};
+
+	/**
+	 * Streaming variant of RunSynthesis. Same end-state — returns a
+	 * FInoNeuTtsResult with the concatenated full waveform. The
+	 * difference is that, as the AR loop progresses, audio is decoded
+	 * and emitted in overlap-added chunks of `ChunkTokens` codec frames
+	 * each via Callbacks.OnChunk.
+	 *
+	 * Algorithm follows neutts.py `_infer_stream_ggml` + `_linear_overlap_add`:
+	 *   - Each chunk decodes a window of `ChunkTokens + lookforward +
+	 *     overlap` new tokens plus `lookback + overlap` of context.
+	 *   - The middle portion of the resulting waveform (cropping out
+	 *     lookback / lookforward) is added to a running list.
+	 *   - Linear overlap-add over the running list smooths boundaries
+	 *     between adjacent chunks.
+	 *   - The newly-stable samples (those past the previous emit point
+	 *     up to the current `len(audio_cache) * stride_samples`) are
+	 *     emitted via OnChunk.
+	 *   - After the AR loop ends, a final irregular chunk handles the
+	 *     remaining tokens with bIsFinal=true.
+	 *
+	 * `ChunkTokens` = 25 matches the Python default (~0.5 s @ 24 kHz).
+	 * Smaller values reduce first-audio latency at the cost of more
+	 * decoder runs. Pass <= 0 to fall back to one-shot semantics
+	 * (single OnChunk with bIsFinal=true at the end).
+	 */
+	FInoNeuTtsResult RunStreamingSynthesis(
+		FInoNeuTtsRunner& Runner,
+		const FString& InputText,
+		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsOptions& Options,
+		int32 ChunkTokens,
+		const FInoNeuTtsStreamCallbacks& Callbacks,
+		const std::atomic<bool>* CancelFlag = nullptr);
 }

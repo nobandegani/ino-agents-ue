@@ -236,6 +236,95 @@ void UInoNeuTtsSubsystem::HandleSynthComplete(
 	Delegate.ExecuteIfBound(Result);
 }
 
+void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
+	const FString& Text,
+	const FInoNeuTtsVoice& Voice,
+	const FInoNeuTtsOptions& Options,
+	int32 ChunkTokens,
+	const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
+	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
+{
+	check(IsInGameThread());
+
+	auto FailFast = [&OnComplete](const FString& Why)
+	{
+		FInoNeuTtsResult Bad;
+		Bad.bSuccess     = false;
+		Bad.ErrorMessage = Why;
+		FInoNeuTtsSynthesisCompleteDelegate Copy = OnComplete;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Bad]()
+		{
+			Copy.ExecuteIfBound(Bad);
+		});
+	};
+
+	if (!Runner.IsValid())
+	{
+		FailFast(TEXT("Model not loaded. Call LoadModelAsync first."));
+		return;
+	}
+	if (bSynthInFlight)
+	{
+		FailFast(TEXT("Synth already in flight. Wait for completion or call CancelSynthesis."));
+		return;
+	}
+	if (Text.IsEmpty())
+	{
+		FailFast(TEXT("Text is empty."));
+		return;
+	}
+	if (!Voice.bIsValid || Voice.RefCodes.Num() == 0)
+	{
+		FailFast(TEXT("Voice is invalid."));
+		return;
+	}
+
+	bSynthInFlight    = true;
+	CurrentCancelFlag = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+
+	TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> RunnerCopy = Runner;
+	TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> CancelCopy = CurrentCancelFlag;
+
+	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
+
+	Async(EAsyncExecution::ThreadPool,
+		[Text, Voice, Options, ChunkTokens,
+		 OnAudioChunk, OnComplete,
+		 RunnerCopy, CancelCopy, WeakThis]() mutable
+	{
+		// Bridge: chunk callback fires from this worker thread; marshal
+		// to game thread before invoking the Blueprint delegate.
+		InoNeuTtsNative::FInoNeuTtsStreamCallbacks Callbacks;
+		Callbacks.OnChunk =
+			[WeakThis, OnAudioChunk](TArray<uint8> ChunkBytes, bool bIsFinal)
+		{
+			AsyncTask(ENamedThreads::GameThread,
+				[WeakThis, OnAudioChunk,
+				 ChunkBytes = MoveTemp(ChunkBytes), bIsFinal]() mutable
+			{
+				if (WeakThis.IsValid())
+				{
+					OnAudioChunk.ExecuteIfBound(ChunkBytes, bIsFinal);
+				}
+			});
+		};
+
+		const FInoNeuTtsResult Result =
+			InoNeuTtsNative::RunStreamingSynthesis(
+				*RunnerCopy, Text, Voice, Options,
+				ChunkTokens, Callbacks, CancelCopy.Get());
+
+		AsyncTask(ENamedThreads::GameThread,
+			[WeakThis, Result, OnComplete]() mutable
+		{
+			if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
+			{
+				Self->HandleSynthComplete(Result, OnComplete);
+			}
+		});
+	});
+}
+
 void UInoNeuTtsSubsystem::CancelSynthesis()
 {
 	check(IsInGameThread());
