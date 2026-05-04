@@ -263,16 +263,23 @@ namespace InoNeuTtsNative
 		 * Decode an int32 array of speech-token ids through the NeuCodec
 		 * ONNX session. Output shape is [1, 1, N * 480] float32 in [-1, +1].
 		 *
-		 * Writes the float32 audio into OutFloat. Returns false on any
-		 * error (logs at Error level). View-based so streaming code can
-		 * pass a sliding window without copying.
+		 * Returns the raw OrtTensor outputs in OutTensors (cleared first)
+		 * so the caller can read the float buffer directly via
+		 * OutTensors[0].GetData<float>() + GetElementCount(). Skipping
+		 * the CopyToArray step saves one allocation + memcpy per decode
+		 * — meaningful in streaming where we decode many chunks per synth.
+		 *
+		 * View-based input so streaming can pass a sliding window without
+		 * copying its underlying SpeechIdCache.
 		 */
 		bool DecodeSpeechTokens(
 			FInoOnnxSession& Decoder,
 			TArrayView<const int32> SpeechIds,
-			TArray<float>& OutFloat,
+			TArray<FInoOnnxTensor>& OutTensors,
 			FString& OutError)
 		{
+			OutTensors.Reset();
+
 			// Input shape [1, 1, N] int32 — Neuphonic's onnx_example.py
 			// passes codes shaped like this and the model uses a single
 			// input tensor.
@@ -291,20 +298,17 @@ namespace InoNeuTtsNative
 			TArray<FInoOnnxTensor> Inputs;
 			Inputs.Add(MoveTemp(InTensor));
 
-			TArray<FInoOnnxTensor> Outputs;
-			if (!Decoder.Run(Inputs, Outputs, &OutError))
+			if (!Decoder.Run(Inputs, OutTensors, &OutError))
 			{
 				return false;
 			}
 
-			if (Outputs.Num() == 0 || !Outputs[0].IsValid())
+			if (OutTensors.Num() == 0 || !OutTensors[0].IsValid())
 			{
 				OutError = TEXT("NeuCodec decoder returned no output tensors.");
 				return false;
 			}
-
-			Outputs[0].CopyToArray<float>(OutFloat);
-			if (OutFloat.Num() == 0)
+			if (OutTensors[0].GetElementCount() == 0)
 			{
 				OutError = TEXT("NeuCodec decoder output tensor was empty.");
 				return false;
@@ -533,25 +537,28 @@ namespace InoNeuTtsNative
 			return MakeFailure(TEXT("Runner has no NeuCodec decoder session."));
 		}
 
-		TArray<float> AudioFloat;
+		TArray<FInoOnnxTensor> Outputs;
 		FString DecodeError;
-		if (!DecodeSpeechTokens(*Decoder, SpeechIds, AudioFloat, DecodeError))
+		if (!DecodeSpeechTokens(*Decoder, SpeechIds, Outputs, DecodeError))
 		{
 			return MakeFailure(FString::Printf(
 				TEXT("NeuCodec decode failed: %s"), *DecodeError));
 		}
 
-		// ---- 8. Float -> int16 PCM bytes ----
+		// ---- 8. Float -> int16 PCM bytes (read straight from OrtTensor) ----
+		const float* AudioFloat = Outputs[0].GetData<float>();
+		const int32  NumSamples = static_cast<int32>(Outputs[0].GetElementCount());
+
 		FInoNeuTtsResult Result;
-		Result.bSuccess = true;
-		Result.SampleRate = kSampleRate;
-		Result.NumChannels = 1;
+		Result.bSuccess     = true;
+		Result.SampleRate   = kSampleRate;
+		Result.NumChannels  = 1;
 
 		UInoAudioFunctionLibrary::Float32ToInt16PcmBytesMono(
-			TArrayView<const float>(AudioFloat),
+			TArrayView<const float>(AudioFloat, NumSamples),
 			Result.AudioSamples);
 
-		Result.DurationSeconds = static_cast<float>(AudioFloat.Num()) / kSampleRate;
+		Result.DurationSeconds = static_cast<float>(NumSamples) / kSampleRate;
 		Result.GenerationTimeSeconds = static_cast<float>(FPlatformTime::Seconds() - T0);
 		Result.RealTimeFactor = (Result.DurationSeconds > 0.0f)
 			? (Result.GenerationTimeSeconds / Result.DurationSeconds)
@@ -750,23 +757,26 @@ namespace InoNeuTtsNative
 				SpeechIdCache.GetData() + TokensStart,
 				TokensEnd - TokensStart);
 
-			TArray<float> ChunkAudio;
+			TArray<FInoOnnxTensor> ChunkOutputs;
 			FString DecodeErr;
-			if (!DecodeSpeechTokens(*Decoder, Window, ChunkAudio, DecodeErr))
+			if (!DecodeSpeechTokens(*Decoder, Window, ChunkOutputs, DecodeErr))
 			{
 				return MakeFailure(FString::Printf(
 					TEXT("NeuCodec decode failed mid-stream: %s"), *DecodeErr));
 			}
 
 			// Crop out the non-context middle: skip the lookback prefix,
-			// keep ChunkTokens + 2*overlap frames worth of samples.
+			// keep ChunkTokens + 2*overlap frames worth of samples. Reads
+			// the float buffer straight off the OrtTensor (no intermediate
+			// TArray<float> copy).
+			const float* ChunkAudio = ChunkOutputs[0].GetData<float>();
 			const int32 SampleStart =
 				(NDecodedTokens - TokensStart) * kCodecHopLength;
 			const int32 SampleLen   =
 				(ChunkTokens + 2 * kOverlapFrames) * kCodecHopLength;
 
 			TArray<float> Cropped;
-			Cropped.Append(ChunkAudio.GetData() + SampleStart, SampleLen);
+			Cropped.Append(ChunkAudio + SampleStart, SampleLen);
 			AudioCache.Add(MoveTemp(Cropped));
 
 			// Re-run overlap-add over all chunks and slice the new portion.
@@ -811,17 +821,21 @@ namespace InoNeuTtsNative
 				SpeechIdCache.GetData() + TokensStart,
 				SpeechIdCache.Num() - TokensStart);
 
-			TArray<float> ChunkAudio;
+			TArray<FInoOnnxTensor> ChunkOutputs;
 			FString DecodeErr;
-			if (!DecodeSpeechTokens(*Decoder, Window, ChunkAudio, DecodeErr))
+			if (!DecodeSpeechTokens(*Decoder, Window, ChunkOutputs, DecodeErr))
 			{
 				return MakeFailure(FString::Printf(
 					TEXT("NeuCodec decode failed on final chunk: %s"), *DecodeErr));
 			}
 
-			const int32 NumCropped = FMath::Max(0, ChunkAudio.Num() - SampleStart);
+			const float* ChunkAudio        = ChunkOutputs[0].GetData<float>();
+			const int32  NumChunkSamples   =
+				static_cast<int32>(ChunkOutputs[0].GetElementCount());
+			const int32  NumCropped        = FMath::Max(0, NumChunkSamples - SampleStart);
+
 			TArray<float> Cropped;
-			Cropped.Append(ChunkAudio.GetData() + SampleStart, NumCropped);
+			Cropped.Append(ChunkAudio + SampleStart, NumCropped);
 			AudioCache.Add(MoveTemp(Cropped));
 
 			TArray<float> Combined;

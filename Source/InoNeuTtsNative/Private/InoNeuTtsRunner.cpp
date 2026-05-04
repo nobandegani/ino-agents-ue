@@ -3,9 +3,11 @@
 #include "InoNeuTtsRunner.h"
 #include "InoNeuTtsLog.h"
 
+#include "HAL/PlatformTime.h"
 #include "Misc/Paths.h"
 
 #include "Onnx/InoOnnxSession.h"
+#include "Onnx/InoOnnxTensor.h"
 #include "Onnx/InoOnnxTypes.h"
 
 namespace InoNeuTtsNative
@@ -186,6 +188,48 @@ namespace InoNeuTtsNative
 				*OnnxDecoderPath, *OnnxError);
 			UE_LOG(LogInoNeuTts, Error, TEXT("%s"), *OutError);
 			return nullptr;
+		}
+
+		// ---- Decoder warmup -------------------------------------------
+		// First Run() after Create() pays for kernel JIT, mem-pattern
+		// computation, and (for accelerated EPs) graph compilation. Doing
+		// this once with a small dummy input here means the first real
+		// chunk during synthesis runs at steady-state speed instead of
+		// taking the warm-up cost on the user-visible hot path.
+		//
+		// The dummy input is small enough that the cost is bounded
+		// (~50–200 ms) and the model's just decoding zeros into silence,
+		// which we discard. NeuCodec's decoder accepts any int32 codes
+		// in [0, 65535], so all-zero input is well-formed.
+		{
+			const TArray<int32> DummyCodes  = { 0, 0, 0, 0, 0, 0, 0, 0 };
+			const TArray<int64> DummyShape  = { 1, 1, DummyCodes.Num() };
+			FInoOnnxTensor DummyInput = FInoOnnxTensor::CreateFromBufferCopy<int32>(
+				DummyShape, TArrayView<const int32>(DummyCodes));
+
+			if (DummyInput.IsValid())
+			{
+				TArray<FInoOnnxTensor> DummyInputs;
+				DummyInputs.Add(MoveTemp(DummyInput));
+				TArray<FInoOnnxTensor> DummyOutputs;
+				FString WarmError;
+
+				const double WarmT0 = FPlatformTime::Seconds();
+				if (Runner->Decoder->Run(DummyInputs, DummyOutputs, &WarmError))
+				{
+					UE_LOG(LogInoNeuTts, Log,
+						TEXT("Decoder warmup ok in %.1f ms."),
+						(FPlatformTime::Seconds() - WarmT0) * 1000.0);
+				}
+				else
+				{
+					// Non-fatal — first real synth will pay the JIT cost
+					// itself. Log so we know the warmup was skipped.
+					UE_LOG(LogInoNeuTts, Warning,
+						TEXT("Decoder warmup skipped: %s. First synth may be slower."),
+						*WarmError);
+				}
+			}
 		}
 
 		UE_LOG(LogInoNeuTts, Log,
