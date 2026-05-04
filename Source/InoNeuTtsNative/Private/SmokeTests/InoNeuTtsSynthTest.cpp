@@ -57,7 +57,11 @@ namespace
 
 		if (Args.Num() > NextArg)
 		{
-			Text = FString::Join(Args.RightChop(NextArg), TEXT(" "));
+			for (int32 i = NextArg; i < Args.Num(); ++i)
+			{
+				if (!Text.IsEmpty()) { Text += TEXT(" "); }
+				Text += Args[i];
+			}
 		}
 		else
 		{

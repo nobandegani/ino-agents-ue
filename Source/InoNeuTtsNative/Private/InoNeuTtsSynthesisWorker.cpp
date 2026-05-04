@@ -318,7 +318,7 @@ namespace InoNeuTtsNative
 	FInoNeuTtsResult RunSynthesis(
 		FInoNeuTtsRunner& Runner,
 		const FString& InputText,
-		FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsVoice& Voice,
 		const FInoNeuTtsOptions& Options,
 		const std::atomic<bool>* CancelFlag)
 	{
@@ -337,7 +337,7 @@ namespace InoNeuTtsNative
 		const struct llama_vocab* Vocab = Runner.GetVocab();
 		struct llama_context* Ctx = Runner.GetContext();
 
-		// ---- 1. Phonemize input text + lazy-phonemize voice ref text ----
+		// ---- 1. Phonemize input text + ref text (use pre-baked if present) ----
 		const FString InputPhones =
 			UInoSpeakNGBPLibrary::Phonemize(InputText, Voice.Language);
 		if (InputPhones.IsEmpty())
@@ -348,11 +348,12 @@ namespace InoNeuTtsNative
 				*Voice.Language));
 		}
 
-		if (Voice.RefPhones.IsEmpty())
+		FString RefPhones = Voice.RefPhones;
+		if (RefPhones.IsEmpty())
 		{
-			Voice.RefPhones =
+			RefPhones =
 				UInoSpeakNGBPLibrary::Phonemize(Voice.RefText, Voice.Language);
-			if (Voice.RefPhones.IsEmpty())
+			if (RefPhones.IsEmpty())
 			{
 				return MakeFailure(FString::Printf(
 					TEXT("Phonemization of voice ref_text failed for language '%s'."),
@@ -362,7 +363,7 @@ namespace InoNeuTtsNative
 
 		// ---- 2. Build prompt ----
 		const FString Prompt = BuildSynthesisPrompt(
-			Voice.RefPhones, InputPhones, Voice.RefCodes);
+			RefPhones, InputPhones, Voice.RefCodes);
 
 		// ---- 3. Tokenize ----
 		TArray<llama_token> PromptTokens;

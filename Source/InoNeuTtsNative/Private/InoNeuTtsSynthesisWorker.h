@@ -15,7 +15,7 @@ namespace InoNeuTtsNative
 	 * Run one full NeuTTS synthesis end-to-end on the calling thread:
 	 *
 	 *   1. Phonemize InputText (via InoSpeakNG, language from Voice.Language)
-	 *   2. Lazy-phonemize Voice.RefText into Voice.RefPhones if empty
+	 *   2. Phonemize Voice.RefText (or use Voice.RefPhones if pre-baked)
 	 *   3. Build the chat-template prompt (PromptBuilder)
 	 *   4. Tokenize with parse_special=true, clear KV cache, prefill
 	 *   5. Build sampler chain (top-k -> temp -> dist) and AR loop until
@@ -27,10 +27,10 @@ namespace InoNeuTtsNative
 	 * Slow — call from a worker thread. Not thread-safe with concurrent
 	 * RunSynthesis calls on the same Runner (KV cache + sampler state).
 	 *
-	 * Voice is taken by mutable reference so RefPhones can be cached on
-	 * first synth — saves an espeak call on subsequent runs with the
-	 * same voice instance. Pass the same FInoNeuTtsVoice across calls
-	 * to benefit from the cache.
+	 * To skip the runtime ref_text phonemization on every synth, callers
+	 * can pre-bake Voice.RefPhones once and reuse the same voice
+	 * instance (the build-voices.py offline path leaves RefPhones empty;
+	 * fill it in callers if you want to amortize the cost).
 	 *
 	 * CancelFlag is an optional atomic checked every kCancelCheckEvery
 	 * AR iterations. Set it to true to abort cleanly with an empty
@@ -40,7 +40,7 @@ namespace InoNeuTtsNative
 	FInoNeuTtsResult RunSynthesis(
 		FInoNeuTtsRunner& Runner,
 		const FString& InputText,
-		FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsVoice& Voice,
 		const FInoNeuTtsOptions& Options,
 		const std::atomic<bool>* CancelFlag = nullptr);
 }
