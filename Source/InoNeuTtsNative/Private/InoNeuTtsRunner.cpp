@@ -174,13 +174,14 @@ namespace InoNeuTtsNative
 		}
 
 		// ---- Load NeuCodec ONNX decoder ------------------------------
-		FInoOnnxSessionOptions OnnxOptions;
-		// CPU-only by default per Neuphonic's reference (the ONNX decoder
-		// is CPU-locked anyway: NeuCodecOnnxDecoder enforces this).
-		OnnxOptions.ExecutionProviders = { EInoOnnxProvider::Cpu };
-
+		// Use the user-supplied DecoderOnnx config verbatim. Default-
+		// constructed it's CPU-only with full graph optimization, which
+		// matches Neuphonic's reference (their NeuCodecOnnxDecoder
+		// enforces CPU). Callers can opt into DirectML / NNAPI / etc.
+		// by populating Config.DecoderOnnx.ExecutionProviders.
 		FString OnnxError;
-		Runner->Decoder = FInoOnnxSession::Create(OnnxDecoderPath, OnnxOptions, &OnnxError);
+		Runner->Decoder = FInoOnnxSession::Create(
+			OnnxDecoderPath, Config.DecoderOnnx, &OnnxError);
 		if (!Runner->Decoder.IsValid())
 		{
 			OutError = FString::Printf(
@@ -194,7 +195,9 @@ namespace InoNeuTtsNative
 		// The dummy input is small enough that the cost is bounded
 		// (~50–200 ms) and the model just decodes zeros into silence,
 		// which Warmup discards. NeuCodec accepts any int32 codes in
-		// [0, 65535], so all-zero input is well-formed.
+		// [0, 65535], so all-zero input is well-formed. Skipped if
+		// Config.bWarmupDecoderOnLoad is false.
+		if (Config.bWarmupDecoderOnLoad)
 		{
 			const TArray<int32> DummyCodes = { 0, 0, 0, 0, 0, 0, 0, 0 };
 			const TArray<int64> DummyShape = { 1, 1, DummyCodes.Num() };

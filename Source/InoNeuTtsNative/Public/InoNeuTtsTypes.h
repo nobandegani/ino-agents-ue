@@ -3,6 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+// FInoOnnxSessionOptions — the generic ONNX session config used by every
+// ORT consumer in the codebase. NeuTTS embeds it for the NeuCodec decoder.
+#include "Onnx/InoOnnxTypes.h"
+
 #include "InoNeuTtsTypes.generated.h"
 
 /** NeuTTS backbone variant. Both share the same NeuCodec decoder. */
@@ -87,6 +92,26 @@ struct INONEUTTSNATIVE_API FInoNeuTtsConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	int32 ContextSize = 2048;
+
+	/**
+	 * ONNX session config for the NeuCodec decoder. Defaults are CPU-only
+	 * with full graph optimization — the same configuration the previous
+	 * inline path used. Override to opt into accelerators (DirectML on
+	 * Windows, NNAPI / WebGPU on Android), tune thread counts, enable
+	 * profiling, etc. See FInoOnnxSessionOptions for every knob.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Decoder")
+	FInoOnnxSessionOptions DecoderOnnx;
+
+	/**
+	 * Run a tiny dummy inference on the decoder right after Create() to
+	 * pay the JIT / kernel-selection / mem-pattern setup costs once at
+	 * load time, off the user-visible synth hot path. Highly recommended;
+	 * disable only if load-time latency matters more than first-synth
+	 * jitter.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Decoder")
+	bool bWarmupDecoderOnLoad = true;
 };
 
 /** Per-call sampling parameters for synthesis. */
