@@ -114,16 +114,15 @@ namespace InoNeuTtsNative
 		Runner->Variant  = Config.Variant;
 
 		// ---- Load GGUF backbone --------------------------------------
-		struct llama_model_params ModelParams = Api->llama_model_default_params();
-		ModelParams.n_gpu_layers = Config.NumGpuLayers;
-
-		const FTCHARToUTF8 GgufPathUtf8(*GgufPath);
-		Runner->Model = Api->llama_model_load_from_file(GgufPathUtf8.Get(), ModelParams);
+		// Delegate the boilerplate (default params + ApplyTo +
+		// llama_model_load_from_file + error handling + timing log) to
+		// InoLlama's generic helper. The Runner just supplies the path
+		// and forwards Config.Backbone.
+		Runner->Model = InoAgents::LlamaCpp::LoadModelFromFile(
+			GgufPath, Config.Backbone, &OutError);
 		if (Runner->Model == nullptr)
 		{
-			OutError = FString::Printf(
-				TEXT("llama_model_load_from_file failed for '%s'."), *GgufPath);
-			UE_LOG(LogInoNeuTts, Error, TEXT("%s"), *OutError);
+			// Helper already logged + populated OutError.
 			return nullptr;
 		}
 
@@ -146,19 +145,10 @@ namespace InoNeuTtsNative
 		}
 
 		// ---- Create inference context --------------------------------
-		struct llama_context_params CtxParams = Api->llama_context_default_params();
-		CtxParams.n_ctx = static_cast<uint32_t>(Config.ContextSize);
-		if (Config.NumThreads > 0)
-		{
-			CtxParams.n_threads       = Config.NumThreads;
-			CtxParams.n_threads_batch = Config.NumThreads;
-		}
-
-		Runner->Context = Api->llama_init_from_model(Runner->Model, CtxParams);
+		Runner->Context = InoAgents::LlamaCpp::CreateContext(
+			Runner->Model, Config.BackboneContext, &OutError);
 		if (Runner->Context == nullptr)
 		{
-			OutError = TEXT("llama_init_from_model returned null.");
-			UE_LOG(LogInoNeuTts, Error, TEXT("%s"), *OutError);
 			return nullptr;
 		}
 

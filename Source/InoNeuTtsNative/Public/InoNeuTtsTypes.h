@@ -8,6 +8,10 @@
 // ORT consumer in the codebase. NeuTTS embeds it for the NeuCodec decoder.
 #include "Onnx/InoOnnxTypes.h"
 
+// FInoLlamaModelParams + FInoLlamaContextParams — the generic GGUF
+// load + context config. NeuTTS embeds them for the speech LM backbone.
+#include "InoLlamaTypes.h"
+
 #include "InoNeuTtsTypes.generated.h"
 
 /** NeuTTS backbone variant. Both share the same NeuCodec decoder. */
@@ -77,21 +81,29 @@ struct INONEUTTSNATIVE_API FInoNeuTtsConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
 
-	/** llama.cpp GPU offload layer count. 0 = CPU only (recommended default). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
-	int32 NumGpuLayers = 0;
-
-	/** llama.cpp thread count for prefill / decode. 0 = auto. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
-	int32 NumThreads = 0;
+	/**
+	 * llama.cpp model-load options for the speech LM backbone — GPU
+	 * offload count, mmap / mlock, vocab-only mode, multi-GPU split,
+	 * etc. See FInoLlamaModelParams for every knob.
+	 *
+	 * Defaults are CPU-only with mmap on (matches the previous hardcoded
+	 * path). Override Backbone.NumGpuLayers > 0 to opt into Vulkan
+	 * offload on supported platforms (Win64 + Android).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Backbone")
+	FInoLlamaModelParams Backbone;
 
 	/**
-	 * Maximum context size (tokens) for the llama.cpp session. NeuTTS
-	 * documents ~30 s of audio with prompt at 2048; smaller saves RAM
+	 * llama.cpp inference-context options for the speech LM backbone —
+	 * context size, batch sizes, thread counts, flash attention, KV
+	 * cache offload + dtype, etc. See FInoLlamaContextParams.
+	 *
+	 * NumCtx defaults to 2048 (NeuTTS's documented limit ~= 30 s of
+	 * audio plus the reference voice prompt). Going lower saves RAM
 	 * but caps the longest synthesizable utterance.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
-	int32 ContextSize = 2048;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Backbone")
+	FInoLlamaContextParams BackboneContext;
 
 	/**
 	 * ONNX session config for the NeuCodec decoder. Defaults are CPU-only
