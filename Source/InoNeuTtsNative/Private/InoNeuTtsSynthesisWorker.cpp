@@ -738,10 +738,17 @@ namespace InoNeuTtsNative
 				break;
 			}
 
-			// Have we accumulated enough new tokens (with lookforward) to
-			// emit the next chunk?
+			// Have we accumulated enough new tokens to fill the decode
+			// window? The window goes
+			// [..., NDecodedTokens + ChunkTokens + kLookforward + kOverlapFrames),
+			// so we need that many tokens past NDecodedTokens before we
+			// can read it. Python's reference uses just ChunkTokens +
+			// kLookforward as the threshold and relies on list slicing
+			// to silently clamp short reads — C++ TArrayView reads past
+			// the end into uninitialized memory. Match the actual window
+			// extent here.
 			const int32 NewSinceEmit = SpeechIdCache.Num() - NDecodedTokens;
-			if (NewSinceEmit < ChunkTokens + kLookforward)
+			if (NewSinceEmit < ChunkTokens + kLookforward + kOverlapFrames)
 			{
 				continue;
 			}
