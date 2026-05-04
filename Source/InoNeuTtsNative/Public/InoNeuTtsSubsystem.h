@@ -77,6 +77,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
 	EInoNeuTtsVariant GetCurrentVariant() const { return CurrentVariant; }
 
+	/**
+	 * Audio output sample rate in Hz. Baked into NeuCodec at 24,000;
+	 * the same value for every voice and both Nano / Air variants.
+	 * Use this to configure UStreamingSoundWave::SetSampleRate before
+	 * feeding chunks from OnAudioChunk.
+	 */
+	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
+	int32 GetSampleRate() const { return 24000; }
+
+	/**
+	 * Audio output channel count. NeuTTS always emits mono (1 channel).
+	 * Use this with UStreamingSoundWave::SetNumOfChannels.
+	 */
+	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
+	int32 GetNumChannels() const { return 1; }
+
 	// ---- Synthesis ----
 
 	/**
