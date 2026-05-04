@@ -1,3 +1,6 @@
 [submodule "LiteRtLm/vendor/LiteRT-LM"]
 	path = LiteRtLm/vendor/LiteRT-LM
 	url = https://github.com/google-ai-edge/LiteRT-LM.git
+[submodule "NeuTTS/vendor"]
+	path = NeuTTS/vendor
+	url = https://github.com/neuphonic/neutts
