@@ -61,11 +61,6 @@
 			"Name": "InoQwen3ASRLiteRT",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoNeuTtsNative",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
 		}
 	]
 }
