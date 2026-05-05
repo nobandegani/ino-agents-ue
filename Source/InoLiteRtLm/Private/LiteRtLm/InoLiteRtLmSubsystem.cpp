@@ -37,7 +37,6 @@ void UInoLiteRtLmSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     // reused (hot reload in editor). Nothing expensive happens here —
     // engine loading is lazy via LoadModelAsync.
     Engine       = nullptr;
-    Settings     = nullptr;
     LoadedConfig = FInoLiteRtLmModelConfig();
     bLoadInFlight = false;
 
@@ -322,11 +321,18 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
         else
         {
             NewEngine = litert_lm_engine_create(NewSettings);
+
+            // Settings are consumed synchronously by engine_create — see
+            // vendor/LiteRT-LM/c/engine.cc:471-488: EngineFactory::CreateDefault
+            // reads `*settings->settings` and the resulting Engine carries
+            // everything it needs forward. Free the settings handle now on
+            // BOTH branches; nothing past this point references it.
+            litert_lm_engine_settings_delete(NewSettings);
+            NewSettings = nullptr;
+
             if (NewEngine == nullptr)
             {
                 LocalError = TEXT("litert_lm_engine_create returned NULL (check LiteRT-LM internal logs above)");
-                litert_lm_engine_settings_delete(NewSettings);
-                NewSettings = nullptr;
             }
         }
 
@@ -334,7 +340,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
 
         // ============== HOP BACK TO GAME THREAD ==============
         AsyncTask(ENamedThreads::GameThread,
-            [WeakThis, NewEngine, NewSettings, LocalError, Elapsed, BackendCopy]()
+            [WeakThis, NewEngine, LocalError, Elapsed, BackendCopy]()
         {
             // Subsystem gone (game instance shutting down, or race with
             // Deinitialize). Clean up native resources and drop the result.
@@ -342,8 +348,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
             {
                 UE_LOG(LogInoAgents, Warning,
                        TEXT("LiteRtLm: Engine: engine_create completion — subsystem is gone; freeing engine and giving up"));
-                if (NewEngine)   litert_lm_engine_delete(NewEngine);
-                if (NewSettings) litert_lm_engine_settings_delete(NewSettings);
+                if (NewEngine) litert_lm_engine_delete(NewEngine);
                 return;
             }
 
@@ -372,8 +377,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
             }
 
             // Success.
-            Subsys->Engine   = NewEngine;
-            Subsys->Settings = NewSettings;
+            Subsys->Engine = NewEngine;
             UE_LOG(LogInoAgents, Log,
                    TEXT("LiteRtLm: Engine: engine_create SUCCESS in %.2f s (backend=%s)"),
                    Elapsed, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)));
@@ -450,11 +454,6 @@ void UInoLiteRtLmSubsystem::UnloadModel()
                TEXT("LiteRtLm: Engine: engine_delete — destroying native engine"));
         litert_lm_engine_delete(Engine);
         Engine = nullptr;
-    }
-    if (Settings != nullptr)
-    {
-        litert_lm_engine_settings_delete(Settings);
-        Settings = nullptr;
     }
     LoadedConfig = FInoLiteRtLmModelConfig();
 

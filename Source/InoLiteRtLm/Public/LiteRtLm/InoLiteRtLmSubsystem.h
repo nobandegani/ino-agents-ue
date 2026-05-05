@@ -22,7 +22,6 @@ class UInoLiteRtLmToolBase;
 // callers.
 extern "C" {
     struct LiteRtLmEngine;
-    struct LiteRtLmEngineSettings;
 }
 
 /**
@@ -278,11 +277,17 @@ public:
     FString BuildToolsJsonForConversation() const;
 
 private:
-    // Opaque native handles. Never exposed to Blueprint. The extern "C"
-    // forward declarations at the top of this file make these type-check
+    // Opaque native handle. Never exposed to Blueprint. The extern "C"
+    // forward declaration at the top of this file makes this type-check
     // without including the LiteRT-LM C header.
-    LiteRtLmEngine*          Engine   = nullptr;
-    LiteRtLmEngineSettings*  Settings = nullptr;
+    //
+    // We deliberately do NOT keep a LiteRtLmEngineSettings* alive past
+    // engine_create — the settings are consumed synchronously inside
+    // EngineFactory::CreateDefault (see vendor/LiteRT-LM/c/engine.cc:471-488)
+    // and the resulting Engine carries everything it needs forward. The
+    // settings handle is freed on the worker thread immediately after
+    // engine_create returns.
+    LiteRtLmEngine* Engine = nullptr;
 
     /** Snapshot of the config used for the most recent successful load.
      *  Used by CreateConversation to read SystemMessage, etc. */
