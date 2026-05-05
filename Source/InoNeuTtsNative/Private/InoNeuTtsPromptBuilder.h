@@ -27,4 +27,17 @@ namespace InoNeuTtsNative
 		const FString& RefPhones,
 		const FString& InputPhones,
 		const TArray<int32>& RefCodes);
+
+	/**
+	 * Build only the cacheable prefix of the synthesis prompt — everything
+	 * up to (but not including) InputPhones. Used by the voice-cache path
+	 * to pre-tokenize and KV-snapshot the fixed-per-voice prefix:
+	 *
+	 *     user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones}
+	 *
+	 * Note the trailing space — it's the separator between RefPhones and
+	 * InputPhones in BuildSynthesisPrompt and must be tokenized as part of
+	 * the cacheable prefix to avoid context-dependent BPE merge issues.
+	 */
+	FString BuildSynthesisPromptPrefix(const FString& RefPhones);
 }

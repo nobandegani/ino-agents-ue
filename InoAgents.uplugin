@@ -38,6 +38,10 @@
 		{
 			"Name": "InoSpeakNG",
 			"Enabled": true
+		},
+		{
+			"Name": "InoNodes",
+			"Enabled": true
 		}
 	],
 	"Modules": [

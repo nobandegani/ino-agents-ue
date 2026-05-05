@@ -30,4 +30,19 @@ namespace InoNeuTtsNative
 			*InputPhones,
 			*SpeechTokens);
 	}
+
+	FString BuildSynthesisPromptPrefix(const FString& RefPhones)
+	{
+		// Mirror BuildSynthesisPrompt's prefix exactly — the format must
+		// be byte-identical so the per-call full prompt's leading tokens
+		// match the cached prefix's tokens. The trailing space is the
+		// separator between {ref_phones} and {input_phones}; including
+		// it here means InputPhones tokenization starts at a fresh word
+		// boundary at synth time, matching how the full-prompt
+		// tokenization splits the same content.
+		return FString::Printf(
+			TEXT("user: Convert the text to speech:")
+			TEXT("<|TEXT_PROMPT_START|>%s "),
+			*RefPhones);
+	}
 }

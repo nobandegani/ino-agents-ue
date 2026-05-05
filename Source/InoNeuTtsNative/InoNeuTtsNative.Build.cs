@@ -52,6 +52,13 @@ public class InoNeuTtsNative : ModuleRules
 			"InoSpeakNG",             // espeak-ng — for runtime phonemization
 			                          // (input text + reference voice ref_text).
 
+			"InoNodes",               // Generic file/bytes downloader +
+			                          // SHA-256 helpers (InoNodes::Download::*
+			                          // and UInoHashLibrary). Public dep so
+			                          // FInoDownloadProgress is reachable
+			                          // through the LoadModelAsync delegate
+			                          // type that ships in InoNeuTtsTypes.h.
+
 			"RuntimeAudioImporter",   // UStreamingSoundWave — streaming audio
 			                          // sink for synthesis output.
 		});
@@ -68,9 +75,12 @@ public class InoNeuTtsNative : ModuleRules
 			                          // UInoNeuTtsNativeSettings (Project
 			                          // Settings page driving model selection
 			                          // + download URLs).
-			"HTTP",                   // FHttpModule — used by the download
-			                          // flow that fetches missing model files
-			                          // from URLs configured in settings.
+			// HTTP dropped — model file downloads now flow through
+			// InoNodes::Download::DownloadFilesAsync, which owns the
+			// FHttpModule integration (with .partial staging, atomic
+			// rename, streaming SHA-256, multi-connection range, retries,
+			// cancel tokens, multi-file aggregate progress). See
+			// Plugins/InoNodes/Source/InoNodes/Public/InoDownloader.h.
 		});
 
 		DynamicallyLoadedModuleNames.AddRange(new string[]

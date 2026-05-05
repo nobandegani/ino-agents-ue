@@ -5,15 +5,19 @@
 #include "CoreMinimal.h"
 #include "InoNeuTtsTypes.h"
 
+// llama_token + FLlamaCppApi forward decls reachable through InoLlama.h —
+// the helpers below take llama types and the API by reference.
+#include "InoLlama.h"
+
 namespace InoNeuTtsNative
 {
 	/**
-	 * Resolve the local on-disk path for a NeuTTS backbone (Nano or Air).
+	 * Resolve the local on-disk path for a NeuTTS backbone (Nano or Air —
+	 * the runtime doesn't branch on variant, the GGUF file encodes the size).
 	 *
-	 * Looks up the matching entry in UInoNeuTtsNativeSettings (NanoModels
-	 * for Variant=Nano, AirModels for Variant=Air). If ModelName is empty
-	 * the first entry in the array is used; otherwise the entry whose
-	 * DisplayName matches case-insensitively.
+	 * Looks up the matching entry in UInoNeuTtsNativeSettings::BackboneModels.
+	 * If ModelName is empty the first entry in the array is used; otherwise
+	 * the entry whose DisplayName matches case-insensitively.
 	 *
 	 * Returns:
 	 *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>
@@ -23,7 +27,7 @@ namespace InoNeuTtsNative
 	 * on the file (the runner) should ensure it exists or download it
 	 * first.
 	 */
-	FString ResolveGgufPath(EInoNeuTtsVariant Variant, const FString& ModelName = FString());
+	FString ResolveGgufPath(const FString& ModelName = FString());
 
 	/**
 	 * Resolve the local on-disk path for the NeuCodec ONNX decoder.
@@ -31,6 +35,27 @@ namespace InoNeuTtsNative
 	 */
 	FString ResolveOnnxDecoderPath(const FString& ModelName = FString());
 
-	/** Human-readable variant name for logging. */
-	FString VariantToString(EInoNeuTtsVariant Variant);
+	/**
+	 * Tokenize a UTF-8 string through llama.cpp with parse_special=true.
+	 * Two-pass: first call probes the required size by passing a small
+	 * stack buffer (returns negative count = -required), second call
+	 * writes for real.
+	 *
+	 * `add_special` is forced to false — NeuTTS's chat template already
+	 * embeds every special-token string in plain text, so letting the
+	 * tokenizer auto-prepend a BOS / system would corrupt the prompt
+	 * structure.
+	 *
+	 * Returns true on success and fills OutTokens. On failure, OutError
+	 * is populated and OutTokens is left in an unspecified state.
+	 *
+	 * Used by both the synth worker (per-call prompt tokenization) and
+	 * the runner (voice cache priming).
+	 */
+	bool TokenizePrompt(
+		const InoAgents::LlamaCpp::FLlamaCppApi& Api,
+		const struct llama_vocab*                Vocab,
+		const FString&                           Prompt,
+		TArray<llama_token>&                     OutTokens,
+		FString&                                 OutError);
 }

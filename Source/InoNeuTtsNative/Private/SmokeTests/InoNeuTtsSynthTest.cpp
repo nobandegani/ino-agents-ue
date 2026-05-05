@@ -18,24 +18,27 @@ namespace
 {
 	/**
 	 * End-to-end synth test:
-	 *   1. Load Nano (or Air, via second arg) on a worker thread
+	 *   1. Load the configured backbone (first entry in Project Settings,
+	 *      or override via the optional second arg) on a worker thread
 	 *   2. Load voice from bundled .nvoice.json (default "jo")
 	 *   3. Run synthesis with the supplied text (default "Hello there.")
 	 *   4. Save result as WAV under <Project>/Saved/InoNeuTtsTest.wav
 	 *   5. Log RTF + sample count
 	 *
-	 * Args:  [voice]  [variant]  [text...]
-	 *   voice   = bundled voice name (jo, dave, greta, juliette, mateo)
-	 *   variant = nano (default) | air
-	 *   text    = remaining args joined by single spaces
+	 * Args:  [voice]  [backbone DisplayName]  [text...]
+	 *   voice    = bundled voice name (jo, dave, greta, juliette, mateo)
+	 *   backbone = optional Project Settings backbone DisplayName; if it
+	 *              looks like a sentence (contains a space) we treat it
+	 *              as the start of the text instead.
+	 *   text     = remaining args joined by single spaces
 	 */
 	void RunSynthTest(const TArray<FString>& Args)
 	{
 		using namespace InoNeuTtsNative;
 
 		// Parse args
-		FString VoiceName = TEXT("jo");
-		EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
+		FString VoiceName     = TEXT("jo");
+		FString BackboneName;
 		FString Text;
 
 		if (Args.Num() >= 1)
@@ -44,15 +47,14 @@ namespace
 		}
 
 		int32 NextArg = 1;
-		if (Args.Num() >= 2)
+		// If the second arg has no spaces, treat it as a backbone name
+		// override; if it's punctuated like text, fall through to the
+		// text arm. (Heuristic — we can't tell perfectly, but
+		// DisplayNames are kebab-case by convention.)
+		if (Args.Num() >= 2 && !Args[1].Contains(TEXT(" ")) && !Args[1].EndsWith(TEXT(".")))
 		{
-			const FString Lower = Args[1].ToLower();
-			if (Lower == TEXT("nano") || Lower == TEXT("air"))
-			{
-				Variant = (Lower == TEXT("air")) ? EInoNeuTtsVariant::Air
-				                                 : EInoNeuTtsVariant::Nano;
-				NextArg = 2;
-			}
+			BackboneName = Args[1];
+			NextArg = 2;
 		}
 
 		if (Args.Num() > NextArg)
@@ -82,17 +84,18 @@ namespace
 			return;
 		}
 
-		const FString GgufPath = ResolveGgufPath(Variant);
+		const FString GgufPath = ResolveGgufPath(BackboneName);
 		const FString OnnxPath = ResolveOnnxDecoderPath();
 
 		UE_LOG(LogInoNeuTts, Display, TEXT("=== Ino.NeuTts.SynthTest ==="));
-		UE_LOG(LogInoNeuTts, Display, TEXT("Voice:   %s (lang=%s, codes=%d)"),
+		UE_LOG(LogInoNeuTts, Display, TEXT("Voice:    %s (lang=%s, codes=%d)"),
 			*Voice.Name, *Voice.Language, Voice.RefCodes.Num());
-		UE_LOG(LogInoNeuTts, Display, TEXT("Variant: %s"), *VariantToString(Variant));
-		UE_LOG(LogInoNeuTts, Display, TEXT("Text:    %s"), *Text);
+		UE_LOG(LogInoNeuTts, Display, TEXT("Backbone: %s"),
+			BackboneName.IsEmpty() ? TEXT("<first entry>") : *BackboneName);
+		UE_LOG(LogInoNeuTts, Display, TEXT("Text:     %s"), *Text);
 
 		FInoNeuTtsConfig Config;
-		Config.Variant = Variant;
+		Config.BackboneModelName = BackboneName;
 		FInoNeuTtsOptions Options;
 
 		const FString OutPath = FPaths::Combine(
@@ -170,6 +173,6 @@ namespace
 		TEXT("Ino.NeuTts.SynthTest"),
 		TEXT("End-to-end NeuTTS synth: loads model + voice, generates audio, ")
 		TEXT("saves <Project>/Saved/InoNeuTtsTest.wav. ")
-		TEXT("Args: [voice=jo] [nano|air=nano] [text...]"),
+		TEXT("Args: [voice=jo] [backbone DisplayName] [text...]"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&RunSynthTest));
 }

@@ -18,37 +18,37 @@ namespace
 {
 	/**
 	 * Streaming synth test:
-	 *   - Loads model + voice (default jo + nano)
+	 *   - Loads model + voice (default jo + first backbone entry)
 	 *   - Runs streaming synth (calls RunStreamingSynthesis directly,
 	 *     bypassing the subsystem so we can run without PIE)
 	 *   - Logs each chunk's wall-clock arrival, byte size, audio ms
 	 *   - Saves concatenated audio as <Project>/Saved/InoNeuTtsStreamTest.wav
 	 *   - Reports TTFA + total wall time + RTF
 	 *
-	 * Args: [voice=jo] [variant=nano] [chunk_tokens=25] [text...]
+	 * Args: [voice=jo] [backbone DisplayName] [chunk_tokens=25] [text...]
 	 */
 	void RunStreamSynthTest(const TArray<FString>& Args)
 	{
 		using namespace InoNeuTtsNative;
 
 		// ---- arg parsing ----
-		FString VoiceName = TEXT("jo");
-		EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
-		int32 ChunkTokens = 25;
+		FString VoiceName    = TEXT("jo");
+		FString BackboneName;
+		int32   ChunkTokens  = 25;
 		FString Text;
 
 		int32 NextArg = 0;
 		if (Args.Num() > NextArg) { VoiceName = Args[NextArg++]; }
 
-		if (Args.Num() > NextArg)
+		// Optional backbone DisplayName: a single non-numeric token with
+		// no spaces and not ending in punctuation (kebab-case is the
+		// convention). If we can't tell, fall through to the next arm.
+		if (Args.Num() > NextArg
+			&& !Args[NextArg].IsNumeric()
+			&& !Args[NextArg].Contains(TEXT(" "))
+			&& !Args[NextArg].EndsWith(TEXT(".")))
 		{
-			const FString L = Args[NextArg].ToLower();
-			if (L == TEXT("nano") || L == TEXT("air"))
-			{
-				Variant = (L == TEXT("air")) ? EInoNeuTtsVariant::Air
-				                             : EInoNeuTtsVariant::Nano;
-				NextArg++;
-			}
+			BackboneName = Args[NextArg++];
 		}
 
 		if (Args.Num() > NextArg && Args[NextArg].IsNumeric())
@@ -83,19 +83,20 @@ namespace
 			return;
 		}
 
-		const FString GgufPath = ResolveGgufPath(Variant);
+		const FString GgufPath = ResolveGgufPath(BackboneName);
 		const FString OnnxPath = ResolveOnnxDecoderPath();
 
 		UE_LOG(LogInoNeuTts, Display, TEXT("=== Ino.NeuTts.StreamSynthTest ==="));
 		UE_LOG(LogInoNeuTts, Display, TEXT("Voice:        %s (lang=%s, codes=%d)"),
 			*Voice.Name, *Voice.Language, Voice.RefCodes.Num());
-		UE_LOG(LogInoNeuTts, Display, TEXT("Variant:      %s"), *VariantToString(Variant));
+		UE_LOG(LogInoNeuTts, Display, TEXT("Backbone:     %s"),
+			BackboneName.IsEmpty() ? TEXT("<first entry>") : *BackboneName);
 		UE_LOG(LogInoNeuTts, Display, TEXT("Chunk tokens: %d (~%.1f ms)"),
 			ChunkTokens, (ChunkTokens * 480.0f) / 24.0f);
 		UE_LOG(LogInoNeuTts, Display, TEXT("Text:         %s"), *Text);
 
 		FInoNeuTtsConfig Config;
-		Config.Variant = Variant;
+		Config.BackboneModelName = BackboneName;
 		FInoNeuTtsOptions Options;
 
 		const FString OutPath = FPaths::Combine(
@@ -214,6 +215,6 @@ namespace
 	FAutoConsoleCommand GStreamSynthTest(
 		TEXT("Ino.NeuTts.StreamSynthTest"),
 		TEXT("Streaming NeuTTS synth: per-chunk timing log + final WAV. ")
-		TEXT("Args: [voice=jo] [nano|air=nano] [chunk_tokens=25] [text...]"),
+		TEXT("Args: [voice=jo] [backbone DisplayName] [chunk_tokens=25] [text...]"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&RunStreamSynthTest));
 }

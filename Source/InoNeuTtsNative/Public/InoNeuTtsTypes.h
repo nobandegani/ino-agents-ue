@@ -12,15 +12,13 @@
 // load + context config. NeuTTS embeds them for the speech LM backbone.
 #include "InoLlamaTypes.h"
 
-#include "InoNeuTtsTypes.generated.h"
+// FInoDownloadProgress — shared with InoNodes' generic downloader so the
+// LoadModelAsync progress delegate hands callers the same struct any other
+// download flow in the project uses. (BytesPerSecond, ETA, retry attempt,
+// per-file + overall progress, current file name + index, etc.)
+#include "InoDownloader.h"
 
-/** NeuTTS backbone variant. Both share the same NeuCodec decoder. */
-UENUM(BlueprintType)
-enum class EInoNeuTtsVariant : uint8
-{
-	Nano UMETA(DisplayName = "Nano (smaller, faster, ~195 MB)"),
-	Air  UMETA(DisplayName = "Air  (larger, higher quality, ~430 MB)"),
-};
+#include "InoNeuTtsTypes.generated.h"
 
 /**
  * Pre-encoded reference voice for cloning.
@@ -71,20 +69,20 @@ struct INONEUTTSNATIVE_API FInoNeuTtsVoice
 /**
  * One-time configuration for loading the NeuTTS engine. Passed to
  * UInoNeuTtsSubsystem::LoadModelAsync.
+ *
+ * No variant selector: Nano / Air is just metadata in the model registry
+ * (DisplayName / file naming), the runtime architecture is identical for
+ * both. To switch backbones, change BackboneModelName and re-load.
  */
 USTRUCT(BlueprintType)
 struct INONEUTTSNATIVE_API FInoNeuTtsConfig
 {
 	GENERATED_BODY()
 
-	/** Backbone variant. Switching variants requires UnloadModel + LoadModelAsync. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
-	EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
-
 	/**
-	 * DisplayName of the entry to use from
-	 * UInoNeuTtsNativeSettings::NanoModels (or AirModels — chosen by Variant).
-	 * Empty string = use the first entry in the array.
+	 * DisplayName of the entry to use from UInoNeuTtsNativeSettings::BackboneModels.
+	 * Empty string = use the first entry in the array. Switching backbones
+	 * requires UnloadModel + LoadModelAsync.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	FString BackboneModelName;
@@ -215,6 +213,37 @@ struct INONEUTTSNATIVE_API FInoNeuTtsResult
 DECLARE_DYNAMIC_DELEGATE_TwoParams(FInoNeuTtsLoadedDelegate,
 	bool, bSuccess, FString, ErrorMessage);
 
+/**
+ * LoadModelAsync per-tick download progress (subsystem param, single-cast).
+ * Game thread. Re-uses the shared FInoDownloadProgress struct so callers see
+ * the same fields any other InoNodes-driven download flow exposes — bytes
+ * sent / total, per-file + overall %, current file name + index, rolling
+ * BytesPerSecond + ETA, retry attempt counter.
+ *
+ * Fires zero or more times during LoadModelAsync's download phase (skipped
+ * entirely when both files are already cached on disk), strictly before the
+ * FInoNeuTtsLoadedDelegate.
+ */
+DECLARE_DYNAMIC_DELEGATE_OneParam(FInoNeuTtsDownloadProgressDelegate,
+	const FInoDownloadProgress&, Progress);
+
+/**
+ * SetActiveVoiceAsync completion (subsystem param, single-cast). Game thread.
+ *
+ * bSuccess=true means the voice prefix was tokenized + prefilled into the
+ * LM context AND the post-prefix KV state was snapshotted; subsequent
+ * voice-less SynthesizeAsync calls will reuse that snapshot rather than
+ * re-prefilling the prefix on every synth.
+ *
+ * bSuccess=false (with ErrorMessage) means caching failed — typical
+ * reasons are no model loaded, voice not valid (no ref_codes), or the
+ * staged llama.cpp build doesn't expose the state_seq API. Synthesis
+ * still works via the per-voice SynthesizeAsync overload; the only loss
+ * is the prefix-prefill speedup.
+ */
+DECLARE_DYNAMIC_DELEGATE_TwoParams(FInoNeuTtsVoiceReadyDelegate,
+	bool, bSuccess, FString, ErrorMessage);
+
 /** SynthesizeAsync completion (subsystem param, single-cast). Game thread. */
 DECLARE_DYNAMIC_DELEGATE_OneParam(FInoNeuTtsSynthesisCompleteDelegate,
 	const FInoNeuTtsResult&, Result);
@@ -243,16 +272,3 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoNeuTtsSynthesisComplete,
 /** Async-action streaming chunk variant (BlueprintAssignable, multicast). Game thread. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoNeuTtsAudioChunk,
 	const TArray<uint8>&, AudioChunk, bool, bIsFinal);
-
-/**
- * Per-file download progress. Fires on the game thread as bytes arrive
- * during LoadModelAsync's download phase. CurrentFileName is the
- * LocalFileName of the file currently downloading (e.g. the GGUF, then
- * later the ONNX decoder); BytesReceived/TotalBytes describe just that
- * file. Bound on the subsystem (multicast) for HUD / loading-screen UI.
- */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoNeuTtsDownloadProgress,
-	const FString&, CurrentFileName,
-	int64,         BytesReceived,
-	int64,         TotalBytes,
-	float,         FractionForFile);

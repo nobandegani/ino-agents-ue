@@ -21,7 +21,8 @@ namespace InoNeuTtsNative
  * Game-instance-scoped subsystem driving NeuTTS Nano + Air synthesis.
  *
  * Lifecycle (typical):
- *   1. LoadModelAsync(Config, OnLoaded)        // off-thread, fires OnLoaded on game thread
+ *   1. LoadModelAsync(Config, OnLoaded, OnDownloadProgress)  // off-thread,
+ *                                                             // fires on game thread
  *   2. ListBundledVoices() / LoadVoiceFromFile  // build / pick a voice
  *   3. SynthesizeAsync(Text, Voice, Options, OnComplete)
  *   4. (optionally CancelSynthesis() to abort an in-flight call)
@@ -50,32 +51,30 @@ public:
 	// ---- Model lifecycle ----
 
 	/**
-	 * Load the GGUF backbone + ONNX decoder for the configured variant.
-	 * No-op (with a warning) if a model is already loaded; call
-	 * UnloadModel first to switch variants.
+	 * Load the GGUF backbone + ONNX decoder for the configured backbone
+	 * entry. No-op (with a warning) if the same model is already loaded;
+	 * call UnloadModel first to switch.
 	 *
-	 * Dispatches to the UE thread pool so the game thread stays
-	 * responsive during the multi-second model mmap. OnLoaded fires
-	 * on the game thread regardless of success.
+	 * Dispatches downloading + the multi-second model mmap to a thread
+	 * pool worker so the game thread stays responsive throughout.
+	 *
+	 *   OnLoaded             — fires once on the game thread when load
+	 *                          either finishes (bSuccess=true) or fails
+	 *                          (bSuccess=false + ErrorMessage).
+	 *   OnDownloadProgress   — fires zero or more times on the game
+	 *                          thread during the download phase. Skipped
+	 *                          entirely when both files are already
+	 *                          cached on disk. Carries the same shared
+	 *                          FInoDownloadProgress struct InoNodes-driven
+	 *                          downloads use everywhere else (per-file +
+	 *                          overall %, BytesPerSecond + ETA, current
+	 *                          file name + index, retry attempt).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void LoadModelAsync(
 		const FInoNeuTtsConfig& Config,
-		const FInoNeuTtsLoadedDelegate& OnLoaded);
-
-	/**
-	 * Per-file download progress (BlueprintAssignable, multicast).
-	 * Fires from LoadModelAsync's download phase whenever bytes arrive
-	 * for the file currently being fetched. CurrentFileName is the
-	 * LocalFileName of the file currently downloading. FractionForFile
-	 * is BytesReceived/TotalBytes when both are known, else 0.
-	 *
-	 * For an aggregate progress bar across the GGUF + ONNX downloads,
-	 * sum the BytesReceived locally and compare against the sum of
-	 * TotalBytes the first call gave you for each file.
-	 */
-	UPROPERTY(BlueprintAssignable, Category = "InoNeuTts")
-	FOnInoNeuTtsDownloadProgress OnDownloadProgress;
+		const FInoNeuTtsLoadedDelegate& OnLoaded,
+		const FInoNeuTtsDownloadProgressDelegate& OnDownloadProgress);
 
 	/**
 	 * Drop the loaded model. Safe to call mid-synth — the in-flight
@@ -87,9 +86,6 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
 	bool IsModelLoaded() const;
-
-	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
-	EInoNeuTtsVariant GetCurrentVariant() const { return CurrentVariant; }
 
 	/**
 	 * Audio output sample rate in Hz. Baked into NeuCodec at 24,000;
@@ -107,6 +103,47 @@ public:
 	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
 	int32 GetNumChannels() const { return 1; }
 
+	// ---- Active voice (KV-cache prefix priming) ----
+
+	/**
+	 * Pre-cache a voice for synthesis. Tokenizes + prefills the fixed
+	 * prompt prefix once and snapshots the post-prefix KV state, so
+	 * every subsequent voice-less SynthesizeAsync call skips the prefix
+	 * prefill (~5–10% of total synth time).
+	 *
+	 * Dispatches the prefill + snapshot to a thread pool worker
+	 * (200–600 ms depending on the model). Fires OnReady on the game
+	 * thread when done.
+	 *
+	 * After OnReady fires with bSuccess=true:
+	 *   - The voice-less SynthesizeAsync / SynthesizeStreamAsync
+	 *     overloads will use this voice automatically.
+	 *   - The per-voice overloads still work; if you pass the same
+	 *     voice, they hit the cache; if you pass a different one,
+	 *     they fall back to a full prefill (the cache stays primed
+	 *     for the next call with the matching voice).
+	 *
+	 * Errors immediately if no model is loaded or a previous priming /
+	 * synth is still in flight.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
+	void SetActiveVoiceAsync(
+		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsVoiceReadyDelegate& OnReady);
+
+	/**
+	 * Drop the cached active voice. Subsequent voice-less SynthesizeAsync
+	 * calls will fail until a new voice is set. Cheap; no LM state changes.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
+	void ClearActiveVoice();
+
+	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
+	bool HasActiveVoice() const;
+
+	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
+	FString GetActiveVoiceName() const { return ActiveVoiceName; }
+
 	// ---- Synthesis ----
 
 	/**
@@ -114,11 +151,28 @@ public:
 	 * Dispatches to the UE thread pool. Fires OnComplete on the game
 	 * thread when done. Errors immediately if a previous synth is
 	 * still in flight (one at a time in v1).
+	 *
+	 * If Voice.Name matches the currently cached active voice, the
+	 * runner reuses the prefix snapshot automatically — no need to
+	 * call SetActiveVoiceAsync first if you don't mind paying the
+	 * prefill cost on the first synth with a new voice.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void SynthesizeAsync(
 		const FString& Text,
 		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsOptions& Options,
+		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
+
+	/**
+	 * Voice-less synth — uses the cached active voice (set via
+	 * SetActiveVoiceAsync). Errors immediately if no active voice
+	 * is set.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
+		meta = (DisplayName = "Synthesize (Active Voice)"))
+	void SynthesizeWithActiveVoiceAsync(
+		const FString& Text,
 		const FInoNeuTtsOptions& Options,
 		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
 
@@ -138,6 +192,16 @@ public:
 	void SynthesizeStreamAsync(
 		const FString& Text,
 		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsOptions& Options,
+		int32 ChunkTokens,
+		const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
+		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
+
+	/** Streaming variant using the cached active voice. */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
+		meta = (DisplayName = "Synthesize Stream (Active Voice)"))
+	void SynthesizeStreamWithActiveVoiceAsync(
+		const FString& Text,
 		const FInoNeuTtsOptions& Options,
 		int32 ChunkTokens,
 		const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
@@ -168,9 +232,9 @@ public:
 
 private:
 	/**
-	 * State for an in-flight LoadModelAsync — survives the download
-	 * chain via TSharedRef capture in the helper methods below.
-	 * Lifetime: created at LoadModelAsync's start, destroyed when
+	 * State for an in-flight LoadModelAsync — survives the download +
+	 * model-load chain via TSharedRef capture in the helper methods
+	 * below. Lifetime: created at LoadModelAsync's start, destroyed when
 	 * FinishLoadJob fires on the game thread.
 	 */
 	struct FLoadJob
@@ -178,30 +242,19 @@ private:
 		FInoNeuTtsConfig Config;
 		FString GgufPath;
 		FString OnnxPath;
-		FString GgufUrl;
-		FString OnnxUrl;
-		FString GgufFileName;     // for progress display
-		FString OnnxFileName;
-		FString GgufSha;
-		FString OnnxSha;
-		int64 GgufSize = 0;
-		int64 OnnxSize = 0;
-		FInoNeuTtsLoadedDelegate OnLoaded;
+		FString BackboneName;          // for diagnostics + cache logging
+		FInoNeuTtsLoadedDelegate           OnLoaded;
+		FInoNeuTtsDownloadProgressDelegate OnDownloadProgress;
 	};
 
 	/** Sequential async chain. Each step calls the next on success or FinishLoadJob on error. */
-	void EnsureBackboneDownloaded(TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
-	void EnsureDecoderDownloaded (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
-	void DispatchModelLoad       (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
-	void FinishLoadJob           (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job, bool bSuccess, FString Error);
-
-	/** Bridge to the multicast progress delegate; game thread. */
-	void BroadcastDownloadProgress(const FString& FileName, int64 BytesReceived, int64 TotalBytes);
+	void EnsureFilesDownloaded(TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
+	void DispatchModelLoad   (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
+	void FinishLoadJob       (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job, bool bSuccess, FString Error);
 
 	/** Game-thread-only: dispatched delegate after model load. */
 	void HandleModelLoaded(
 		TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> NewRunner,
-		EInoNeuTtsVariant Variant,
 		FString Error,
 		FInoNeuTtsLoadedDelegate Delegate);
 
@@ -223,9 +276,28 @@ private:
 	 */
 	TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> CurrentCancelFlag;
 
-	EInoNeuTtsVariant CurrentVariant = EInoNeuTtsVariant::Nano;
+	/**
+	 * DisplayName of the backbone currently loaded (or empty). Used to
+	 * skip a redundant LoadModelAsync that targets the same backbone.
+	 */
+	FString CurrentBackboneName;
+
+	/**
+	 * Cached copy of the active voice (the one whose KV-prefix snapshot
+	 * lives on the runner). Stored so the voice-less SynthesizeAsync
+	 * overloads can pass it back into the underlying per-voice synth
+	 * pipeline.
+	 */
+	FInoNeuTtsVoice ActiveVoice;
+
+	/**
+	 * Display name of the active voice ("" when nothing is primed).
+	 * Cheap to read from Blueprint without copying the whole voice.
+	 */
+	FString ActiveVoiceName;
 
 	/** Game-thread-only flags. */
 	bool bIsLoading      = false;
+	bool bIsPrimingVoice = false;
 	bool bSynthInFlight  = false;
 };

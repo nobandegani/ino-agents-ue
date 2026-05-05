@@ -2,12 +2,15 @@
 
 #include "InoNeuTtsSubsystem.h"
 #include "InoNeuTtsCommon.h"
-#include "InoNeuTtsDownload.h"
 #include "InoNeuTtsLog.h"
 #include "InoNeuTtsRunner.h"
 #include "InoNeuTtsSettings.h"
 #include "InoNeuTtsSynthesisWorker.h"
 #include "InoNeuTtsVoiceRegistry.h"
+
+// Generic file downloader living in InoNodes — model files (GGUF +
+// ONNX) flow through this rather than a per-plugin FHttpModule wrapper.
+#include "InoDownloader.h"
 
 #include "Async/Async.h"
 #include "HAL/FileManager.h"
@@ -31,8 +34,11 @@ void UInoNeuTtsSubsystem::Deinitialize()
 		CurrentCancelFlag->store(true);
 	}
 	Runner.Reset();
-	bIsLoading     = false;
-	bSynthInFlight = false;
+	ActiveVoice = FInoNeuTtsVoice();
+	ActiveVoiceName.Reset();
+	bIsLoading      = false;
+	bIsPrimingVoice = false;
+	bSynthInFlight  = false;
 
 	UE_LOG(LogInoNeuTts, Log, TEXT("UInoNeuTtsSubsystem deinitialized."));
 	Super::Deinitialize();
@@ -45,7 +51,8 @@ bool UInoNeuTtsSubsystem::IsModelLoaded() const
 
 void UInoNeuTtsSubsystem::LoadModelAsync(
 	const FInoNeuTtsConfig& Config,
-	const FInoNeuTtsLoadedDelegate& OnLoaded)
+	const FInoNeuTtsLoadedDelegate& OnLoaded,
+	const FInoNeuTtsDownloadProgressDelegate& OnDownloadProgress)
 {
 	check(IsInGameThread());
 
@@ -65,24 +72,6 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 		return;
 	}
 
-	if (Runner.IsValid() && CurrentVariant == Config.Variant)
-	{
-		// Same variant already loaded — fire success immediately.
-		FInoNeuTtsLoadedDelegate Copy = OnLoaded;
-		AsyncTask(ENamedThreads::GameThread, [Copy]()
-		{
-			Copy.ExecuteIfBound(true, FString());
-		});
-		return;
-	}
-
-	if (Runner.IsValid())
-	{
-		UE_LOG(LogInoNeuTts, Log,
-			TEXT("LoadModelAsync: switching variant — releasing previous runner."));
-		Runner.Reset();
-	}
-
 	// ---- Settings lookup ----
 	const UInoNeuTtsNativeSettings* Settings =
 		GetDefault<UInoNeuTtsNativeSettings>();
@@ -92,19 +81,13 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 		return;
 	}
 
-	const TArray<FInoNeuTtsBackboneEntry>& BackbonePool =
-		(Config.Variant == EInoNeuTtsVariant::Air)
-			? Settings->AirModels
-			: Settings->NanoModels;
-
 	const FInoNeuTtsBackboneEntry* BackboneEntry =
-		UInoNeuTtsNativeSettings::FindBackbone(BackbonePool, Config.BackboneModelName);
+		UInoNeuTtsNativeSettings::FindBackbone(Settings->BackboneModels, Config.BackboneModelName);
 	if (BackboneEntry == nullptr)
 	{
 		FailFast(FString::Printf(
-			TEXT("No %s backbone entry%s%s configured. ")
+			TEXT("No backbone entry%s%s configured. ")
 			TEXT("Open Project Settings -> Plugins -> Ino NeuTTS Native and add at least one entry."),
-			*InoNeuTtsNative::VariantToString(Config.Variant),
 			Config.BackboneModelName.IsEmpty() ? TEXT("") : TEXT(" named '"),
 			Config.BackboneModelName.IsEmpty() ? TEXT("") : *(Config.BackboneModelName + TEXT("'"))));
 		return;
@@ -119,133 +102,168 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 		return;
 	}
 
+	// Same backbone already loaded — fire success immediately. (The
+	// decoder is identical for every backbone, so the backbone name is
+	// the only thing we need to compare against.)
+	if (Runner.IsValid() && CurrentBackboneName.Equals(BackboneEntry->DisplayName, ESearchCase::IgnoreCase))
+	{
+		FInoNeuTtsLoadedDelegate Copy = OnLoaded;
+		AsyncTask(ENamedThreads::GameThread, [Copy]()
+		{
+			Copy.ExecuteIfBound(true, FString());
+		});
+		return;
+	}
+
+	if (Runner.IsValid())
+	{
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("LoadModelAsync: switching backbone '%s' -> '%s' — releasing previous runner."),
+			*CurrentBackboneName, *BackboneEntry->DisplayName);
+		Runner.Reset();
+		CurrentBackboneName.Reset();
+
+		// Voice cache lived on the previous runner — drop our mirror copy
+		// so HasActiveVoice / GetActiveVoiceName don't lie until the
+		// caller re-primes against the newly loaded backbone.
+		ActiveVoice = FInoNeuTtsVoice();
+		ActiveVoiceName.Reset();
+	}
+
 	// ---- Build the load job + kick off the async chain ----
 	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job = MakeShared<FLoadJob, ESPMode::ThreadSafe>();
-	Job->Config       = Config;
-	Job->GgufPath     = UInoNeuTtsNativeSettings::ResolveLocalPath(BackboneEntry->LocalFileName);
-	Job->OnnxPath     = UInoNeuTtsNativeSettings::ResolveLocalPath(DecoderEntry->LocalFileName);
-	Job->GgufUrl      = BackboneEntry->DownloadUrl;
-	Job->OnnxUrl      = DecoderEntry->DownloadUrl;
-	Job->GgufFileName = BackboneEntry->LocalFileName;
-	Job->OnnxFileName = DecoderEntry->LocalFileName;
-	Job->GgufSha      = BackboneEntry->ExpectedSha256;
-	Job->OnnxSha      = DecoderEntry->ExpectedSha256;
-	Job->GgufSize     = BackboneEntry->FileSizeBytes;
-	Job->OnnxSize     = DecoderEntry->FileSizeBytes;
-	Job->OnLoaded     = OnLoaded;
+	Job->Config             = Config;
+	Job->GgufPath           = UInoNeuTtsNativeSettings::ResolveLocalPath(BackboneEntry->LocalFileName);
+	Job->OnnxPath           = UInoNeuTtsNativeSettings::ResolveLocalPath(DecoderEntry->LocalFileName);
+	Job->BackboneName       = BackboneEntry->DisplayName;
+	Job->OnLoaded           = OnLoaded;
+	Job->OnDownloadProgress = OnDownloadProgress;
 
 	bIsLoading = true;
-	EnsureBackboneDownloaded(Job);
+	EnsureFilesDownloaded(Job);
 }
 
-void UInoNeuTtsSubsystem::EnsureBackboneDownloaded(
+void UInoNeuTtsSubsystem::EnsureFilesDownloaded(
 	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
 {
 	check(IsInGameThread());
 
-	if (IFileManager::Get().FileExists(*Job->GgufPath))
+	// Re-resolve the entries here (rather than caching pointers in the
+	// FLoadJob) — the settings object is a CDO whose entries can be
+	// mutated by the editor in between LoadModelAsync's settings lookup
+	// and this step. Worst case the entry vanished and we error fast.
+	const UInoNeuTtsNativeSettings* Settings = GetDefault<UInoNeuTtsNativeSettings>();
+	if (Settings == nullptr)
 	{
-		// Already cached — proceed.
-		EnsureDecoderDownloaded(Job);
+		FinishLoadJob(Job, false, TEXT("UInoNeuTtsNativeSettings unavailable."));
 		return;
 	}
 
-	if (Job->GgufUrl.IsEmpty())
+	const FInoNeuTtsBackboneEntry* BackboneEntry =
+		UInoNeuTtsNativeSettings::FindBackbone(Settings->BackboneModels, Job->Config.BackboneModelName);
+	const FInoNeuTtsDecoderEntry* DecoderEntry =
+		UInoNeuTtsNativeSettings::FindDecoder(Settings->DecoderModels, Job->Config.DecoderModelName);
+
+	if (BackboneEntry == nullptr || DecoderEntry == nullptr)
 	{
-		FinishLoadJob(Job, /*bSuccess*/ false,
-			FString::Printf(
-				TEXT("Backbone file missing and no DownloadUrl configured: %s"),
-				*Job->GgufPath));
+		FinishLoadJob(Job, false,
+			TEXT("Backbone or decoder entry vanished from Project Settings during load."));
 		return;
 	}
 
-	UE_LOG(LogInoNeuTts, Log, TEXT("Backbone not cached, downloading: %s"), *Job->GgufUrl);
+	// Build the multi-file request batch. The InoNodes downloader handles
+	// HEAD probe → GET → .partial staging → atomic rename → optional
+	// streaming SHA-256 internally; aggregate progress (per-file +
+	// overall %) is delivered through a single FInoDownloadProgress
+	// struct so callers don't have to combine two separate progress
+	// streams themselves.
+	const FString TargetDir = UInoNeuTtsNativeSettings::GetModelsDir();
+
+	TArray<FInoDownloadRequest> Requests;
+	Requests.Reserve(2);
+
+	// 1. GGUF backbone
+	{
+		FInoDownloadRequest& R = Requests.AddDefaulted_GetRef();
+		R.Url                 = BackboneEntry->DownloadUrl;
+		R.SaveDirectory       = TargetDir;
+		R.FileName            = BackboneEntry->LocalFileName;
+		R.ExpectedSha256      = BackboneEntry->ExpectedSha256;
+		R.ExpectedTotalBytes  = BackboneEntry->FileSizeBytes;
+		R.bSkipIfCached       = true;
+	}
+
+	// 2. NeuCodec ONNX decoder
+	{
+		FInoDownloadRequest& R = Requests.AddDefaulted_GetRef();
+		R.Url                 = DecoderEntry->DownloadUrl;
+		R.SaveDirectory       = TargetDir;
+		R.FileName            = DecoderEntry->LocalFileName;
+		R.ExpectedSha256      = DecoderEntry->ExpectedSha256;
+		R.ExpectedTotalBytes  = DecoderEntry->FileSizeBytes;
+		R.bSkipIfCached       = true;
+	}
+
+	// Validate URLs are present *unless* both files are already cached
+	// (which is the typical post-first-run path). Empty URL on a missing
+	// file is a clear configuration error and we fail fast there.
+	for (int32 i = 0; i < Requests.Num(); ++i)
+	{
+		const FString LocalPath = (i == 0) ? Job->GgufPath : Job->OnnxPath;
+		if (Requests[i].Url.IsEmpty() && !IFileManager::Get().FileExists(*LocalPath))
+		{
+			FinishLoadJob(Job, false,
+				FString::Printf(
+					TEXT("Model file missing and no DownloadUrl configured: %s"),
+					*LocalPath));
+			return;
+		}
+	}
+
+	UE_LOG(LogInoNeuTts, Log,
+		TEXT("LoadModelAsync: downloading/verifying %d file(s) into %s"),
+		Requests.Num(), *TargetDir);
 
 	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
 
-	InoNeuTtsNative::DownloadFileAsync(
-		Job->GgufUrl, Job->GgufPath, Job->GgufSha, Job->GgufSize,
-		// Progress (HTTP I/O thread)
-		[WeakThis, FileName = Job->GgufFileName]
-		(int64 Bytes, int64 Total)
+	InoNodes::Download::DownloadFilesAsync(
+		Requests,
+		// Progress — already marshalled to the game thread by InoNodes.
+		[WeakThis, Job](const FInoDownloadProgress& P)
 		{
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, FileName, Bytes, Total]()
+			if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
 			{
-				if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
-				{
-					Self->BroadcastDownloadProgress(FileName, Bytes, Total);
-				}
-			});
+				FInoNeuTtsDownloadProgressDelegate Copy = Job->OnDownloadProgress;
+				Copy.ExecuteIfBound(P);
+			}
 		},
-		// Completion (HTTP I/O thread)
-		[WeakThis, Job](bool bOk, FString Err)
+		// Batch completion — game thread.
+		[WeakThis, Job](const TArray<FInoDownloadResult>& Results)
 		{
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Job, bOk, Err = MoveTemp(Err)]() mutable
+			UInoNeuTtsSubsystem* Self = WeakThis.Get();
+			if (Self == nullptr)
 			{
-				UInoNeuTtsSubsystem* Self = WeakThis.Get();
-				if (Self == nullptr) { return; }
+				// Subsystem gone — silently drop. The downloader has
+				// already cleaned up .partial files and released its
+				// own state.
+				return;
+			}
 
-				if (!bOk)
+			// Pick out the first failure (if any). DownloadFilesAsync
+			// stops on first failure and reports remaining entries with
+			// bSuccess=false / "Skipped".
+			for (const FInoDownloadResult& R : Results)
+			{
+				if (!R.bSuccess)
 				{
-					Self->FinishLoadJob(Job, false, MoveTemp(Err));
+					Self->FinishLoadJob(Job, false,
+						FString::Printf(TEXT("Download failed for %s: %s"),
+							*R.FileName, *R.ErrorMessage));
 					return;
 				}
-				Self->EnsureDecoderDownloaded(Job);
-			});
-		});
-}
+			}
 
-void UInoNeuTtsSubsystem::EnsureDecoderDownloaded(
-	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
-{
-	check(IsInGameThread());
-
-	if (IFileManager::Get().FileExists(*Job->OnnxPath))
-	{
-		DispatchModelLoad(Job);
-		return;
-	}
-
-	if (Job->OnnxUrl.IsEmpty())
-	{
-		FinishLoadJob(Job, /*bSuccess*/ false,
-			FString::Printf(
-				TEXT("Decoder file missing and no DownloadUrl configured: %s"),
-				*Job->OnnxPath));
-		return;
-	}
-
-	UE_LOG(LogInoNeuTts, Log, TEXT("Decoder not cached, downloading: %s"), *Job->OnnxUrl);
-
-	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
-
-	InoNeuTtsNative::DownloadFileAsync(
-		Job->OnnxUrl, Job->OnnxPath, Job->OnnxSha, Job->OnnxSize,
-		[WeakThis, FileName = Job->OnnxFileName]
-		(int64 Bytes, int64 Total)
-		{
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, FileName, Bytes, Total]()
-			{
-				if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
-				{
-					Self->BroadcastDownloadProgress(FileName, Bytes, Total);
-				}
-			});
-		},
-		[WeakThis, Job](bool bOk, FString Err)
-		{
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Job, bOk, Err = MoveTemp(Err)]() mutable
-			{
-				UInoNeuTtsSubsystem* Self = WeakThis.Get();
-				if (Self == nullptr) { return; }
-
-				if (!bOk)
-				{
-					Self->FinishLoadJob(Job, false, MoveTemp(Err));
-					return;
-				}
-				Self->DispatchModelLoad(Job);
-			});
+			Self->DispatchModelLoad(Job);
 		});
 }
 
@@ -276,7 +294,11 @@ void UInoNeuTtsSubsystem::DispatchModelLoad(
 		{
 			if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
 			{
-				Self->HandleModelLoaded(SharedRunner, Job->Config.Variant, Err, Job->OnLoaded);
+				if (SharedRunner.IsValid())
+				{
+					Self->CurrentBackboneName = Job->BackboneName;
+				}
+				Self->HandleModelLoaded(SharedRunner, Err, Job->OnLoaded);
 				// HandleModelLoaded clears bIsLoading + fires OnLoaded.
 			}
 		});
@@ -296,21 +318,8 @@ void UInoNeuTtsSubsystem::FinishLoadJob(
 	Copy.ExecuteIfBound(bSuccess, Error);
 }
 
-void UInoNeuTtsSubsystem::BroadcastDownloadProgress(
-	const FString& FileName, int64 BytesReceived, int64 TotalBytes)
-{
-	check(IsInGameThread());
-
-	const float Frac = (TotalBytes > 0)
-		? FMath::Clamp(static_cast<float>(BytesReceived) / static_cast<float>(TotalBytes), 0.0f, 1.0f)
-		: 0.0f;
-
-	OnDownloadProgress.Broadcast(FileName, BytesReceived, TotalBytes, Frac);
-}
-
 void UInoNeuTtsSubsystem::HandleModelLoaded(
 	TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> NewRunner,
-	EInoNeuTtsVariant Variant,
 	FString Error,
 	FInoNeuTtsLoadedDelegate Delegate)
 {
@@ -321,12 +330,12 @@ void UInoNeuTtsSubsystem::HandleModelLoaded(
 	if (NewRunner.IsValid())
 	{
 		Runner = NewRunner;
-		CurrentVariant = Variant;
 		Delegate.ExecuteIfBound(true, FString());
 	}
 	else
 	{
 		Runner.Reset();
+		CurrentBackboneName.Reset();
 		Delegate.ExecuteIfBound(false, Error);
 	}
 }
@@ -344,6 +353,124 @@ void UInoNeuTtsSubsystem::UnloadModel()
 	// runs on whichever thread released the last shared ref (typically
 	// the game thread, via the AsyncTask completion).
 	Runner.Reset();
+	CurrentBackboneName.Reset();
+
+	// Active voice cache lived on the runner — drop our mirror copy
+	// alongside it so HasActiveVoice / GetActiveVoiceName stay accurate.
+	ActiveVoice = FInoNeuTtsVoice();
+	ActiveVoiceName.Reset();
+}
+
+// ============================================================================
+//  Active voice priming (KV-prefix snapshot)
+// ============================================================================
+
+bool UInoNeuTtsSubsystem::HasActiveVoice() const
+{
+	return !ActiveVoiceName.IsEmpty()
+		&& Runner.IsValid()
+		&& Runner->HasCachedVoice(ActiveVoiceName);
+}
+
+void UInoNeuTtsSubsystem::ClearActiveVoice()
+{
+	check(IsInGameThread());
+
+	if (Runner.IsValid())
+	{
+		Runner->ClearVoiceCache();
+	}
+	ActiveVoice = FInoNeuTtsVoice();
+	ActiveVoiceName.Reset();
+}
+
+void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
+	const FInoNeuTtsVoice& Voice,
+	const FInoNeuTtsVoiceReadyDelegate& OnReady)
+{
+	check(IsInGameThread());
+
+	auto FailFast = [&OnReady](const FString& Why)
+	{
+		FInoNeuTtsVoiceReadyDelegate Copy = OnReady;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Why]()
+		{
+			Copy.ExecuteIfBound(false, Why);
+		});
+	};
+
+	if (!Runner.IsValid())
+	{
+		FailFast(TEXT("Model not loaded. Call LoadModelAsync first."));
+		return;
+	}
+	if (bIsPrimingVoice)
+	{
+		FailFast(TEXT("A SetActiveVoiceAsync call is already in flight."));
+		return;
+	}
+	if (bSynthInFlight)
+	{
+		FailFast(TEXT("Cannot prime voice while a synth is in flight. ")
+		         TEXT("Wait for synth completion or call CancelSynthesis."));
+		return;
+	}
+	if (!Voice.bIsValid || Voice.RefCodes.Num() == 0)
+	{
+		FailFast(TEXT("Voice is invalid (load via LoadVoiceFromFile or ListBundledVoices)."));
+		return;
+	}
+	if (Voice.Name.IsEmpty())
+	{
+		FailFast(TEXT("Voice has no Name — required for cache identity."));
+		return;
+	}
+
+	// Same voice already primed — fire success immediately.
+	if (Runner->HasCachedVoice(Voice.Name))
+	{
+		ActiveVoice     = Voice;
+		ActiveVoiceName = Voice.Name;
+		FInoNeuTtsVoiceReadyDelegate Copy = OnReady;
+		AsyncTask(ENamedThreads::GameThread, [Copy]()
+		{
+			Copy.ExecuteIfBound(true, FString());
+		});
+		return;
+	}
+
+	bIsPrimingVoice = true;
+
+	TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> RunnerCopy = Runner;
+	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
+
+	Async(EAsyncExecution::ThreadPool,
+		[RunnerCopy, Voice, OnReady, WeakThis]()
+	{
+		FString Error;
+		const bool bOk = RunnerCopy->PrimeVoice(Voice, Error);
+
+		AsyncTask(ENamedThreads::GameThread,
+			[WeakThis, Voice, bOk, Error = MoveTemp(Error), OnReady]() mutable
+		{
+			UInoNeuTtsSubsystem* Self = WeakThis.Get();
+			if (Self == nullptr)
+			{
+				return;
+			}
+
+			Self->bIsPrimingVoice = false;
+
+			if (bOk)
+			{
+				Self->ActiveVoice     = Voice;
+				Self->ActiveVoiceName = Voice.Name;
+			}
+
+			FInoNeuTtsVoiceReadyDelegate Copy = OnReady;
+			Copy.ExecuteIfBound(bOk, Error);
+		});
+	});
 }
 
 void UInoNeuTtsSubsystem::SynthesizeAsync(
@@ -518,6 +645,58 @@ void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 			}
 		});
 	});
+}
+
+void UInoNeuTtsSubsystem::SynthesizeWithActiveVoiceAsync(
+	const FString& Text,
+	const FInoNeuTtsOptions& Options,
+	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
+{
+	check(IsInGameThread());
+
+	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
+	{
+		FInoNeuTtsResult Bad;
+		Bad.bSuccess     = false;
+		Bad.ErrorMessage = TEXT("No active voice. Call SetActiveVoiceAsync first.");
+		FInoNeuTtsSynthesisCompleteDelegate Copy = OnComplete;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Bad]()
+		{
+			Copy.ExecuteIfBound(Bad);
+		});
+		return;
+	}
+
+	// Defer to the per-voice path; the runner will hit its KV cache
+	// via the matching Voice.Name.
+	SynthesizeAsync(Text, ActiveVoice, Options, OnComplete);
+}
+
+void UInoNeuTtsSubsystem::SynthesizeStreamWithActiveVoiceAsync(
+	const FString& Text,
+	const FInoNeuTtsOptions& Options,
+	int32 ChunkTokens,
+	const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
+	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
+{
+	check(IsInGameThread());
+
+	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
+	{
+		FInoNeuTtsResult Bad;
+		Bad.bSuccess     = false;
+		Bad.ErrorMessage = TEXT("No active voice. Call SetActiveVoiceAsync first.");
+		FInoNeuTtsSynthesisCompleteDelegate Copy = OnComplete;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Bad]()
+		{
+			Copy.ExecuteIfBound(Bad);
+		});
+		return;
+	}
+
+	SynthesizeStreamAsync(
+		Text, ActiveVoice, Options, ChunkTokens,
+		OnAudioChunk, OnComplete);
 }
 
 void UInoNeuTtsSubsystem::CancelSynthesis()

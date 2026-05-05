@@ -12,9 +12,10 @@
 // ============================================================================
 
 /**
- * One downloadable NeuTTS backbone (GGUF) variant entry. Used for both
- * Nano and Air arrays — the structure is identical; the array's array
- * (NanoModels vs AirModels) determines the variant.
+ * One downloadable NeuTTS backbone (GGUF) entry. Drives both NeuTTS Nano
+ * and NeuTTS Air — the runtime architecture is identical (Qwen2 backbone
+ * + NeuCodec decoder); the only difference is parameter count, which is
+ * encoded in the GGUF file itself, not in this struct.
  *
  * The file lands at:
  *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>
@@ -132,13 +133,13 @@ public:
 	virtual FName GetCategoryName() const override { return FName(TEXT("Plugins")); }
 	//~ End UDeveloperSettings interface
 
-	/** Available NeuTTS Nano backbones. Empty by default — populate with download URLs. */
-	UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Nano")
-	TArray<FInoNeuTtsBackboneEntry> NanoModels;
-
-	/** Available NeuTTS Air backbones. */
-	UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Air")
-	TArray<FInoNeuTtsBackboneEntry> AirModels;
+	/**
+	 * Available NeuTTS backbones (Nano + Air listed together — the runtime
+	 * doesn't branch on variant, the GGUF file itself encodes the size).
+	 * Empty by default — populate with download URLs in Project Settings.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Backbone")
+	TArray<FInoNeuTtsBackboneEntry> BackboneModels;
 
 	/** Available NeuCodec ONNX decoders. Same decoder works for both Nano + Air. */
 	UPROPERTY(EditAnywhere, Config, Category = "NeuCodec Decoder")

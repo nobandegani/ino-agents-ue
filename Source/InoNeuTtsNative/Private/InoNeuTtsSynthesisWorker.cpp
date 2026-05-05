@@ -1,6 +1,7 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 #include "InoNeuTtsSynthesisWorker.h"
+#include "InoNeuTtsCommon.h"  // TokenizePrompt — shared with runner's voice priming
 #include "InoNeuTtsLog.h"
 #include "InoNeuTtsPromptBuilder.h"
 #include "InoNeuTtsRunner.h"
@@ -42,73 +43,6 @@ namespace InoNeuTtsNative
 			R.ErrorMessage = Message;
 			R.SampleRate = kSampleRate;
 			return R;
-		}
-
-		/**
-		 * Tokenize a UTF-8 string with parse_special=true. Two-pass: first
-		 * call probes required size by passing a too-small buffer (returns
-		 * negative count = -required), second call writes for real.
-		 *
-		 * add_special is ALWAYS false for NeuTTS — the chat template
-		 * already contains every special-token string in plain text, so
-		 * letting the tokenizer auto-prepend a BOS / system would corrupt
-		 * the prompt structure.
-		 */
-		bool TokenizePrompt(
-			const InoAgents::LlamaCpp::FLlamaCppApi& Api,
-			const struct llama_vocab* Vocab,
-			const FString& Prompt,
-			TArray<llama_token>& OutTokens,
-			FString& OutError)
-		{
-			const FTCHARToUTF8 PromptUtf8(*Prompt);
-			const int32 ByteLen = PromptUtf8.Length();
-
-			// Probe: a stack buffer big enough for most prompts. If too
-			// small, llama_tokenize returns -<required>.
-			llama_token Probe[8];
-			const int32 N = Api.llama_tokenize(
-				Vocab,
-				PromptUtf8.Get(), ByteLen,
-				Probe, UE_ARRAY_COUNT(Probe),
-				/*add_special*/ false,
-				/*parse_special*/ true);
-
-			int32 Required = N;
-			if (N < 0)
-			{
-				Required = -N;
-			}
-			else if (N > 0)
-			{
-				// Fits in the probe; copy out.
-				OutTokens.SetNumUninitialized(N);
-				FMemory::Memcpy(OutTokens.GetData(), Probe, sizeof(llama_token) * N);
-				return true;
-			}
-			else
-			{
-				OutError = TEXT("llama_tokenize produced 0 tokens.");
-				return false;
-			}
-
-			// Allocate the real buffer and re-tokenize.
-			OutTokens.SetNumUninitialized(Required);
-			const int32 N2 = Api.llama_tokenize(
-				Vocab,
-				PromptUtf8.Get(), ByteLen,
-				OutTokens.GetData(), OutTokens.Num(),
-				/*add_special*/ false,
-				/*parse_special*/ true);
-
-			if (N2 != Required)
-			{
-				OutError = FString::Printf(
-					TEXT("llama_tokenize second call returned %d (expected %d)."),
-					N2, Required);
-				return false;
-			}
-			return true;
 		}
 
 		/**
@@ -420,6 +354,15 @@ namespace InoNeuTtsNative
 		const struct llama_vocab* Vocab = Runner.GetVocab();
 		struct llama_context* Ctx = Runner.GetContext();
 
+		// Voice-cache fast-path detection. Active when the runner has a
+		// primed cache whose VoiceName matches Voice.Name. Falls back to
+		// full prefill on any cache validation / restore failure (with a
+		// warning) — never causes a hard synth failure on its own.
+		const FInoNeuTtsVoiceCache* Cache = Runner.GetVoiceCache();
+		const bool bHaveCacheCandidate = Cache != nullptr
+			&& Cache->IsValid()
+			&& Cache->VoiceName.Equals(Voice.Name, ESearchCase::IgnoreCase);
+
 		// ---- 1. Phonemize input text + ref text (use pre-baked if present) ----
 		const FString InputPhones =
 			UInoSpeakNGBPLibrary::Phonemize(InputText, Voice.Language);
@@ -431,7 +374,11 @@ namespace InoNeuTtsNative
 				*Voice.Language));
 		}
 
-		FString RefPhones = Voice.RefPhones;
+		// Prefer the cache's resolved RefPhones (already phonemized at prime
+		// time), then Voice.RefPhones (offline pre-bake), then phonemize live.
+		FString RefPhones = bHaveCacheCandidate
+			? Cache->ResolvedRefPhones
+			: Voice.RefPhones;
 		if (RefPhones.IsEmpty())
 		{
 			RefPhones =
@@ -466,19 +413,87 @@ namespace InoNeuTtsNative
 				PromptTokens.Num(), NCtx));
 		}
 
-		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Synth: prompt=%d tokens, n_ctx=%u, max_new=%d"),
-			PromptTokens.Num(), NCtx, Options.MaxNewTokens);
-
-		// ---- 4. Reset KV cache and prefill ----
+		// ---- 4. Prefill: cached fast-path or full ----
 		llama_memory_t Mem = Api.llama_get_memory(Ctx);
-		Api.llama_memory_clear(Mem, /*data*/ true);
 
-		struct llama_batch PrefillBatch =
-			Api.llama_batch_get_one(PromptTokens.GetData(), PromptTokens.Num());
-		if (Api.llama_decode(Ctx, PrefillBatch) != 0)
+		bool bUsedCache = false;
+		if (bHaveCacheCandidate)
 		{
-			return MakeFailure(TEXT("llama_decode (prefill) failed."));
+			// Cross-check the per-call full-prompt's leading tokens match
+			// the cache's PrefixTokens. NeuTTS's IPA + special-token prompt
+			// SHOULD always match (clean BPE word boundary at the trailing
+			// space), but verify before relying on the snapshot — the cost
+			// is one TArray Memcmp.
+			const int32 NPrefix = Cache->PrefixTokens.Num();
+			bool bPrefixMatches = PromptTokens.Num() > NPrefix;
+			if (bPrefixMatches)
+			{
+				bPrefixMatches = (FMemory::Memcmp(
+					PromptTokens.GetData(),
+					Cache->PrefixTokens.GetData(),
+					sizeof(llama_token) * NPrefix) == 0);
+			}
+
+			if (bPrefixMatches
+				&& Api.llama_state_seq_set_data != nullptr)
+			{
+				Api.llama_memory_clear(Mem, /*data*/ true);
+				const size_t Read = Api.llama_state_seq_set_data(
+					Ctx,
+					Cache->KvSnapshot.GetData(),
+					Cache->KvSnapshot.Num(),
+					/*dest_seq_id*/ 0);
+
+				if (Read == (size_t)Cache->KvSnapshot.Num())
+				{
+					// Prefill the suffix only (variable middle + speech codes).
+					const int32 SuffixCount = PromptTokens.Num() - NPrefix;
+					struct llama_batch SuffixBatch = Api.llama_batch_get_one(
+						PromptTokens.GetData() + NPrefix, SuffixCount);
+					if (Api.llama_decode(Ctx, SuffixBatch) == 0)
+					{
+						bUsedCache = true;
+						UE_LOG(LogInoNeuTts, Log,
+							TEXT("Synth: prompt=%d tokens (cached prefix=%d, suffix=%d), max_new=%d"),
+							PromptTokens.Num(), NPrefix, SuffixCount, Options.MaxNewTokens);
+					}
+					else
+					{
+						UE_LOG(LogInoNeuTts, Warning,
+							TEXT("Synth: cached suffix prefill failed; falling back to full prefill."));
+					}
+				}
+				else
+				{
+					UE_LOG(LogInoNeuTts, Warning,
+						TEXT("Synth: llama_state_seq_set_data read %llu/%d bytes; falling back."),
+						static_cast<unsigned long long>(Read),
+						Cache->KvSnapshot.Num());
+				}
+			}
+			else if (!bPrefixMatches)
+			{
+				UE_LOG(LogInoNeuTts, Warning,
+					TEXT("Synth: cached prefix tokens did not match per-call tokenization ")
+					TEXT("(cache=%d, prompt=%d) — using full prefill."),
+					NPrefix, PromptTokens.Num());
+			}
+		}
+
+		if (!bUsedCache)
+		{
+			UE_LOG(LogInoNeuTts, Log,
+				TEXT("Synth: prompt=%d tokens, n_ctx=%u, max_new=%d"),
+				PromptTokens.Num(), NCtx, Options.MaxNewTokens);
+
+			Api.llama_memory_clear(Mem, /*data*/ true);
+
+			struct llama_batch PrefillBatch =
+				Api.llama_batch_get_one(PromptTokens.GetData(), PromptTokens.Num());
+			if (Api.llama_decode(Ctx, PrefillBatch) != 0)
+			{
+				return MakeFailure(TEXT("llama_decode (prefill) failed."));
+			}
 		}
 
 		// ---- 5. AR generation loop ----
@@ -619,6 +634,12 @@ namespace InoNeuTtsNative
 			return MakeFailure(TEXT("Runner has no NeuCodec decoder session."));
 		}
 
+		// Voice-cache fast-path detection (mirrors RunSynthesis).
+		const FInoNeuTtsVoiceCache* Cache = Runner.GetVoiceCache();
+		const bool bHaveCacheCandidate = Cache != nullptr
+			&& Cache->IsValid()
+			&& Cache->VoiceName.Equals(Voice.Name, ESearchCase::IgnoreCase);
+
 		const FString InputPhones =
 			UInoSpeakNGBPLibrary::Phonemize(InputText, Voice.Language);
 		if (InputPhones.IsEmpty())
@@ -628,7 +649,9 @@ namespace InoNeuTtsNative
 				*Voice.Language));
 		}
 
-		FString RefPhones = Voice.RefPhones;
+		FString RefPhones = bHaveCacheCandidate
+			? Cache->ResolvedRefPhones
+			: Voice.RefPhones;
 		if (RefPhones.IsEmpty())
 		{
 			RefPhones = UInoSpeakNGBPLibrary::Phonemize(Voice.RefText, Voice.Language);
@@ -657,18 +680,81 @@ namespace InoNeuTtsNative
 				PromptTokens.Num(), NCtx));
 		}
 
-		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Stream synth: prompt=%d tokens, n_ctx=%u, max_new=%d, chunk=%d"),
-			PromptTokens.Num(), NCtx, Options.MaxNewTokens, ChunkTokens);
-
 		llama_memory_t Mem = Api.llama_get_memory(Ctx);
-		Api.llama_memory_clear(Mem, /*data*/ true);
 
-		struct llama_batch PrefillBatch =
-			Api.llama_batch_get_one(PromptTokens.GetData(), PromptTokens.Num());
-		if (Api.llama_decode(Ctx, PrefillBatch) != 0)
+		bool bUsedCache = false;
+		if (bHaveCacheCandidate)
 		{
-			return MakeFailure(TEXT("llama_decode (prefill) failed."));
+			const int32 NPrefix = Cache->PrefixTokens.Num();
+			bool bPrefixMatches = PromptTokens.Num() > NPrefix;
+			if (bPrefixMatches)
+			{
+				bPrefixMatches = (FMemory::Memcmp(
+					PromptTokens.GetData(),
+					Cache->PrefixTokens.GetData(),
+					sizeof(llama_token) * NPrefix) == 0);
+			}
+
+			if (bPrefixMatches
+				&& Api.llama_state_seq_set_data != nullptr)
+			{
+				Api.llama_memory_clear(Mem, /*data*/ true);
+				const size_t Read = Api.llama_state_seq_set_data(
+					Ctx,
+					Cache->KvSnapshot.GetData(),
+					Cache->KvSnapshot.Num(),
+					/*dest_seq_id*/ 0);
+
+				if (Read == (size_t)Cache->KvSnapshot.Num())
+				{
+					const int32 SuffixCount = PromptTokens.Num() - NPrefix;
+					struct llama_batch SuffixBatch = Api.llama_batch_get_one(
+						PromptTokens.GetData() + NPrefix, SuffixCount);
+					if (Api.llama_decode(Ctx, SuffixBatch) == 0)
+					{
+						bUsedCache = true;
+						UE_LOG(LogInoNeuTts, Log,
+							TEXT("Stream synth: prompt=%d tokens (cached prefix=%d, suffix=%d), max_new=%d, chunk=%d"),
+							PromptTokens.Num(), NPrefix, SuffixCount,
+							Options.MaxNewTokens, ChunkTokens);
+					}
+					else
+					{
+						UE_LOG(LogInoNeuTts, Warning,
+							TEXT("Stream synth: cached suffix prefill failed; using full prefill."));
+					}
+				}
+				else
+				{
+					UE_LOG(LogInoNeuTts, Warning,
+						TEXT("Stream synth: llama_state_seq_set_data read %llu/%d bytes; using full prefill."),
+						static_cast<unsigned long long>(Read),
+						Cache->KvSnapshot.Num());
+				}
+			}
+			else if (!bPrefixMatches)
+			{
+				UE_LOG(LogInoNeuTts, Warning,
+					TEXT("Stream synth: cached prefix tokens did not match per-call tokenization ")
+					TEXT("(cache=%d, prompt=%d) — using full prefill."),
+					NPrefix, PromptTokens.Num());
+			}
+		}
+
+		if (!bUsedCache)
+		{
+			UE_LOG(LogInoNeuTts, Log,
+				TEXT("Stream synth: prompt=%d tokens, n_ctx=%u, max_new=%d, chunk=%d"),
+				PromptTokens.Num(), NCtx, Options.MaxNewTokens, ChunkTokens);
+
+			Api.llama_memory_clear(Mem, /*data*/ true);
+
+			struct llama_batch PrefillBatch =
+				Api.llama_batch_get_one(PromptTokens.GetData(), PromptTokens.Num());
+			if (Api.llama_decode(Ctx, PrefillBatch) != 0)
+			{
+				return MakeFailure(TEXT("llama_decode (prefill) failed."));
+			}
 		}
 
 		struct llama_sampler* Chain = BuildSamplerChain(Api, Options);

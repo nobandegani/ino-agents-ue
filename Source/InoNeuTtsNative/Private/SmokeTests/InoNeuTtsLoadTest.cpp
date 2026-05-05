@@ -18,18 +18,21 @@ namespace
 		using namespace InoNeuTtsNative;
 
 		FInoNeuTtsConfig Config;
-		if (Args.Num() > 0 && Args[0].ToLower() == TEXT("air"))
+		if (Args.Num() > 0)
 		{
-			Config.Variant = EInoNeuTtsVariant::Air;
+			// Optional: pass a backbone DisplayName to pick a specific
+			// entry from BackboneModels; otherwise the first entry wins.
+			Config.BackboneModelName = Args[0];
 		}
 
-		const FString GgufPath = ResolveGgufPath(Config.Variant);
-		const FString OnnxPath = ResolveOnnxDecoderPath();
+		const FString GgufPath = ResolveGgufPath(Config.BackboneModelName);
+		const FString OnnxPath = ResolveOnnxDecoderPath(Config.DecoderModelName);
 
 		UE_LOG(LogInoNeuTts, Display, TEXT("=== Ino.NeuTts.LoadTest ==="));
-		UE_LOG(LogInoNeuTts, Display, TEXT("Variant: %s"), *VariantToString(Config.Variant));
-		UE_LOG(LogInoNeuTts, Display, TEXT("GGUF:    %s"), *GgufPath);
-		UE_LOG(LogInoNeuTts, Display, TEXT("ONNX:    %s"), *OnnxPath);
+		UE_LOG(LogInoNeuTts, Display, TEXT("Backbone: %s"),
+			Config.BackboneModelName.IsEmpty() ? TEXT("<first entry>") : *Config.BackboneModelName);
+		UE_LOG(LogInoNeuTts, Display, TEXT("GGUF:     %s"), *GgufPath);
+		UE_LOG(LogInoNeuTts, Display, TEXT("ONNX:     %s"), *OnnxPath);
 
 		const double StartTime = FPlatformTime::Seconds();
 
@@ -74,6 +77,7 @@ namespace
 	FAutoConsoleCommand GLoadTest(
 		TEXT("Ino.NeuTts.LoadTest"),
 		TEXT("Load the NeuTTS GGUF backbone + NeuCodec ONNX decoder. ")
-		TEXT("Args: [nano|air] (default nano). Non-blocking, dispatches to ThreadPool."),
+		TEXT("Args: [backbone DisplayName] (default = first entry in Project Settings -> ")
+		TEXT("Ino NeuTTS Native -> NeuTTS Backbone). Non-blocking, dispatches to ThreadPool."),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&RunLoadTest));
 }

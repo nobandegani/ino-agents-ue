@@ -15,6 +15,51 @@ class FInoOnnxSession;
 namespace InoNeuTtsNative
 {
 	/**
+	 * Cached state for a primed voice. Built once by FInoNeuTtsRunner::PrimeVoice
+	 * and reused on every synth call until the active voice changes.
+	 *
+	 * What's cached:
+	 *   - VoiceName              — identifies which voice the snapshot is for.
+	 *   - ResolvedRefPhones      — the IPA phonemization of Voice.RefText.
+	 *                              Lazy-computed at prime time so synth calls
+	 *                              don't re-phonemize the reference text.
+	 *   - PrefixTokens           — pre-tokenized form of the cacheable prompt
+	 *                              prefix (everything up to and including the
+	 *                              space after RefPhones — the largest fixed
+	 *                              prefix possible given that InputPhones sit
+	 *                              between RefPhones and RefCodes in NeuTTS's
+	 *                              chat template). Stored so synth calls can
+	 *                              cross-check the per-call full-prompt
+	 *                              tokenization matches the cache before
+	 *                              relying on the snapshot — defends against
+	 *                              context-dependent BPE merges across the
+	 *                              prefix / variable-middle boundary.
+	 *   - KvSnapshot             — output of llama_state_seq_get_data after
+	 *                              prefilling PrefixTokens. Restored at the
+	 *                              start of every synth via _set_data, then
+	 *                              the remaining (variable-middle + suffix)
+	 *                              tokens are appended via one llama_decode.
+	 *
+	 * Threading: all reads/writes on the worker thread. Snapshot bytes are
+	 * a flat byte array (not a TArray of UObjects), so move/copy is cheap
+	 * and there are no UPROPERTY or GC concerns.
+	 */
+	struct FInoNeuTtsVoiceCache
+	{
+		FString             VoiceName;
+		FString             ResolvedRefPhones;
+		TArray<llama_token> PrefixTokens;
+		TArray<uint8>       KvSnapshot;
+
+		bool IsValid() const
+		{
+			return !VoiceName.IsEmpty()
+				&& KvSnapshot.Num() > 0
+				&& PrefixTokens.Num() > 0;
+		}
+	};
+
+	/**
 	 * RAII owner of the loaded NeuTTS engine state. Heap-allocated via
 	 * TUniquePtr; non-copyable, non-movable (use the unique_ptr to move
 	 * ownership). One Runner = one set of model resources, used for as
@@ -26,6 +71,9 @@ namespace InoNeuTtsNative
 	 *   - Cached llama_token StopTokenId (id of "<|SPEECH_GENERATION_END|>",
 	 *     resolved once at load via single-token tokenization)
 	 *   - TUniquePtr<FInoOnnxSession> for the NeuCodec ONNX decoder
+	 *   - Optional FInoNeuTtsVoiceCache for the active primed voice (set
+	 *     by PrimeVoice; consumed by RunSynthesis / RunStreamingSynthesis
+	 *     when the per-call Voice matches the cache's VoiceName).
 	 *
 	 * Threading:
 	 *   Construct off the game thread (it's slow — multi-GB GGUF mmap +
@@ -66,8 +114,35 @@ namespace InoNeuTtsNative
 		const struct llama_vocab*                GetVocab()    const { return Vocab;    }
 		llama_token                              GetStopTokenId() const { return StopTokenId; }
 		FInoOnnxSession*                         GetDecoder()  const { return Decoder.Get(); }
-		EInoNeuTtsVariant                        GetVariant()  const { return Variant;  }
 		const FString&                           GetModelDescription() const { return ModelDesc; }
+
+		// ---- Voice cache (KV snapshot of the prompt prefix) ----
+
+		/**
+		 * Prime the voice cache: phonemize Voice.RefText (if not already
+		 * pre-baked into Voice.RefPhones), tokenize the cacheable prefix
+		 * + speech codes, prefill the prefix into the LM context, snapshot
+		 * the KV state.
+		 *
+		 * After this returns true, the next RunSynthesis / RunStreamingSynthesis
+		 * call with the same Voice (matched by Voice.Name) will skip
+		 * tokenizing + prefilling the prefix and reuse the snapshot.
+		 *
+		 * Slow — call from the worker thread. Replaces any existing cache.
+		 */
+		bool PrimeVoice(const FInoNeuTtsVoice& Voice, FString& OutError);
+
+		/** Drop any primed voice cache. Cheap; no LM state changes. */
+		void ClearVoiceCache();
+
+		/** True iff a primed voice with the given name is loaded. */
+		bool HasCachedVoice(const FString& VoiceName) const;
+
+		/** Read-only access to the cache (nullptr if nothing primed). */
+		const FInoNeuTtsVoiceCache* GetVoiceCache() const
+		{
+			return VoiceCache.IsValid() ? VoiceCache.Get() : nullptr;
+		}
 
 	private:
 		FInoNeuTtsRunner() = default;
@@ -81,7 +156,13 @@ namespace InoNeuTtsNative
 
 		TUniquePtr<FInoOnnxSession> Decoder;
 
-		EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
-		FString           ModelDesc;
+		FString ModelDesc;
+
+		/**
+		 * Optional cache of the post-prefix KV state for the active voice.
+		 * TUniquePtr (not inline) so HasCachedVoice + ClearVoiceCache are
+		 * O(1) and the multi-MB snapshot byte array stays heap-allocated.
+		 */
+		TUniquePtr<FInoNeuTtsVoiceCache> VoiceCache;
 	};
 }

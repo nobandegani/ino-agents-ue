@@ -566,6 +566,30 @@ UInoNeuTtsNanoNativeSubsystem (UGameInstanceSubsystem)
 | Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
 | Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxTurboNativeDecoderWorker`. |
 
+### Voice cache (KV-prefix snapshot)
+
+The synth prompt has a fixed-per-voice prefix (`user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} `) sitting before the variable input phones. When a voice is "active", the runner pre-tokenizes that prefix, prefills it into the LM context, snapshots the post-prefix KV state via `llama_state_seq_get_data`, and stores the bytes alongside the cached `RefPhones` (already phonemized) and the prefix's tokenization (for cross-checking).
+
+Per-synth path with the cache hit:
+1. Tokenize the full prompt as usual.
+2. `Memcmp` the first N tokens against the cached `PrefixTokens` — if BPE merged differently across the prefix/middle boundary, fall back to full prefill with a warning. (For NeuTTS's IPA + special-token prompt this should always match because the trailing space is a clean BPE boundary.)
+3. `llama_memory_clear` + `llama_state_seq_set_data` to restore the snapshot.
+4. `llama_decode` only the tokens past the prefix (input phones + suffix + RefCodes — the bulk of the prompt).
+5. AR loop as before.
+
+Realistic speedup: ~5–10% of total synth time (the cacheable prefix is small relative to the ~650-token RefCodes block, which sits AFTER the variable input phones in the chat template and so can't be cached as a prefix). The bigger win is the API ergonomics: `SetActiveVoiceAsync(Voice, OnReady)` once + voice-less `SynthesizeWithActiveVoiceAsync(Text, Options, OnComplete)` per call. The runner also short-circuits a redundant `SetActiveVoiceAsync` for the same voice via `HasCachedVoice`.
+
+`UInoNeuTtsSubsystem`'s public surface for voice caching:
+- `SetActiveVoiceAsync(Voice, OnReady)` — async; phonemize RefText if needed, tokenize prefix, prefill, snapshot.
+- `ClearActiveVoice()` — drop the snapshot. Cheap.
+- `HasActiveVoice()` / `GetActiveVoiceName()` — query state.
+- `SynthesizeWithActiveVoiceAsync(Text, Options, OnComplete)` — voice-less; uses the cached active voice. Errors fast if nothing primed.
+- `SynthesizeStreamWithActiveVoiceAsync(...)` — streaming variant of the above.
+
+The per-voice `SynthesizeAsync(Text, Voice, Options, OnComplete)` overloads still work and will hit the cache automatically when `Voice.Name` matches the primed active voice.
+
+The vtable bits this depends on (added in `InoLlama` as part of this work): `llama_state_seq_get_size` / `_get_data` / `_set_data` and `llama_memory_seq_rm`. If those resolve to nullptr on a given `llama.dll` (older builds), `PrimeVoice` errors out cleanly and synth falls back to the full-prefill path.
+
 ### Why phonemization is offline-only
 
 NeuTTS Nano was trained on IPA phonemes (from espeak-ng), not raw English. The standard runtime phonemizer is espeak-ng itself, which is **GPLv3** — a copyleft dependency that poisons commercial games that ship NeuTTS. Our approach: phonemize **once at voice-encoding time** via the offline Python script (`NeuTtsNanoNative/scripts/encode-default-voice.py`), store the phonemes in the JSON alongside ref_codes, and keep the runtime plugin phonemizer-free. v2 will add an ONNX G2P (MIT) for plain-text input.
@@ -587,14 +611,20 @@ Plugins/InoAgents/
 │
 └── Source/InoAgents/
     ├── Public/NeuTtsNanoNative/
-    │   ├── InoNeuTtsNanoNativeTypes.h                       ← variant enum, entry/config/
-    │   │                                                options USTRUCTs, delegates
+    │   ├── InoNeuTtsNanoNativeTypes.h                       ← entry / config / options
+    │   │                                                USTRUCTs, delegates (no variant
+    │   │                                                enum — Nano vs Air is just metadata
+    │   │                                                in the model registry, the runtime
+    │   │                                                doesn't branch on it)
     │   └── InoNeuTtsNanoNativeSubsystem.h                   ← UInoNeuTtsNanoNativeSubsystem
     └── Private/NeuTtsNanoNative/
         ├── InoNeuTtsNanoNativeSubsystem.cpp                 ← Blueprint glue, download flow
-        │                                                (Chatterbox-style BuildDownload
-        │                                                Queue + HEAD probe + sequential
-        │                                                GET + .partial + atomic rename),
+        │                                                (delegates to
+        │                                                InoNodes::Download::DownloadFilesAsync
+        │                                                — generic batch downloader with
+        │                                                .partial staging, atomic rename,
+        │                                                streaming SHA-256, multi-connection
+        │                                                range, retries, cancel tokens),
         │                                                ThreadPool load dispatch
         ├── InoNeuTtsNanoNativeTypes.cpp                     ← ResolveModelDir helper
         ├── InoNeuTtsNanoNativeRunner.{h,cpp}                ← llama_model + llama_context +
