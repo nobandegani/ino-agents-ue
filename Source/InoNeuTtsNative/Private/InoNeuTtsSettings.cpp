@@ -4,6 +4,12 @@
 
 #include "Misc/Paths.h"
 
+UInoNeuTtsNativeSettings::UInoNeuTtsNativeSettings()
+{
+	// No defaults — arrays start empty. Configure entries in
+	// Project Settings -> Plugins -> InoNeuTtsNative.
+}
+
 FString UInoNeuTtsNativeSettings::GetModelsDir()
 {
 	return FPaths::Combine(

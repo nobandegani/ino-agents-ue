@@ -120,12 +120,18 @@ struct INONEUTTSNATIVE_API FInoNeuTtsDecoderEntry
 //  Settings class — Project Settings → Plugins → Ino NeuTTS Native
 // ============================================================================
 
-UCLASS(Config = Engine, DefaultConfig, meta = (DisplayName = "Ino NeuTTS Native"))
+UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "InoNeuTtsNative"))
 class INONEUTTSNATIVE_API UInoNeuTtsNativeSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
+	UInoNeuTtsNativeSettings();
+
+	//~ UDeveloperSettings interface
+	virtual FName GetCategoryName() const override { return FName(TEXT("Plugins")); }
+	//~ End UDeveloperSettings interface
+
 	/** Available NeuTTS Nano backbones. Empty by default — populate with download URLs. */
 	UPROPERTY(EditAnywhere, Config, Category = "NeuTTS Nano")
 	TArray<FInoNeuTtsBackboneEntry> NanoModels;
