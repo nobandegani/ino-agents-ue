@@ -1,56 +1,65 @@
 // Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 
 #include "InoNeuTtsCommon.h"
-
-#include "Interfaces/IPluginManager.h"
-#include "Misc/Paths.h"
+#include "InoNeuTtsLog.h"
+#include "InoNeuTtsSettings.h"
 
 namespace InoNeuTtsNative
 {
-	namespace
+	FString ResolveGgufPath(EInoNeuTtsVariant Variant, const FString& ModelName)
 	{
-		FString GetNeuTtsModelsDir()
-		{
-			const TSharedPtr<IPlugin> Plugin =
-				IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
-			if (!Plugin.IsValid())
-			{
-				return FString();
-			}
-			return FPaths::Combine(Plugin->GetBaseDir(), TEXT("NeuTTS"), TEXT("models"));
-		}
-	}
-
-	FString ResolveGgufPath(EInoNeuTtsVariant Variant)
-	{
-		const FString Models = GetNeuTtsModelsDir();
-		if (Models.IsEmpty())
+		const UInoNeuTtsNativeSettings* Settings =
+			GetDefault<UInoNeuTtsNativeSettings>();
+		if (Settings == nullptr)
 		{
 			return FString();
 		}
 
-		switch (Variant)
-		{
-			case EInoNeuTtsVariant::Nano:
-				return FPaths::Combine(Models,
-					TEXT("nano-q4-gguf"), TEXT("neutts-nano-Q4_0.gguf"));
+		const TArray<FInoNeuTtsBackboneEntry>& Pool =
+			(Variant == EInoNeuTtsVariant::Air)
+				? Settings->AirModels
+				: Settings->NanoModels;
 
-			case EInoNeuTtsVariant::Air:
-				return FPaths::Combine(Models,
-					TEXT("air-q4-gguf"), TEXT("neutts-air-Q4_0.gguf"));
+		const FInoNeuTtsBackboneEntry* Entry =
+			UInoNeuTtsNativeSettings::FindBackbone(Pool, ModelName);
+
+		if (Entry == nullptr)
+		{
+			UE_LOG(LogInoNeuTts, Warning,
+				TEXT("No backbone entry found for variant %s%s%s. ")
+				TEXT("Configure Project Settings -> Ino NeuTTS Native."),
+				*VariantToString(Variant),
+				ModelName.IsEmpty() ? TEXT("") : TEXT(" / name "),
+				ModelName.IsEmpty() ? TEXT("") : *ModelName);
+			return FString();
 		}
-		return FString();
+
+		return UInoNeuTtsNativeSettings::ResolveLocalPath(Entry->LocalFileName);
 	}
 
-	FString ResolveOnnxDecoderPath()
+	FString ResolveOnnxDecoderPath(const FString& ModelName)
 	{
-		const FString Models = GetNeuTtsModelsDir();
-		if (Models.IsEmpty())
+		const UInoNeuTtsNativeSettings* Settings =
+			GetDefault<UInoNeuTtsNativeSettings>();
+		if (Settings == nullptr)
 		{
 			return FString();
 		}
-		return FPaths::Combine(Models,
-			TEXT("onnx-decoder-int8"), TEXT("model.onnx"));
+
+		const FInoNeuTtsDecoderEntry* Entry =
+			UInoNeuTtsNativeSettings::FindDecoder(Settings->DecoderModels, ModelName);
+
+		if (Entry == nullptr)
+		{
+			UE_LOG(LogInoNeuTts, Warning,
+				TEXT("No decoder entry found%s%s. ")
+				TEXT("Configure Project Settings -> Ino NeuTTS Native."),
+				ModelName.IsEmpty() ? TEXT("") : TEXT(" for name "),
+				ModelName.IsEmpty() ? TEXT("") : *ModelName);
+			return FString();
+		}
+
+		return UInoNeuTtsNativeSettings::ResolveLocalPath(Entry->LocalFileName);
 	}
 
 	FString VariantToString(EInoNeuTtsVariant Variant)

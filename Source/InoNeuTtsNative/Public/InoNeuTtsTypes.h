@@ -82,6 +82,21 @@ struct INONEUTTSNATIVE_API FInoNeuTtsConfig
 	EInoNeuTtsVariant Variant = EInoNeuTtsVariant::Nano;
 
 	/**
+	 * DisplayName of the entry to use from
+	 * UInoNeuTtsNativeSettings::NanoModels (or AirModels — chosen by Variant).
+	 * Empty string = use the first entry in the array.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
+	FString BackboneModelName;
+
+	/**
+	 * DisplayName of the entry to use from
+	 * UInoNeuTtsNativeSettings::DecoderModels. Empty = first entry.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
+	FString DecoderModelName;
+
+	/**
 	 * llama.cpp model-load options for the speech LM backbone — GPU
 	 * offload count, mmap / mlock, vocab-only mode, multi-GPU split,
 	 * etc. See FInoLlamaModelParams for every knob.
@@ -228,3 +243,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInoNeuTtsSynthesisComplete,
 /** Async-action streaming chunk variant (BlueprintAssignable, multicast). Game thread. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnInoNeuTtsAudioChunk,
 	const TArray<uint8>&, AudioChunk, bool, bIsFinal);
+
+/**
+ * Per-file download progress. Fires on the game thread as bytes arrive
+ * during LoadModelAsync's download phase. CurrentFileName is the
+ * LocalFileName of the file currently downloading (e.g. the GGUF, then
+ * later the ONNX decoder); BytesReceived/TotalBytes describe just that
+ * file. Bound on the subsystem (multicast) for HUD / loading-screen UI.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnInoNeuTtsDownloadProgress,
+	const FString&, CurrentFileName,
+	int64,         BytesReceived,
+	int64,         TotalBytes,
+	float,         FractionForFile);

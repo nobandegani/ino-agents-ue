@@ -2,12 +2,15 @@
 
 #include "InoNeuTtsSubsystem.h"
 #include "InoNeuTtsCommon.h"
+#include "InoNeuTtsDownload.h"
 #include "InoNeuTtsLog.h"
 #include "InoNeuTtsRunner.h"
+#include "InoNeuTtsSettings.h"
 #include "InoNeuTtsSynthesisWorker.h"
 #include "InoNeuTtsVoiceRegistry.h"
 
 #include "Async/Async.h"
+#include "HAL/FileManager.h"
 #include "Templates/SharedPointer.h"
 
 void UInoNeuTtsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -46,14 +49,19 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 {
 	check(IsInGameThread());
 
+	auto FailFast = [OnLoaded](const FString& Why)
+	{
+		FInoNeuTtsLoadedDelegate Copy = OnLoaded;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Why]()
+		{
+			Copy.ExecuteIfBound(false, Why);
+		});
+	};
+
 	if (bIsLoading)
 	{
 		UE_LOG(LogInoNeuTts, Warning, TEXT("LoadModelAsync: already loading."));
-		FInoNeuTtsLoadedDelegate Copy = OnLoaded;
-		AsyncTask(ENamedThreads::GameThread, [Copy]()
-		{
-			Copy.ExecuteIfBound(false, TEXT("Already loading."));
-		});
+		FailFast(TEXT("Already loading."));
 		return;
 	}
 
@@ -75,24 +83,188 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 		Runner.Reset();
 	}
 
-	const FString GgufPath = InoNeuTtsNative::ResolveGgufPath(Config.Variant);
-	const FString OnnxPath = InoNeuTtsNative::ResolveOnnxDecoderPath();
+	// ---- Settings lookup ----
+	const UInoNeuTtsNativeSettings* Settings =
+		GetDefault<UInoNeuTtsNativeSettings>();
+	if (Settings == nullptr)
+	{
+		FailFast(TEXT("UInoNeuTtsNativeSettings unavailable."));
+		return;
+	}
+
+	const TArray<FInoNeuTtsBackboneEntry>& BackbonePool =
+		(Config.Variant == EInoNeuTtsVariant::Air)
+			? Settings->AirModels
+			: Settings->NanoModels;
+
+	const FInoNeuTtsBackboneEntry* BackboneEntry =
+		UInoNeuTtsNativeSettings::FindBackbone(BackbonePool, Config.BackboneModelName);
+	if (BackboneEntry == nullptr)
+	{
+		FailFast(FString::Printf(
+			TEXT("No %s backbone entry%s%s configured. ")
+			TEXT("Open Project Settings -> Plugins -> Ino NeuTTS Native and add at least one entry."),
+			*InoNeuTtsNative::VariantToString(Config.Variant),
+			Config.BackboneModelName.IsEmpty() ? TEXT("") : TEXT(" named '"),
+			Config.BackboneModelName.IsEmpty() ? TEXT("") : *(Config.BackboneModelName + TEXT("'"))));
+		return;
+	}
+
+	const FInoNeuTtsDecoderEntry* DecoderEntry =
+		UInoNeuTtsNativeSettings::FindDecoder(Settings->DecoderModels, Config.DecoderModelName);
+	if (DecoderEntry == nullptr)
+	{
+		FailFast(TEXT("No NeuCodec decoder entry configured. ")
+		         TEXT("Open Project Settings -> Plugins -> Ino NeuTTS Native and add a decoder."));
+		return;
+	}
+
+	// ---- Build the load job + kick off the async chain ----
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job = MakeShared<FLoadJob, ESPMode::ThreadSafe>();
+	Job->Config       = Config;
+	Job->GgufPath     = UInoNeuTtsNativeSettings::ResolveLocalPath(BackboneEntry->LocalFileName);
+	Job->OnnxPath     = UInoNeuTtsNativeSettings::ResolveLocalPath(DecoderEntry->LocalFileName);
+	Job->GgufUrl      = BackboneEntry->DownloadUrl;
+	Job->OnnxUrl      = DecoderEntry->DownloadUrl;
+	Job->GgufFileName = BackboneEntry->LocalFileName;
+	Job->OnnxFileName = DecoderEntry->LocalFileName;
+	Job->GgufSha      = BackboneEntry->ExpectedSha256;
+	Job->OnnxSha      = DecoderEntry->ExpectedSha256;
+	Job->GgufSize     = BackboneEntry->FileSizeBytes;
+	Job->OnnxSize     = DecoderEntry->FileSizeBytes;
+	Job->OnLoaded     = OnLoaded;
 
 	bIsLoading = true;
+	EnsureBackboneDownloaded(Job);
+}
+
+void UInoNeuTtsSubsystem::EnsureBackboneDownloaded(
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
+{
+	check(IsInGameThread());
+
+	if (IFileManager::Get().FileExists(*Job->GgufPath))
+	{
+		// Already cached — proceed.
+		EnsureDecoderDownloaded(Job);
+		return;
+	}
+
+	if (Job->GgufUrl.IsEmpty())
+	{
+		FinishLoadJob(Job, /*bSuccess*/ false,
+			FString::Printf(
+				TEXT("Backbone file missing and no DownloadUrl configured: %s"),
+				*Job->GgufPath));
+		return;
+	}
+
+	UE_LOG(LogInoNeuTts, Log, TEXT("Backbone not cached, downloading: %s"), *Job->GgufUrl);
+
+	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
+
+	InoNeuTtsNative::DownloadFileAsync(
+		Job->GgufUrl, Job->GgufPath, Job->GgufSha, Job->GgufSize,
+		// Progress (HTTP I/O thread)
+		[WeakThis, FileName = Job->GgufFileName]
+		(int64 Bytes, int64 Total)
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, FileName, Bytes, Total]()
+			{
+				if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
+				{
+					Self->BroadcastDownloadProgress(FileName, Bytes, Total);
+				}
+			});
+		},
+		// Completion (HTTP I/O thread)
+		[WeakThis, Job](bool bOk, FString Err)
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, Job, bOk, Err = MoveTemp(Err)]() mutable
+			{
+				UInoNeuTtsSubsystem* Self = WeakThis.Get();
+				if (Self == nullptr) { return; }
+
+				if (!bOk)
+				{
+					Self->FinishLoadJob(Job, false, MoveTemp(Err));
+					return;
+				}
+				Self->EnsureDecoderDownloaded(Job);
+			});
+		});
+}
+
+void UInoNeuTtsSubsystem::EnsureDecoderDownloaded(
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
+{
+	check(IsInGameThread());
+
+	if (IFileManager::Get().FileExists(*Job->OnnxPath))
+	{
+		DispatchModelLoad(Job);
+		return;
+	}
+
+	if (Job->OnnxUrl.IsEmpty())
+	{
+		FinishLoadJob(Job, /*bSuccess*/ false,
+			FString::Printf(
+				TEXT("Decoder file missing and no DownloadUrl configured: %s"),
+				*Job->OnnxPath));
+		return;
+	}
+
+	UE_LOG(LogInoNeuTts, Log, TEXT("Decoder not cached, downloading: %s"), *Job->OnnxUrl);
+
+	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
+
+	InoNeuTtsNative::DownloadFileAsync(
+		Job->OnnxUrl, Job->OnnxPath, Job->OnnxSha, Job->OnnxSize,
+		[WeakThis, FileName = Job->OnnxFileName]
+		(int64 Bytes, int64 Total)
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, FileName, Bytes, Total]()
+			{
+				if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
+				{
+					Self->BroadcastDownloadProgress(FileName, Bytes, Total);
+				}
+			});
+		},
+		[WeakThis, Job](bool bOk, FString Err)
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, Job, bOk, Err = MoveTemp(Err)]() mutable
+			{
+				UInoNeuTtsSubsystem* Self = WeakThis.Get();
+				if (Self == nullptr) { return; }
+
+				if (!bOk)
+				{
+					Self->FinishLoadJob(Job, false, MoveTemp(Err));
+					return;
+				}
+				Self->DispatchModelLoad(Job);
+			});
+		});
+}
+
+void UInoNeuTtsSubsystem::DispatchModelLoad(
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
+{
+	check(IsInGameThread());
 
 	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
-		[Config, GgufPath, OnnxPath, OnLoaded, WeakThis]()
+		[Job, WeakThis]()
 	{
 		FString Error;
 
 		using FRunner = InoNeuTtsNative::FInoNeuTtsRunner;
 		TUniquePtr<FRunner> NewRunner = FRunner::Create(
-			Config, GgufPath, OnnxPath, Error);
+			Job->Config, Job->GgufPath, Job->OnnxPath, Error);
 
-		// Wrap into a thread-safe shared ptr so an in-flight synth
-		// can outlive the subsystem's own reference.
 		TSharedPtr<FRunner, ESPMode::ThreadSafe> SharedRunner;
 		if (NewRunner.IsValid())
 		{
@@ -100,17 +272,40 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 		}
 
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, SharedRunner, Variant = Config.Variant,
-			 Err = MoveTemp(Error), OnLoaded]() mutable
+			[WeakThis, SharedRunner, Job, Err = MoveTemp(Error)]() mutable
 		{
 			if (UInoNeuTtsSubsystem* Self = WeakThis.Get())
 			{
-				Self->HandleModelLoaded(SharedRunner, Variant, Err, OnLoaded);
+				Self->HandleModelLoaded(SharedRunner, Job->Config.Variant, Err, Job->OnLoaded);
+				// HandleModelLoaded clears bIsLoading + fires OnLoaded.
 			}
-			// If the subsystem is gone, the SharedRunner falls out of
-			// scope here on the game thread and frees cleanly.
 		});
 	});
+}
+
+void UInoNeuTtsSubsystem::FinishLoadJob(
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job,
+	bool bSuccess,
+	FString Error)
+{
+	check(IsInGameThread());
+
+	bIsLoading = false;
+
+	FInoNeuTtsLoadedDelegate Copy = Job->OnLoaded;
+	Copy.ExecuteIfBound(bSuccess, Error);
+}
+
+void UInoNeuTtsSubsystem::BroadcastDownloadProgress(
+	const FString& FileName, int64 BytesReceived, int64 TotalBytes)
+{
+	check(IsInGameThread());
+
+	const float Frac = (TotalBytes > 0)
+		? FMath::Clamp(static_cast<float>(BytesReceived) / static_cast<float>(TotalBytes), 0.0f, 1.0f)
+		: 0.0f;
+
+	OnDownloadProgress.Broadcast(FileName, BytesReceived, TotalBytes, Frac);
 }
 
 void UInoNeuTtsSubsystem::HandleModelLoaded(

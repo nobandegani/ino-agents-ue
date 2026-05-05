@@ -64,6 +64,20 @@ public:
 		const FInoNeuTtsLoadedDelegate& OnLoaded);
 
 	/**
+	 * Per-file download progress (BlueprintAssignable, multicast).
+	 * Fires from LoadModelAsync's download phase whenever bytes arrive
+	 * for the file currently being fetched. CurrentFileName is the
+	 * LocalFileName of the file currently downloading. FractionForFile
+	 * is BytesReceived/TotalBytes when both are known, else 0.
+	 *
+	 * For an aggregate progress bar across the GGUF + ONNX downloads,
+	 * sum the BytesReceived locally and compare against the sum of
+	 * TotalBytes the first call gave you for each file.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "InoNeuTts")
+	FOnInoNeuTtsDownloadProgress OnDownloadProgress;
+
+	/**
 	 * Drop the loaded model. Safe to call mid-synth — the in-flight
 	 * call still holds a TSharedPtr to the runner and finishes cleanly,
 	 * after which the runner's destructor runs.
@@ -153,6 +167,37 @@ public:
 	TArray<FInoNeuTtsVoice> ListBundledVoices();
 
 private:
+	/**
+	 * State for an in-flight LoadModelAsync — survives the download
+	 * chain via TSharedRef capture in the helper methods below.
+	 * Lifetime: created at LoadModelAsync's start, destroyed when
+	 * FinishLoadJob fires on the game thread.
+	 */
+	struct FLoadJob
+	{
+		FInoNeuTtsConfig Config;
+		FString GgufPath;
+		FString OnnxPath;
+		FString GgufUrl;
+		FString OnnxUrl;
+		FString GgufFileName;     // for progress display
+		FString OnnxFileName;
+		FString GgufSha;
+		FString OnnxSha;
+		int64 GgufSize = 0;
+		int64 OnnxSize = 0;
+		FInoNeuTtsLoadedDelegate OnLoaded;
+	};
+
+	/** Sequential async chain. Each step calls the next on success or FinishLoadJob on error. */
+	void EnsureBackboneDownloaded(TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
+	void EnsureDecoderDownloaded (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
+	void DispatchModelLoad       (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
+	void FinishLoadJob           (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job, bool bSuccess, FString Error);
+
+	/** Bridge to the multicast progress delegate; game thread. */
+	void BroadcastDownloadProgress(const FString& FileName, int64 BytesReceived, int64 TotalBytes);
+
 	/** Game-thread-only: dispatched delegate after model load. */
 	void HandleModelLoaded(
 		TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> NewRunner,

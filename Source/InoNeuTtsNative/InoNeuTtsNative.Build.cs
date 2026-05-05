@@ -64,6 +64,13 @@ public class InoNeuTtsNative : ModuleRules
 			"Projects",               // IPluginManager — used by the subsystem
 			                          // to resolve the plugin's base directory
 			                          // for model + voice path lookup.
+			"DeveloperSettings",      // UDeveloperSettings — base class for
+			                          // UInoNeuTtsNativeSettings (Project
+			                          // Settings page driving model selection
+			                          // + download URLs).
+			"HTTP",                   // FHttpModule — used by the download
+			                          // flow that fetches missing model files
+			                          // from URLs configured in settings.
 		});
 
 		DynamicallyLoadedModuleNames.AddRange(new string[]

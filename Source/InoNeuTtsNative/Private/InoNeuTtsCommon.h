@@ -8,23 +8,29 @@
 namespace InoNeuTtsNative
 {
 	/**
-	 * Resolve the path to the GGUF backbone for the given variant.
-	 * Returns an empty string if the InoAgents plugin can't be located.
+	 * Resolve the local on-disk path for a NeuTTS backbone (Nano or Air).
 	 *
-	 * Layout (matches Plugins/InoAgents/NeuTTS/models/ as downloaded):
-	 *   NeuTTS/models/nano-q4-gguf/neutts-nano-Q4_0.gguf
-	 *   NeuTTS/models/air-q4-gguf/neutts-air-Q4_0.gguf
+	 * Looks up the matching entry in UInoNeuTtsNativeSettings (NanoModels
+	 * for Variant=Nano, AirModels for Variant=Air). If ModelName is empty
+	 * the first entry in the array is used; otherwise the entry whose
+	 * DisplayName matches case-insensitively.
+	 *
+	 * Returns:
+	 *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>
+	 * if an entry exists; empty string otherwise.
+	 *
+	 * Does NOT check whether the file is on disk — callers that depend
+	 * on the file (the runner) should ensure it exists or download it
+	 * first.
 	 */
-	FString ResolveGgufPath(EInoNeuTtsVariant Variant);
+	FString ResolveGgufPath(EInoNeuTtsVariant Variant, const FString& ModelName = FString());
 
 	/**
-	 * Resolve the path to the NeuCodec ONNX decoder. The same decoder is
-	 * used for both Nano and Air — only the LLM backbone differs.
-	 *
-	 * Layout: NeuTTS/models/onnx-decoder-int8/model.onnx
+	 * Resolve the local on-disk path for the NeuCodec ONNX decoder.
+	 * Same shape as ResolveGgufPath — looks up DecoderModels in settings.
 	 */
-	FString ResolveOnnxDecoderPath();
+	FString ResolveOnnxDecoderPath(const FString& ModelName = FString());
 
-	/** Convenience: human-readable variant name for logging. */
+	/** Human-readable variant name for logging. */
 	FString VariantToString(EInoNeuTtsVariant Variant);
 }
