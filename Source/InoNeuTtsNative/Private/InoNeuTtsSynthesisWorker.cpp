@@ -463,9 +463,15 @@ namespace InoNeuTtsNative
 		}
 
 		// ---- 4. Prefill: cached fast-path or full ----
+		// Per-stage timing: track prefill wall time and how many tokens
+		// were ACTUALLY decoded (full prompt vs suffix-only) so the final
+		// summary log can report a meaningful prefill tok/s.
 		llama_memory_t Mem = Api.llama_get_memory(Ctx);
 
-		bool bUsedCache = false;
+		bool  bUsedCache       = false;
+		int32 PrefilledTokens  = 0;
+		const double PrefillT0 = FPlatformTime::Seconds();
+
 		if (bHaveCacheCandidate)
 		{
 			// Cross-check the per-call full-prompt's leading tokens match
@@ -501,10 +507,8 @@ namespace InoNeuTtsNative
 						PromptTokens.GetData() + NPrefix, SuffixCount);
 					if (Api.llama_decode(Ctx, SuffixBatch) == 0)
 					{
-						bUsedCache = true;
-						UE_LOG(LogInoNeuTts, Log,
-							TEXT("Synth: prompt=%d tokens (cached prefix=%d, suffix=%d), max_new=%d"),
-							PromptTokens.Num(), NPrefix, SuffixCount, Options.MaxNewTokens);
+						bUsedCache      = true;
+						PrefilledTokens = SuffixCount;
 					}
 					else
 					{
@@ -531,10 +535,6 @@ namespace InoNeuTtsNative
 
 		if (!bUsedCache)
 		{
-			UE_LOG(LogInoNeuTts, Log,
-				TEXT("Synth: prompt=%d tokens, n_ctx=%u, max_new=%d"),
-				PromptTokens.Num(), NCtx, Options.MaxNewTokens);
-
 			Api.llama_memory_clear(Mem, /*data*/ true);
 
 			struct llama_batch PrefillBatch =
@@ -543,7 +543,13 @@ namespace InoNeuTtsNative
 			{
 				return MakeFailure(TEXT("llama_decode (prefill) failed."));
 			}
+			PrefilledTokens = PromptTokens.Num();
 		}
+
+		const double PrefillSec  = FPlatformTime::Seconds() - PrefillT0;
+		const double PrefillTps  = PrefillSec > 0.0
+			? PrefilledTokens / PrefillSec
+			: 0.0;
 
 		// ---- 5. AR generation loop ----
 		struct llama_sampler* Chain = BuildSamplerChain(Api, Options);
@@ -556,6 +562,8 @@ namespace InoNeuTtsNative
 		// Generated text grows roughly 16 chars per speech token; pre-reserve.
 		GeneratedText.Reserve(Options.MaxNewTokens * 16);
 
+		const double ArT0 = FPlatformTime::Seconds();
+
 		bool bCancelled = false;
 		const int32 GeneratedCount = RunArLoop(
 			Api, Ctx, Vocab,
@@ -566,6 +574,11 @@ namespace InoNeuTtsNative
 			CancelFlag,
 			GeneratedText,
 			bCancelled);
+
+		const double ArSec = FPlatformTime::Seconds() - ArT0;
+		const double ArTps = ArSec > 0.0
+			? GeneratedCount / ArSec
+			: 0.0;
 
 		if (bCancelled)
 		{
@@ -591,16 +604,14 @@ namespace InoNeuTtsNative
 				GeneratedText.Len()));
 		}
 
-		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Synth: generated %d tokens, parsed %d speech ids"),
-			GeneratedCount, SpeechIds.Num());
-
 		// ---- 7. ONNX decode ----
 		FInoOnnxSession* Decoder = Runner.GetDecoder();
 		if (Decoder == nullptr)
 		{
 			return MakeFailure(TEXT("Runner has no NeuCodec decoder session."));
 		}
+
+		const double DecodeT0 = FPlatformTime::Seconds();
 
 		TArray<FInoOnnxTensor> Outputs;
 		FString DecodeError;
@@ -609,6 +620,8 @@ namespace InoNeuTtsNative
 			return MakeFailure(FString::Printf(
 				TEXT("NeuCodec decode failed: %s"), *DecodeError));
 		}
+
+		const double DecodeSec = FPlatformTime::Seconds() - DecodeT0;
 
 		// ---- 8. Float -> int16 PCM bytes (read straight from OrtTensor) ----
 		const float* AudioFloat = Outputs[0].GetData<float>();
@@ -629,11 +642,35 @@ namespace InoNeuTtsNative
 			? (Result.GenerationTimeSeconds / Result.DurationSeconds)
 			: 0.0f;
 
+		// "ms per second of audio" — common decoder benchmark; lower is better.
+		const double DecodeMsPerSecAudio = (Result.DurationSeconds > 0.0f)
+			? (DecodeSec * 1000.0) / Result.DurationSeconds
+			: 0.0;
+
+		// Single multi-line summary block — easier to grep than per-stage
+		// scattered log lines, and gives the user everything they need to
+		// see what's actually slow.
 		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Synth ok: %.2f s audio in %.2f s (RTF %.2f)"),
+			TEXT("Synth ok: %.2f s audio in %.2f s (RTF %.2fx)"),
 			Result.DurationSeconds,
 			Result.GenerationTimeSeconds,
 			Result.RealTimeFactor);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  prefill   %s   %4d toks  %6.2f s  %7.1f tok/s%s"),
+			bUsedCache ? TEXT("(cached)") : TEXT("(full)  "),
+			PrefilledTokens,
+			PrefillSec,
+			PrefillTps,
+			bUsedCache
+				? *FString::Printf(TEXT("  [skipped %d cached prefix toks]"),
+					PromptTokens.Num() - PrefilledTokens)
+				: TEXT(""));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  AR        %4d toks  %6.2f s  %7.1f tok/s"),
+			GeneratedCount, ArSec, ArTps);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  decode    %4d codes -> %d samples  %6.2f s  %5.1f ms/s_audio"),
+			SpeechIds.Num(), NumSamples, DecodeSec, DecodeMsPerSecAudio);
 
 		return Result;
 	}
@@ -738,7 +775,10 @@ namespace InoNeuTtsNative
 
 		llama_memory_t Mem = Api.llama_get_memory(Ctx);
 
-		bool bUsedCache = false;
+		bool  bUsedCache       = false;
+		int32 PrefilledTokens  = 0;
+		const double PrefillT0 = FPlatformTime::Seconds();
+
 		if (bHaveCacheCandidate)
 		{
 			const int32 NPrefix = Cache->PrefixTokens.Num();
@@ -768,11 +808,8 @@ namespace InoNeuTtsNative
 						PromptTokens.GetData() + NPrefix, SuffixCount);
 					if (Api.llama_decode(Ctx, SuffixBatch) == 0)
 					{
-						bUsedCache = true;
-						UE_LOG(LogInoNeuTts, Log,
-							TEXT("Stream synth: prompt=%d tokens (cached prefix=%d, suffix=%d), max_new=%d, chunk=%d"),
-							PromptTokens.Num(), NPrefix, SuffixCount,
-							Options.MaxNewTokens, ChunkTokens);
+						bUsedCache      = true;
+						PrefilledTokens = SuffixCount;
 					}
 					else
 					{
@@ -799,10 +836,6 @@ namespace InoNeuTtsNative
 
 		if (!bUsedCache)
 		{
-			UE_LOG(LogInoNeuTts, Log,
-				TEXT("Stream synth: prompt=%d tokens, n_ctx=%u, max_new=%d, chunk=%d"),
-				PromptTokens.Num(), NCtx, Options.MaxNewTokens, ChunkTokens);
-
 			Api.llama_memory_clear(Mem, /*data*/ true);
 
 			struct llama_batch PrefillBatch =
@@ -811,7 +844,13 @@ namespace InoNeuTtsNative
 			{
 				return MakeFailure(TEXT("llama_decode (prefill) failed."));
 			}
+			PrefilledTokens = PromptTokens.Num();
 		}
+
+		const double PrefillSec = FPlatformTime::Seconds() - PrefillT0;
+		const double PrefillTps = PrefillSec > 0.0
+			? PrefilledTokens / PrefillSec
+			: 0.0;
 
 		struct llama_sampler* Chain = BuildSamplerChain(Api, Options);
 		ON_SCOPE_EXIT
@@ -849,6 +888,15 @@ namespace InoNeuTtsNative
 		FString GenText;  // buffer for parsing token pieces (kept small per step)
 		int32 NewTokensGenerated = 0;
 		const int32 MinNewTokensGuard = FMath::Max(0, Options.MinNewTokens);
+
+		// Per-stage accumulators for the final summary log. AR time is
+		// "AR sampler + per-step llama_decode" only; chunk decode time
+		// (interleaved into the loop) is tracked separately.
+		const double ArT0          = FPlatformTime::Seconds();
+		double       DecoderSecAcc = 0.0;
+		int32        DecoderRuns   = 0;
+		int32        DecoderCodesAcc   = 0;
+		int32        DecoderSamplesAcc = 0;
 
 		for (int32 Iter = 0; Iter < Options.MaxNewTokens; ++Iter)
 		{
@@ -915,11 +963,16 @@ namespace InoNeuTtsNative
 
 			TArray<FInoOnnxTensor> ChunkOutputs;
 			FString DecodeErr;
+			const double ChunkDecodeT0 = FPlatformTime::Seconds();
 			if (!DecodeSpeechTokens(*Decoder, Window, ChunkOutputs, DecodeErr))
 			{
 				return MakeFailure(FString::Printf(
 					TEXT("NeuCodec decode failed mid-stream: %s"), *DecodeErr));
 			}
+			DecoderSecAcc += FPlatformTime::Seconds() - ChunkDecodeT0;
+			DecoderRuns   += 1;
+			DecoderCodesAcc   += Window.Num();
+			DecoderSamplesAcc += static_cast<int32>(ChunkOutputs[0].GetElementCount());
 
 			// Crop out the non-context middle: skip the lookback prefix,
 			// keep ChunkTokens + 2*overlap frames worth of samples. Reads
@@ -959,6 +1012,12 @@ namespace InoNeuTtsNative
 			return R;
 		}
 
+		// AR-loop wall clock — captured here so the final-chunk decode
+		// (next block) doesn't get billed to AR.
+		const double ArSec = FPlatformTime::Seconds() - ArT0
+			- DecoderSecAcc; // strip out interleaved decoder time
+		const double ArTps = ArSec > 0.0 ? NewTokensGenerated / ArSec : 0.0;
+
 		// ----- Final irregular chunk (remaining tokens past the last emit) -----
 		if (SpeechIdCache.Num() > NDecodedTokens)
 		{
@@ -979,16 +1038,22 @@ namespace InoNeuTtsNative
 
 			TArray<FInoOnnxTensor> ChunkOutputs;
 			FString DecodeErr;
+			const double FinalDecodeT0 = FPlatformTime::Seconds();
 			if (!DecodeSpeechTokens(*Decoder, Window, ChunkOutputs, DecodeErr))
 			{
 				return MakeFailure(FString::Printf(
 					TEXT("NeuCodec decode failed on final chunk: %s"), *DecodeErr));
 			}
+			DecoderSecAcc += FPlatformTime::Seconds() - FinalDecodeT0;
+			DecoderRuns   += 1;
+			DecoderCodesAcc   += Window.Num();
 
 			const float* ChunkAudio        = ChunkOutputs[0].GetData<float>();
 			const int32  NumChunkSamples   =
 				static_cast<int32>(ChunkOutputs[0].GetElementCount());
 			const int32  NumCropped        = FMath::Max(0, NumChunkSamples - SampleStart);
+
+			DecoderSamplesAcc += NumChunkSamples;
 
 			TArray<float> Cropped;
 			Cropped.Append(ChunkAudio + SampleStart, NumCropped);
@@ -1024,12 +1089,35 @@ namespace InoNeuTtsNative
 			? (Result.GenerationTimeSeconds / Result.DurationSeconds)
 			: 0.0f;
 
+		const double DecoderMsPerSecAudio = (Result.DurationSeconds > 0.0f)
+			? (DecoderSecAcc * 1000.0) / Result.DurationSeconds
+			: 0.0;
+
+		// Multi-line summary, same shape as the one-shot path so logs are
+		// easy to compare side-by-side.
 		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Stream synth ok: %.2f s audio, %d chunks, %.2f s wall (RTF %.2f)"),
+			TEXT("Stream synth ok: %.2f s audio, %d chunks, %.2f s wall (RTF %.2fx)"),
 			Result.DurationSeconds,
 			AudioCache.Num(),
 			Result.GenerationTimeSeconds,
 			Result.RealTimeFactor);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  prefill   %s   %4d toks  %6.2f s  %7.1f tok/s%s"),
+			bUsedCache ? TEXT("(cached)") : TEXT("(full)  "),
+			PrefilledTokens,
+			PrefillSec,
+			PrefillTps,
+			bUsedCache
+				? *FString::Printf(TEXT("  [skipped %d cached prefix toks]"),
+					PromptTokens.Num() - PrefilledTokens)
+				: TEXT(""));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  AR        %4d toks  %6.2f s  %7.1f tok/s  (decode-time excluded)"),
+			NewTokensGenerated, ArSec, ArTps);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  decode    %d runs  %4d codes -> %d samples  %6.2f s  %5.1f ms/s_audio"),
+			DecoderRuns, DecoderCodesAcc, DecoderSamplesAcc,
+			DecoderSecAcc, DecoderMsPerSecAudio);
 
 		return Result;
 	}

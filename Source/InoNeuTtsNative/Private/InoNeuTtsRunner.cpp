@@ -18,6 +18,72 @@ namespace InoNeuTtsNative
 {
 	namespace
 	{
+		/** Human-readable name for an EInoLlamaKvDtype (logs only). */
+		const TCHAR* KvDtypeName(EInoLlamaKvDtype D)
+		{
+			switch (D)
+			{
+				case EInoLlamaKvDtype::F16:  return TEXT("F16");
+				case EInoLlamaKvDtype::F32:  return TEXT("F32");
+				case EInoLlamaKvDtype::Q8_0: return TEXT("Q8_0");
+				case EInoLlamaKvDtype::Q4_0: return TEXT("Q4_0");
+			}
+			return TEXT("?");
+		}
+
+		/** Human-readable name for an EInoLlamaFlashAttnType (logs only). */
+		const TCHAR* FlashAttnName(EInoLlamaFlashAttnType F)
+		{
+			switch (F)
+			{
+				case EInoLlamaFlashAttnType::Auto:     return TEXT("Auto");
+				case EInoLlamaFlashAttnType::Disabled: return TEXT("Off");
+				case EInoLlamaFlashAttnType::Enabled:  return TEXT("On");
+			}
+			return TEXT("?");
+		}
+
+		/** Human-readable name for an EInoOnnxProvider (logs only). */
+		const TCHAR* OnnxProviderName(EInoOnnxProvider P)
+		{
+			switch (P)
+			{
+				case EInoOnnxProvider::Cpu:       return TEXT("CPU");
+				case EInoOnnxProvider::Xnnpack:   return TEXT("XNNPACK");
+				case EInoOnnxProvider::Nnapi:     return TEXT("NNAPI");
+				case EInoOnnxProvider::WebGpu:    return TEXT("WebGPU");
+				case EInoOnnxProvider::DirectMl:  return TEXT("DirectML");
+				case EInoOnnxProvider::Cuda:      return TEXT("CUDA");
+				case EInoOnnxProvider::TensorRt:  return TEXT("TensorRT");
+			}
+			return TEXT("?");
+		}
+
+		/** Comma-joined list of registered ggml backends — "CPU, Vulkan", etc. */
+		FString RegisteredGgmlBackends(const InoAgents::LlamaCpp::FLlamaCppApi& Api)
+		{
+			if (Api.ggml_backend_reg_count == nullptr ||
+				Api.ggml_backend_reg_get   == nullptr ||
+				Api.ggml_backend_reg_name  == nullptr)
+			{
+				return TEXT("?");
+			}
+			const size_t N = Api.ggml_backend_reg_count();
+			TArray<FString> Names;
+			Names.Reserve((int32)N);
+			for (size_t i = 0; i < N; ++i)
+			{
+				if (struct ggml_backend_reg* Reg = Api.ggml_backend_reg_get(i))
+				{
+					if (const char* Name = Api.ggml_backend_reg_name(Reg))
+					{
+						Names.Add(FString(UTF8_TO_TCHAR(Name)));
+					}
+				}
+			}
+			return FString::Join(Names, TEXT(", "));
+		}
+
 		/**
 		 * Look up the token id of a literal special-token string by
 		 * tokenizing it with parse_special=true. NeuTTS's prompt template
@@ -199,9 +265,15 @@ namespace InoNeuTtsNative
 
 			if (DummyInput.IsValid())
 			{
+				const double DecoderWarmT0 = FPlatformTime::Seconds();
 				TArray<FInoOnnxTensor> DummyInputs;
 				DummyInputs.Add(MoveTemp(DummyInput));
 				Runner->Decoder->Warmup(DummyInputs);
+				const double DecoderWarmMs =
+					(FPlatformTime::Seconds() - DecoderWarmT0) * 1000.0;
+				UE_LOG(LogInoNeuTts, Log,
+					TEXT("Decoder warmup: %.2f ms (%d dummy codes -> ONNX Run)"),
+					DecoderWarmMs, DummyCodes.Num());
 			}
 		}
 
@@ -237,10 +309,12 @@ namespace InoNeuTtsNative
 					Api->llama_batch_get_one(DummyTokens, 1);
 				if (Api->llama_decode(Runner->Context, DummyBatch) == 0)
 				{
-					const double WarmupMs =
-						(FPlatformTime::Seconds() - WarmupT0) * 1000.0;
+					const double WarmupSec = FPlatformTime::Seconds() - WarmupT0;
+					const double TokPerSec = WarmupSec > 0.0 ? 1.0 / WarmupSec : 0.0;
 					UE_LOG(LogInoNeuTts, Log,
-						TEXT("Backbone warmup: %.2f ms"), WarmupMs);
+						TEXT("Backbone warmup: 1 tok in %.2f ms (%.0f tok/s @ first decode — ")
+						TEXT("includes kernel JIT + KV alloc on Vulkan)"),
+						WarmupSec * 1000.0, TokPerSec);
 				}
 				// Restore an empty KV state so the first real synth (or
 				// PrimeVoice) starts clean.
@@ -248,13 +322,92 @@ namespace InoNeuTtsNative
 			}
 		}
 
+		// ---- Runner-ready summary (single multi-line block) -----------
+		// Pulls the EFFECTIVE values from the loaded model + context so
+		// the log reflects what's actually running, not what was requested.
+		// Anything not exposed by the vtable (e.g. older llama.dll without
+		// the diagnostic getters) shows as "?".
+		const uint32 EffNCtx       = Api->llama_n_ctx(Runner->Context);
+		const int32  EffNThreads   = (Api->llama_n_threads != nullptr)
+			? Api->llama_n_threads(Runner->Context) : -1;
+		const int32  EffNThreadsBp = (Api->llama_n_threads_batch != nullptr)
+			? Api->llama_n_threads_batch(Runner->Context) : -1;
+		const uint64 ModelParams   = (Api->llama_model_n_params != nullptr)
+			? Api->llama_model_n_params(Runner->Model) : 0;
+		const uint64 ModelBytes    = (Api->llama_model_size != nullptr)
+			? Api->llama_model_size(Runner->Model) : 0;
+		const int32  ModelLayers   = (Api->llama_model_n_layer != nullptr)
+			? Api->llama_model_n_layer(Runner->Model) : -1;
+		const bool   bGpuBuild     = (Api->llama_supports_gpu_offload != nullptr)
+			? Api->llama_supports_gpu_offload() : false;
+		const FString GgmlBackends = RegisteredGgmlBackends(*Api);
+
+		// "Effective" GPU offload — clamp to layer count when known.
+		const int32 ReqGpuLayers   = Config.Backbone.NumGpuLayers;
+		const int32 EffGpuLayers   = (ModelLayers > 0)
+			? FMath::Min(ReqGpuLayers, ModelLayers)
+			: ReqGpuLayers;
+
+		// Decoder providers list — flatten the EInoOnnxProvider array to
+		// a "DirectMl, Cpu" string.
+		FString DecoderProviders;
+		if (Runner->Decoder.IsValid())
+		{
+			const TArray<EInoOnnxProvider>& Active =
+				Runner->Decoder->GetActiveProviders();
+			TArray<FString> Names;
+			Names.Reserve(Active.Num());
+			for (EInoOnnxProvider P : Active)
+			{
+				Names.Add(OnnxProviderName(P));
+			}
+			DecoderProviders = (Names.Num() > 0)
+				? FString::Join(Names, TEXT(", "))
+				: TEXT("(none)");
+		}
+
 		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Runner ready. n_ctx=%u stop=%d decoder I/O=%d->%d desc='%s'"),
-			Api->llama_n_ctx(Runner->Context),
-			Runner->StopTokenId,
+			TEXT("====================================================="));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("NeuTTS Runner ready"));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  Backbone:    '%s'"), *Runner->ModelDesc);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("    params=%.0fM  size=%.1f MB  layers=%d  stop_token=%d"),
+			ModelParams / 1.0e6,
+			ModelBytes / (1024.0 * 1024.0),
+			ModelLayers,
+			Runner->StopTokenId);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("    n_ctx=%u  threads=%d (batch=%d)  flash_attn=%s  ")
+			TEXT("kv_k=%s  kv_v=%s  offload_kqv=%s"),
+			EffNCtx,
+			EffNThreads,
+			EffNThreadsBp,
+			FlashAttnName(Config.BackboneContext.FlashAttnType),
+			KvDtypeName(Config.BackboneContext.KvDtypeK),
+			KvDtypeName(Config.BackboneContext.KvDtypeV),
+			Config.BackboneContext.bOffloadKQV ? TEXT("yes") : TEXT("no"));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("    gpu_layers=%d (requested=%d, build_supports_gpu=%s)"),
+			EffGpuLayers, ReqGpuLayers,
+			bGpuBuild ? TEXT("yes") : TEXT("no"));
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("    ggml_backends_registered: [%s]"), *GgmlBackends);
+		if (ReqGpuLayers > 0 && !bGpuBuild)
+		{
+			UE_LOG(LogInoNeuTts, Warning,
+				TEXT("  -> NumGpuLayers=%d requested but this llama build has NO GPU backend; ")
+				TEXT("inference will run on CPU."),
+				ReqGpuLayers);
+		}
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("  Decoder:     I/O=%d->%d  active_providers=[%s]"),
 			Runner->Decoder->GetInputCount(),
 			Runner->Decoder->GetOutputCount(),
-			*Runner->ModelDesc);
+			*DecoderProviders);
+		UE_LOG(LogInoNeuTts, Log,
+			TEXT("====================================================="));
 
 		return Runner;
 	}
