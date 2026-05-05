@@ -121,7 +121,7 @@ namespace InoNeuTtsNative
 		TArray<FString> Filenames;
 		IFileManager::Get().FindFiles(
 			Filenames,
-			*FPaths::Combine(Dir, TEXT("*.nvoice.json")),
+			*FPaths::Combine(Dir, TEXT("*.inv")),
 			/*bFiles*/ true,
 			/*bDirectories*/ false);
 

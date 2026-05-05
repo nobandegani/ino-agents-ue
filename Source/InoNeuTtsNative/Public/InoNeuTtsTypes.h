@@ -21,36 +21,42 @@
 #include "InoNeuTtsTypes.generated.h"
 
 /**
- * Pre-encoded reference voice for cloning.
+ * Internal C++ representation of a NeuTTS reference voice — what the
+ * synth pipeline (FInoNeuTtsRunner::PrimeVoice, RunSynthesis,
+ * RunStreamingSynthesis) takes as input.
  *
- * Produced offline by Plugins/InoAgents/NeuTTS/scripts/build-voices.py
- * from Neuphonic's vendor/samples/*.{pt,txt}. The runtime loads these
- * via the voice registry, then phonemizes RefText (lazy) into RefPhones
- * on first synth.
+ * NOT exposed to Blueprint. Blueprint code references voices via
+ * UInoNeuTtsVoiceAsset (the .inv UAsset wrapper); the asset's
+ * ToRuntimeVoice() builds one of these for the subsystem's internal
+ * voice-set path.
+ *
+ * The fields stay UPROPERTY (without Blueprint tags) so UE's GC /
+ * reflection / move semantics work correctly when the runner caches
+ * a copy on FInoNeuTtsVoiceCache.
  */
-USTRUCT(BlueprintType)
+USTRUCT()
 struct INONEUTTSNATIVE_API FInoNeuTtsVoice
 {
 	GENERATED_BODY()
 
-	/** Voice identifier, e.g. "jo", "dave". Set from the .nvoice.json file. */
-	UPROPERTY(BlueprintReadWrite, Category = "InoNeuTts")
+	/** Voice identifier, e.g. "jo", "dave". Used as the cache key. */
+	UPROPERTY()
 	FString Name;
 
 	/** eSpeak language code, e.g. "en-us", "de", "fr-fr", "es". */
-	UPROPERTY(BlueprintReadWrite, Category = "InoNeuTts")
+	UPROPERTY()
 	FString Language;
 
 	/** Transcript of the source WAV. Used as the prompt's reference text. */
-	UPROPERTY(BlueprintReadWrite, Category = "InoNeuTts")
+	UPROPERTY()
 	FString RefText;
 
 	/**
-	 * IPA phonemization of RefText. Empty after voice load; filled lazily
-	 * on first synth via InoSpeakNG and cached back into the voice. May
-	 * also be pre-baked by an offline script for hot-path performance.
+	 * IPA phonemization of RefText. Empty = phonemize lazily via
+	 * InoSpeakNG on prime. Pre-baked by build-voices.py for hot-path
+	 * performance when present.
 	 */
-	UPROPERTY(BlueprintReadWrite, Category = "InoNeuTts")
+	UPROPERTY()
 	FString RefPhones;
 
 	/**
@@ -61,8 +67,8 @@ struct INONEUTTSNATIVE_API FInoNeuTtsVoice
 	UPROPERTY()
 	TArray<int32> RefCodes;
 
-	/** True iff this voice was loaded from a valid .nvoice.json file. */
-	UPROPERTY(BlueprintReadOnly, Category = "InoNeuTts")
+	/** True iff this voice has the minimum data needed for synthesis. */
+	UPROPERTY()
 	bool bIsValid = false;
 };
 

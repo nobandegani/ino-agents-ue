@@ -124,12 +124,12 @@ public:
 
 	/**
 	 * Build the lower-level runtime struct used by the synth pipeline.
-	 * Cheap (TArray + FString copies); call freely. Use this when you
-	 * want to drop down to APIs that take an FInoNeuTtsVoice directly,
-	 * but prefer the SetActiveVoiceFromAsset overload on the subsystem
-	 * for the common case.
+	 * C++-only — FInoNeuTtsVoice is not BlueprintType. Blueprint code
+	 * should hand the asset to UInoNeuTtsSubsystem::SetActiveVoiceAsync
+	 * directly; that overload calls this internally.
+	 *
+	 * Cheap (TArray + FString copies); call freely from C++.
 	 */
-	UFUNCTION(BlueprintPure, Category = "Voice")
 	FInoNeuTtsVoice ToRuntimeVoice() const;
 
 	// ---- UObject ----

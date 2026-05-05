@@ -23,11 +23,13 @@ namespace InoNeuTtsNative
  * Lifecycle (typical):
  *   1. LoadModelAsync(Config, OnLoaded, OnDownloadProgress)  // off-thread,
  *                                                             // fires on game thread
- *   2. ListBundledVoices() / LoadVoiceFromFile  // build / pick a voice
- *   3. SetActiveVoiceAsync(Voice, OnReady)      // primes voice cache
- *   4. SynthesizeAsync(Text, Options, OnComplete)  // (any number of times)
- *   5. (optionally CancelSynthesis() to abort an in-flight call)
- *   6. UnloadModel()                            // releases GGUF + ONNX
+ *   2. SetActiveVoiceAsync(VoiceAsset, OnReady)               // primes voice cache;
+ *                                                             // VoiceAsset is a
+ *                                                             // UInoNeuTtsVoiceAsset
+ *                                                             // imported from .inv
+ *   3. SynthesizeAsync(Text, Options, OnComplete)             // (any number of times)
+ *   4. (optionally CancelSynthesis() to abort an in-flight call)
+ *   5. UnloadModel()                            // releases GGUF + ONNX
  *
  * Threading invariants:
  *   - All public methods MUST be called from the game thread.
@@ -155,48 +157,25 @@ public:
 	/**
 	 * Pre-cache a voice for synthesis. Tokenizes + prefills the fixed
 	 * prompt prefix once and snapshots the post-prefix KV state, so
-	 * every subsequent voice-less SynthesizeAsync call skips the prefix
-	 * prefill (~5–10% of total synth time).
+	 * every subsequent SynthesizeAsync call skips the prefix prefill
+	 * (~5–10% of total synth time).
 	 *
 	 * Dispatches the prefill + snapshot to a thread pool worker
 	 * (200–600 ms depending on the model). Fires OnReady on the game
 	 * thread when done.
 	 *
-	 * After OnReady fires with bSuccess=true:
-	 *   - The voice-less SynthesizeAsync / SynthesizeStreamAsync
-	 *     overloads will use this voice automatically.
-	 *   - The per-voice overloads still work; if you pass the same
-	 *     voice, they hit the cache; if you pass a different one,
-	 *     they fall back to a full prefill (the cache stays primed
-	 *     for the next call with the matching voice).
-	 *
-	 * Errors immediately if no model is loaded or a previous priming /
-	 * synth is still in flight.
+	 * Errors fast (via OnReady) if VoiceAsset is null, its IsUsable()
+	 * check fails (no RefCodes / no Name / no Language), no model is
+	 * loaded, or a previous priming / synth is still in flight.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void SetActiveVoiceAsync(
-		const FInoNeuTtsVoice& Voice,
-		const FInoNeuTtsVoiceReadyDelegate& OnReady);
-
-	/**
-	 * Convenience overload that takes a UInoNeuTtsVoiceAsset directly —
-	 * the typical path for Blueprint code that references a voice as an
-	 * imported `.inv` UAsset. Internally calls
-	 * UInoNeuTtsVoiceAsset::ToRuntimeVoice() and routes through the
-	 * SetActiveVoiceAsync above.
-	 *
-	 * Errors fast (via OnReady) if VoiceAsset is null or its IsUsable()
-	 * check fails (no RefCodes / no Name / no Language).
-	 */
-	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
-		meta = (DisplayName = "Set Active Voice From Asset (Async)"))
-	void SetActiveVoiceFromAssetAsync(
 		class UInoNeuTtsVoiceAsset* VoiceAsset,
 		const FInoNeuTtsVoiceReadyDelegate& OnReady);
 
 	/**
-	 * Drop the cached active voice. Subsequent voice-less SynthesizeAsync
-	 * calls will fail until a new voice is set. Cheap; no LM state changes.
+	 * Drop the cached active voice. Subsequent SynthesizeAsync calls
+	 * will fail until a new voice is set. Cheap; no LM state changes.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void ClearActiveVoice();
@@ -255,22 +234,6 @@ public:
 	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
 	bool IsSynthInFlight() const { return bSynthInFlight; }
 
-	// ---- Voice loading ----
-
-	/**
-	 * Load a single .nvoice.json into a voice struct. Returns false
-	 * with OutVoice's bIsValid=false on any error.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
-	bool LoadVoiceFromFile(const FString& FilePath, FInoNeuTtsVoice& OutVoice);
-
-	/**
-	 * Scan Plugins/InoAgents/NeuTTS/voices/ and return all parsed
-	 * voices. Cheap (only the JSON parses run; no model state).
-	 */
-	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
-	TArray<FInoNeuTtsVoice> ListBundledVoices();
-
 private:
 	/**
 	 * State for an in-flight LoadModelAsync — survives the download +
@@ -301,6 +264,16 @@ private:
 	void EnsureFilesDownloaded(TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
 	void DispatchModelLoad   (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job);
 	void FinishLoadJob       (TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job, bool bSuccess, FString Error);
+
+	/**
+	 * Internal voice-prime path. Public callers reach this via the
+	 * BlueprintCallable SetActiveVoiceAsync(VoiceAsset) overload, which
+	 * owns the asset-null / asset-IsUsable validation before calling
+	 * here. Kept private to keep the BP API single-shape (asset only).
+	 */
+	void SetActiveVoiceInternal(
+		const FInoNeuTtsVoice& Voice,
+		const FInoNeuTtsVoiceReadyDelegate& OnReady);
 
 	/** Game-thread-only: dispatched delegate after model load. */
 	void HandleModelLoaded(

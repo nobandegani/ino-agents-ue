@@ -20,7 +20,7 @@ namespace
 	 * End-to-end synth test:
 	 *   1. Load the configured backbone (first entry in Project Settings,
 	 *      or override via the optional second arg) on a worker thread
-	 *   2. Load voice from bundled .nvoice.json (default "jo")
+	 *   2. Load voice from bundled .inv source file (default "jo")
 	 *   3. Run synthesis with the supplied text (default "Hello there.")
 	 *   4. Save result as WAV under <Project>/Saved/InoNeuTtsTest.wav
 	 *   5. Log RTF + sample count
@@ -73,7 +73,7 @@ namespace
 		// Resolve voice file
 		const FString VoicesDir = FInoNeuTtsVoiceRegistry::GetBundledVoicesDir();
 		const FString VoicePath = FPaths::Combine(VoicesDir,
-			FString::Printf(TEXT("%s.nvoice.json"), *VoiceName));
+			FString::Printf(TEXT("%s.inv"), *VoiceName));
 
 		FInoNeuTtsVoice Voice;
 		if (!FInoNeuTtsVoiceRegistry::LoadFromFile(VoicePath, Voice))

@@ -505,7 +505,7 @@ void UInoNeuTtsSubsystem::ClearActiveVoice()
 	ActiveVoiceName.Reset();
 }
 
-void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
+void UInoNeuTtsSubsystem::SetActiveVoiceInternal(
 	const FInoNeuTtsVoice& Voice,
 	const FInoNeuTtsVoiceReadyDelegate& OnReady)
 {
@@ -538,7 +538,8 @@ void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
 	}
 	if (!Voice.bIsValid || Voice.RefCodes.Num() == 0)
 	{
-		FailFast(TEXT("Voice is invalid (load via LoadVoiceFromFile or ListBundledVoices)."));
+		FailFast(TEXT("Voice is invalid (asset has empty RefCodes / Name / Language). ")
+		         TEXT("Re-import the source .inv file."));
 		return;
 	}
 	if (Voice.Name.IsEmpty())
@@ -594,7 +595,7 @@ void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
 	});
 }
 
-void UInoNeuTtsSubsystem::SetActiveVoiceFromAssetAsync(
+void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
 	UInoNeuTtsVoiceAsset* VoiceAsset,
 	const FInoNeuTtsVoiceReadyDelegate& OnReady)
 {
@@ -627,10 +628,10 @@ void UInoNeuTtsSubsystem::SetActiveVoiceFromAssetAsync(
 		return;
 	}
 
-	// Drop down to the FInoNeuTtsVoice path so all the prime / cache
-	// machinery runs identically whether the caller passed a UAsset or
-	// built the struct themselves.
-	SetActiveVoiceAsync(VoiceAsset->ToRuntimeVoice(), OnReady);
+	// Convert to the internal FInoNeuTtsVoice struct and route through
+	// the C++-only prime / cache path. The asset is the only public
+	// entry point; this keeps the BP API single-shape.
+	SetActiveVoiceInternal(VoiceAsset->ToRuntimeVoice(), OnReady);
 }
 
 void UInoNeuTtsSubsystem::SynthesizeAsync(
@@ -825,14 +826,4 @@ void UInoNeuTtsSubsystem::CancelSynthesis()
 	{
 		CurrentCancelFlag->store(true);
 	}
-}
-
-bool UInoNeuTtsSubsystem::LoadVoiceFromFile(const FString& FilePath, FInoNeuTtsVoice& OutVoice)
-{
-	return InoNeuTtsNative::FInoNeuTtsVoiceRegistry::LoadFromFile(FilePath, OutVoice);
-}
-
-TArray<FInoNeuTtsVoice> UInoNeuTtsSubsystem::ListBundledVoices()
-{
-	return InoNeuTtsNative::FInoNeuTtsVoiceRegistry::LoadBundledVoices();
 }

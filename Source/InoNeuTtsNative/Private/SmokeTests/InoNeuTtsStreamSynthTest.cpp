@@ -73,7 +73,7 @@ namespace
 		// ---- voice + paths ----
 		const FString VoicesDir = FInoNeuTtsVoiceRegistry::GetBundledVoicesDir();
 		const FString VoicePath = FPaths::Combine(VoicesDir,
-			FString::Printf(TEXT("%s.nvoice.json"), *VoiceName));
+			FString::Printf(TEXT("%s.inv"), *VoiceName));
 
 		FInoNeuTtsVoice Voice;
 		if (!FInoNeuTtsVoiceRegistry::LoadFromFile(VoicePath, Voice))

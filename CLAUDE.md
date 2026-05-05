@@ -748,12 +748,11 @@ the game thread, all delegates fire on the game thread):
 - `bool IsModelLoaded() const`
 
 **Active voice**
-- `void SetActiveVoiceAsync(Voice, OnReady)` — phonemize +
-  prefill-snapshot the prefix off-thread. Required before synth.
-- `void SetActiveVoiceFromAssetAsync(VoiceAsset, OnReady)` —
-  convenience overload that takes a `UInoNeuTtsVoiceAsset*` (the
-  imported `.inv` UAsset). Calls `ToRuntimeVoice()` internally and
-  delegates to `SetActiveVoiceAsync` — same KV-snapshot caching.
+- `void SetActiveVoiceAsync(VoiceAsset, OnReady)` — takes a
+  `UInoNeuTtsVoiceAsset*` (the imported `.inv` UAsset). Phonemize +
+  prefill-snapshot the prefix off-thread; required before synth.
+  This is the only public voice-set API; `FInoNeuTtsVoice` is a
+  C++-only internal struct, not exposed to Blueprint.
 - `void ClearActiveVoice()`
 - `bool HasActiveVoice() const` / `FString GetActiveVoiceName() const`
 
@@ -765,11 +764,9 @@ the game thread, all delegates fire on the game thread):
   `bSuccess=false / ErrorMessage="Cancelled"`.
 - `bool IsSynthInFlight() const`
 
-**Voice loading**
-- `bool LoadVoiceFromFile(FilePath, OutVoice)` — parse one
-  `.nvoice.json` into a `FInoNeuTtsVoice`.
-- `TArray<FInoNeuTtsVoice> ListBundledVoices()` — scan
-  `Plugins/InoAgents/NeuTTS/voices/`.
+(Voice loading is asset-only — see "Active voice" above. The legacy
+`LoadVoiceFromFile` / `ListBundledVoices` Blueprint UFUNCTIONs were
+removed; voices flow through `UInoNeuTtsVoiceAsset` exclusively.)
 
 **Audio format helpers (Pure)**
 - `int32 GetSampleRate()` — 24000.
@@ -878,11 +875,18 @@ caching, same threading.
   (subclass of `UFactory` + `FReimportHandler`). Excluded from non-
   editor builds — the Factory + UnrealEd dependency don't ship.
 
-Five voice JSONs ship under `Plugins/InoAgents/NeuTTS/voices/`:
-`jo`, `dave`, `greta`, `juliette`, `mateo`. Rename to `.inv` and
-import to convert to UAssets; or keep using the legacy file-scan API
-(`UInoNeuTtsSubsystem::LoadVoiceFromFile` + `ListBundledVoices` —
-still supported for raw paths).
+Five voice `.inv` source files ship under
+`Plugins/InoAgents/NeuTTS/voices/`: `jo`, `dave`, `greta`,
+`juliette`, `mateo`. Drag any into a Content Browser folder to
+produce a `UInoNeuTtsVoiceAsset` UAsset; reference that asset
+from your character / level / UI Blueprint and pass it to
+`UInoNeuTtsSubsystem::SetActiveVoiceAsync(VoiceAsset, OnReady)`.
+
+The C++-only `FInoNeuTtsVoiceRegistry` helper (under `Private/`)
+still scans the `voices/` folder for raw `.inv` files — used by
+the smoke tests (`Ino.NeuTts.SynthTest`, `Ino.NeuTts.StreamSynthTest`)
+to load a voice without going through the editor's asset import.
+Not exposed to Blueprint.
 
 Voices are NOT in the model registry — they're lightweight artefacts
 (~10 KB each) that ship with the plugin. Future work: runtime voice
