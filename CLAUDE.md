@@ -236,10 +236,18 @@ Plugins/InoAgents/
 │   │           ├── InoChatterboxTurboNativeTest.cpp          ← Ino.Chatterbox.* (load/tokenizer/embed/AR/encoder/decoder/synth)
 │   │           ├── InoChatterboxTurboNativeSubsystemTest.{h,cpp}    ← Ino.Chatterbox.SubsystemSynthTest
 │   │           ├── InoChatterboxTurboNativeStreamSynthTest.{h,cpp}  ← Ino.Chatterbox.StreamSynthTest
-│   │           ├── InoNeuTtsNanoNativeDownloadTest.{h,cpp}     ← Ino.NeuTtsNanoNative.DownloadTest
-│   │           ├── InoNeuTtsNanoNativeSynthTest.{h,cpp}        ← Ino.NeuTtsNanoNative.SynthTest
 │   │           └── InoElevenLabsDialogueStreamTest.{h,cpp} ← Ino.ElevenLabsDialogueStreamTest
 │   └── (no Source/ThirdParty — sibling plugins own all third-party staging)
+│
+├── InoNeuTtsNative/                                ← NeuTTS Nano + Air sub-module (its
+│   │                                                 own Source/InoNeuTtsNative/ tree —
+│   │                                                 see "NeuTTS (Nano + Air)" section
+│   │                                                 below for the full layout)
+│   ├── Public/{InoNeuTtsTypes.h, InoNeuTtsSubsystem.h, InoNeuTtsSettings.h, ...}
+│   └── Private/{InoNeuTtsRunner, InoNeuTtsSynthesisWorker, InoNeuTtsSubsystem.cpp,
+│                InoNeuTtsCommon, InoNeuTtsPromptBuilder, InoNeuTtsVoiceRegistry,
+│                BP async-actions, SmokeTests/}
+│
 └── (no Binaries/ThirdParty — sibling plugins own all runtime binaries)
 ```
 
@@ -281,7 +289,7 @@ Private helpers under `Source/InoAgents/Private/Onnx/`:
 
 **Design principles worth preserving:**
 
-- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTurboNativeSubsystem`, `UInoNeuTtsNanoNativeSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
+- No Blueprint exposure in this layer. Per-model consumers (`UInoChatterboxTurboNativeSubsystem`, `UInoNeuTtsSubsystem`, future vision wrappers, etc.) add Blueprint-friendly APIs on top.
 - Sessions are thread-safe for `Run()` per ORT guarantees; FInoOnnxTensors are move-only to avoid surprise-cost deep clones on the LLM streaming hot path.
 - Exception-free — uses the C API (`onnxruntime_c_api.h`), not the C++ API (`onnxruntime_cxx_api.h` throws `Ort::Exception`). UE modules default `bEnableExceptions=false`; keeping the whole stack exception-free avoids per-module opt-ins.
 - Positional I/O ordering for `Run()`. A named-map variant would cost a hash lookup per inference which matters on AR token loops — callers who need names can wrap trivially at their own layer.
@@ -513,144 +521,570 @@ Confirmed upstream-side via a minimal Python repro using stock `onnxruntime-dire
 
 `FInoChatterboxTurboNativeRunner`'s streaming path keeps the language-model AR loop running on its own thread while a parallel `FInoChatterboxTurboNativeDecoderWorker` re-runs `conditional_decoder` on rolling chunks of generated speech tokens. The first chunk fires `OnAudioChunk` once `StreamChunkTokens` (default 20, ~0.6 s of audio) tokens are ready, dropping the typical first-audio latency from "max_new_tokens × per_token_ms + decoder_ms" to roughly "20 × per_token_ms + first decoder_ms" — under a second for short utterances on a modern desktop. The decoder worker exists because `conditional_decoder` is the most expensive single op in the pipeline; running it inline on the AR thread would stall token generation while audio rendered, defeating the latency win.
 
-## NeuTTS Nano TTS (the second on-device TTS — shipping)
+## NeuTTS (Nano + Air) — `InoNeuTtsNative` sub-module
 
-Neuphonic's NeuTTS Nano — a Qwen2-derived ~117M-parameter GGUF LLM that emits FSQ speech tokens, fed into NeuCodec's ONNX decoder to produce 24 kHz mono waveforms with voice cloning from a reference voice. Parallel to Chatterbox Turbo as a second on-device TTS with different voice character, smaller LM footprint (195 MB Q4 vs Chatterbox's ~510 MB q4f16), and different licensing (NeuTTS Open License 1.0, not Apache 2.0).
+Neuphonic's NeuTTS — a Qwen2-derived GGUF backbone (Nano ~120M / Air ~360M
+active params) that emits FSQ speech tokens, fed into NeuCodec's ONNX
+decoder to produce 24 kHz mono waveforms with voice cloning from a
+reference voice. Sub-module of the `InoAgents` plugin sitting alongside
+Chatterbox Turbo + ElevenLabs as a third TTS option, with different
+voice character, smaller LM footprint than Chatterbox, and different
+licensing (NeuTTS Open License 1.0, not Apache 2.0).
 
-This is the **first and currently only consumer of the llama.cpp runtime** in the plugin. It validates the llama.cpp integration with a real-world workload and establishes the architecture for any future GGUF-format consumer (more TTS models, Whisper/ASR, general small LLMs, etc).
+This is the **first and currently only consumer of the llama.cpp
+runtime** in the plugin. It validates the llama.cpp integration with a
+real-world workload and establishes the architecture for any future
+GGUF-format consumer (more TTS models, Whisper / ASR, general small
+LLMs, etc).
 
-### Canonical source (trust this first)
+### Canonical source — trust the vendor first
 
-- **Official Python reference**: [`neuphonic/neutts/neutts/neutts.py`](https://github.com/neuphonic/neutts/blob/main/neutts/neutts.py) — the inference loop we're porting (`_apply_chat_template`, `_infer_ggml`, `_decode`).
-- **Backbone model card**: [`neuphonic/neutts-nano-q4-gguf`](https://huggingface.co/neuphonic/neutts-nano-q4-gguf) — the 195 MB GGUF (`neutts-nano-Q4_0.gguf`).
-- **Codec decoder**: [`neuphonic/neucodec-onnx-decoder`](https://huggingface.co/neuphonic/neucodec-onnx-decoder) — the 783 MB `model.onnx` (fp32, single codebook, 50 Hz token rate, 24 kHz output).
-- **NeuCodec paper / encoder**: [`neuphonic/neucodec`](https://huggingface.co/neuphonic/neucodec) — PyTorch-only, used **offline** via the encoder script to produce reference-voice codes.
+The vendor's Python reference is checked into the repo as a git
+submodule for cross-checking against any C++ port:
+
+- **Vendor Python**: `Plugins/InoAgents/NeuTTS/vendor/neutts/neutts.py`
+  (and `phonemizers.py`). The C++ pipeline (`InoNeuTtsSynthesisWorker.cpp`'s
+  `RunSynthesis` + `RunStreamingSynthesis`) is a direct port of vendor's
+  `_infer_ggml` + `_infer_stream_ggml` + `_linear_overlap_add`. Match to
+  vendor was audited in a structured pass — see "Audit pass / vendor
+  alignment" below.
+- **Backbones (HF)**: `neuphonic/neutts-nano-q4-gguf` (195 MB),
+  `neuphonic/neutts-air-q4-gguf` (~430 MB), `neuphonic/neutts-nano-q8-gguf`,
+  multilingual variants (`neutts-nano-{german,french,spanish}-{q4,q8}-gguf`).
+- **Codec decoder (HF)**: `neuphonic/neucodec-onnx-decoder` (~530 MB
+  fp32, single codebook, 50 Hz token rate, 24 kHz output) — same decoder
+  for every backbone.
+- **NeuCodec encoder**: `neuphonic/neucodec` — PyTorch-only, used
+  **offline** via `Plugins/InoAgents/NeuTTS/scripts/build-voices.py` to
+  produce reference-voice FSQ codes.
+
+### Nano vs Air — same code path
+
+NeuTTS Nano and NeuTTS Air run on **identical** UE code paths. Same
+chat template, same special tokens, same sampler, same decoder, same
+context size. The only difference is the GGUF file's parameter count
+(~120M vs ~360M) — encoded inside the file itself, not in our config.
+
+Practical differences (not in code, but worth knowing for tuning):
+
+|                       | Nano (Q4) | Air (Q4)            |
+|---|---|---|
+| On-disk size          | ~195 MB   | ~430–530 MB         |
+| Resident RAM          | ~250 MB   | ~600 MB             |
+| Tokens/sec on CPU     | ~120 tok/s | ~30–40 tok/s (~3× slower) |
+| Quality               | Decent    | Noticeably better   |
+| Languages             | en/de/fr/es variants | English only |
+
+There is no `EInoNeuTtsVariant` enum and no per-variant settings array.
+A single `BackboneModels` array in Project Settings lists every entry
+(any mix of Nano + Air); `FInoNeuTtsConfig::BackboneModelName` selects
+one by `DisplayName`.
 
 ### Architecture
 
-NeuTTS Nano is a **pure consumer** of the InoLlama-supplied `FLlamaCppApi` vtable (accessed via `InoAgents::LlamaCpp::GetApi()` from `InoLlama.h`) + `FInoOnnxSession`. No dedicated third-party module of its own; no llama.cpp patches.
+NeuTTS is a **pure consumer** of three sibling-plugin runtimes:
+
+- **`InoLlama`** for the GGUF backbone, accessed via `InoAgents::LlamaCpp::GetApi()`'s
+  `FLlamaCppApi` vtable.
+- **`InoOnnx`** for the NeuCodec decoder, via the generic `FInoOnnxSession`
+  wrapper in `InoAgents/Source/InoAgents/Public/Onnx/`.
+- **`InoSpeakNG`** for runtime IPA phonemization of input text + voice
+  reference text.
+
+Plus **`InoNodes`** for the generic file downloader and SHA-256 helpers.
 
 ```
-UInoNeuTtsNanoNativeSubsystem (UGameInstanceSubsystem)
-├── FInoNeuTtsNanoNativeVoiceRegistry      (loads default_voice.nvoice.json at Initialize)
-├── FInoNeuTtsNanoNativeRunner              (owns llama_model + llama_context + FInoOnnxSession)
-│      ↳ consumes InoAgents::LlamaCpp::GetApi() vtable exclusively
-│      ↳ consumes FInoOnnxSession::Create for the NeuCodec decoder
-└── FInoNeuTtsNanoNativeSynthesisWorker     (FRunnable + Spsc queue + cancel atomic)
-       ↳ hosts the AR loop + full synthesis pipeline
+UInoNeuTtsSubsystem  (UGameInstanceSubsystem)
+├── ActiveVoice + ActiveVoiceName    (mirror of cache identity, game thread)
+├── CurrentBackboneName              (skip redundant LoadModel for same backbone)
+├── CurrentCancelFlag                (TSharedPtr<atomic<bool>>; auto-fired by
+│                                     UnloadModel / Deinitialize / CancelSynthesis)
+└── Runner                           (TSharedPtr<FInoNeuTtsRunner>)
+      ├── llama_model* + llama_context* + cached llama_vocab*
+      ├── llama_token StopTokenId      (resolved once at load via vocab scan)
+      ├── TUniquePtr<FInoOnnxSession>  (NeuCodec decoder)
+      └── TUniquePtr<FInoNeuTtsVoiceCache>
+            ├── VoiceName              (identity check)
+            ├── ResolvedRefPhones      (whitespace-normalized RefText phonemization)
+            ├── SpeechTokensBlock      (pre-built "<|speech_N1|>...<|speech_NK|>" string)
+            ├── PrefixTokens           (pre-tokenized cacheable prefix, ~50–100 toks)
+            └── KvSnapshot             (post-prefix KV state from llama_state_seq_get_data)
+
+free functions (in InoNeuTtsSynthesisWorker.cpp, dispatched via Async on ThreadPool):
+    InoNeuTtsNative::RunSynthesis           (one-shot, full waveform)
+    InoNeuTtsNative::RunStreamingSynthesis  (chunked + overlap-add)
 ```
 
-### The pipeline (per-synth, in the worker thread)
+There is no FRunnable thread per synth — both synth functions run on a
+ThreadPool worker dispatched by the subsystem; they own no long-lived
+state. The runner is shared via TSharedPtr so an in-flight synth
+survives `UnloadModel` cleanly.
 
-1. **Build prompt** via `InoNeuTtsNanoNative::BuildPrompt` — composes the exact NeuTTS chat template:
+### Lifecycle
+
+```
+1. (configure once)  Project Settings → Plugins → Ino NeuTTS Native
+                       → BackboneModels[] + DecoderModels[]
+                       Each entry: DisplayName, DownloadUrl, LocalFileName,
+                       ExpectedSha256, FileSizeBytes, Language, Quantization
+
+2. (optional, async) DownloadModelAsync(Config, OnComplete, OnProgress)
+                       Pre-stage models without loading. Useful for
+                       app-startup downloads or download-progress UI.
+                       OR: just call IsModelDownloaded(Config) to query.
+
+3. (async) LoadModelAsync(Config, OnLoaded, OnDownloadProgress)
+                       Downloads if needed (re-using the same
+                       InoNodes::Download::DownloadFilesAsync pipeline as
+                       DownloadModelAsync), then ThreadPool-loads the
+                       GGUF + ONNX, runs decoder + backbone warmup.
+
+4. (async) SetActiveVoiceAsync(Voice, OnReady)
+                       Tokenizes the cacheable prefix, prefills it into
+                       seq 0, snapshots KV state. ~200–600 ms once.
+                       REQUIRED before any synth.
+
+5. (async, N times) SynthesizeAsync(Text, Options, OnComplete)
+                  OR  SynthesizeStreamAsync(Text, Options, ChunkTokens,
+                                            OnAudioChunk, OnComplete)
+
+6. (anytime)        CancelSynthesis()              cooperative abort
+                    ClearActiveVoice()             drop voice cache
+                    UnloadModel()                  drop runner
+
+7. (auto on Deinitialize / PIE end)  Cancel + Unload
+```
+
+To switch voice: call `SetActiveVoiceAsync(Other)` again. To switch
+backbone: call `LoadModelAsync(NewConfig)` — the active voice is
+cleared automatically. There is **no per-voice synth overload**;
+voice flows through `SetActiveVoiceAsync` exclusively. See "Why no
+per-voice synth" below.
+
+### The synth pipeline (per call, on the ThreadPool worker)
+
+Mirrors vendor's `_infer_ggml` step-for-step. Numbers in parens are
+rough breakdown for a typical Nano-Q4 / 45-char input / 650-code
+reference / 2.5 s audio synth on CPU.
+
+1. **Phonemize input + reference text** via `UInoSpeakNGBPLibrary::Phonemize`.
+   Reference text uses the cache's pre-resolved phonemes when set;
+   otherwise live-phonemized. (~1–5 ms)
+2. **Whitespace-normalize** both via `InoNeuTtsNative::NormalizePhones` —
+   collapses any whitespace run to a single space and trims edges.
+   Matches vendor's `phones.split() + " ".join()`.
+3. **Build prompt** via `InoNeuTtsNative::BuildSynthesisPrompt`. Cache
+   hit reuses the pre-built `<|speech_N1|>...` block string from
+   `Cache->SpeechTokensBlock`; cache miss builds it from `RefCodes`
+   on the fly via `BuildSpeechTokensBlock`. Format (vendor-identical):
    ```
-   user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phonemes}<|TEXT_PROMPT_END|>
-   assistant:<|SPEECH_GENERATION_START|><|speech_N1|><|speech_N2|>...
+   user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phones}<|TEXT_PROMPT_END|>
+   assistant:<|SPEECH_GENERATION_START|><|speech_N1|><|speech_N2|>...<|speech_NK|>
    ```
-2. **Tokenize** via `llama_tokenize(parse_special=true)` — `<|...|>` control tokens resolve to single ids from Qwen2's Neuphonic-extended vocab.
-3. **KV-cache clear** via `llama_memory_clear` to wipe state from any previous synth.
-4. **Prefill** via `llama_decode(prompt_batch)` — linear in prompt length. This is typically the dominant cost on CPU for short outputs.
-5. **Build sampler chain**: top-k (default 50) → temperature (default 1.0) → dist (seed, -1 = random).
-6. **AR loop** — `llama_sampler_sample` → stop on `<|SPEECH_GENERATION_END|>` (id resolved at Runner-Create time via vocab scan) / `llama_vocab_is_eog` / `MaxNewTokens` / cancel (checked every 256 tokens). Each accepted token goes through `llama_token_to_piece(special=true)` into an accumulating text buffer AND back into the context via `llama_batch_get_one` + `llama_decode`.
-7. **Regex-parse** `<\|speech_(\d+)\|>` from the generated text → `TArray<int32>` speech-token ids. UE's `FRegexMatcher` is adequate — runs once post-generation, not on the hot path.
-8. **Decoder** — `FInoOnnxTensor::CreateFromBufferCopy<int32>({1, 1, N})` → `Session->Run` → float32 `[1, 1, N_samples]` waveform.
-9. **PCM conversion** — float32 clamp [-1, 1] → int16 LE via round-half-away-from-zero → `TArray<uint8>` (matches Chatterbox's output contract for RuntimeAudioImporter compatibility).
-10. **Dispatch** via `AsyncTask(ENamedThreads::GameThread)` so the dynamic `FOnInoNeuTtsNanoNativeSynthesisComplete` delegate fires on the right thread.
+4. **Tokenize** via `TokenizePrompt` (parse_special=true, add_special=false).
+   `<|...|>` control tokens resolve to single ids in NeuTTS's Qwen2-extended
+   vocab. Two-pass: stack-buffer probe → real allocation. (~2–5 ms for
+   the full ~735-token prompt)
+5. **Prefill — cached or full**:
+   - **Cache hit**: `Memcmp` first N tokens against `Cache->PrefixTokens`
+     (guards against context-dependent BPE merges across the prefix /
+     middle boundary). On match → `llama_memory_clear` →
+     `llama_state_seq_set_data` to restore the snapshot →
+     `llama_decode` only the suffix tokens (input_phones + RefCodes
+     block).
+   - **Cache miss / Memcmp fail / state-API unavailable**: fallback —
+     `llama_memory_clear` → `llama_decode` the full prompt.
+   - This step is **the dominant cost** of a synth on CPU — linear in
+     prompt token count, ~5–15 ms / token of prefill.
+6. **Build sampler chain** (matches llama-cpp-python's effective default
+   chain — vendor's call relies on these defaults):
+   `top_k(50) → top_p(0.95, min_keep=1) → min_p(0.05, min_keep=1) →
+    temp(1.0) → dist(seed)`. Each is configurable on `FInoNeuTtsOptions`.
+7. **AR loop** (`RunArLoop`) — `llama_sampler_sample` →
+   `llama_token_to_piece(special=true)` → `llama_sampler_accept` →
+   `llama_decode` of the new single token. Stop conditions:
+   - `Next == StopTokenId` (`<|SPEECH_GENERATION_END|>` resolved at
+     runner Create time)
+   - `llama_vocab_is_eog(Vocab, Next)`
+   - `Iter >= MaxNewTokens` (default 2048)
+   - cancel flag (atomic, checked every 64 iterations)
+   - **All stop checks are skipped while `Generated < MinNewTokens`**
+     (default 50) — mirrors vendor's torch path's `min_new_tokens=50`
+     guard against rare premature stops.
+8. **Regex-parse `<|speech_(\d+)|>`** ids from the accumulated text
+   into `TArray<int32>`. UE's `FRegexMatcher` is fine — runs once
+   post-AR-loop in the one-shot path; in streaming, `ParseAndAppendSpeechIds`
+   runs per generated token (small input each time, no measurable cost).
+9. **NeuCodec decode** — `FInoOnnxTensor::CreateFromBufferCopy<int32>({1, 1, N})`
+   → `Session->Run` → output is float32 `[1, 1, N_samples]` waveform.
+   Shape matches vendor's `np.array(speech_ids, dtype=np.int32)[np.newaxis, np.newaxis, :]`.
+10. **PCM conversion** — float32 clamped to `[-1, 1]` → int16 LE via
+    `UInoAudioFunctionLibrary::Float32ToInt16PcmBytesMono` (round-half-
+    away-from-zero). Output: 24 kHz mono int16 PCM little-endian
+    `TArray<uint8>` — same contract as Chatterbox so it feeds directly
+    into `UStreamingSoundWave::AppendAudioDataFromRAW` (RuntimeAudioImporter).
+11. **Marshal back to game thread** via `AsyncTask(ENamedThreads::GameThread)`
+    so the dynamic completion delegate fires on the right thread under
+    a `TWeakObjectPtr` guard.
 
-### v1 scope (locked; extension points documented)
+### Voice cache — KV-prefix snapshot
 
-| Aspect | v1 Value | Follow-up |
+The synth prompt has a fixed-per-voice prefix
+(`user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} `)
+sitting BEFORE the variable input phones. `SetActiveVoiceAsync` walks
+`FInoNeuTtsRunner::PrimeVoice` which:
+
+1. Resolves `Voice.RefPhones` (or live-phonemizes `Voice.RefText`,
+   normalizing whitespace).
+2. Builds `BuildSynthesisPromptPrefix(ResolvedRefPhones)` — byte-
+   identical to the prefix portion of the full `BuildSynthesisPrompt`.
+3. Tokenizes the prefix → `PrefixTokens`.
+4. `llama_memory_clear` + `llama_decode(PrefixTokens)` to prefill the
+   prefix into seq 0.
+5. `llama_state_seq_get_size` + `llama_state_seq_get_data` to snapshot
+   the post-prefix KV state into a flat byte array.
+6. Pre-builds the `<|speech_N|>` block string via `BuildSpeechTokensBlock`
+   so synths skip 650 `FString::Printf` + concatenations each time.
+7. Stores all of the above on `FInoNeuTtsVoiceCache` owned by the runner.
+
+Per-synth cache hit: ~95 % of the prefill cost stays — it's the ~650-token
+RefCodes block AFTER the variable input phones that dominates, and that
+can't be cached as a prefix (causal attention only). So the **realistic
+synth speedup is ~5–10 % of total wall-clock**. The bigger wins are:
+
+- **API ergonomics** — `SetActiveVoiceAsync` once, voice-less synth N
+  times.
+- **No per-synth speech-tokens-block rebuild** — saves ~10–15 ms per
+  synth and 650 transient FString allocations.
+- **No per-synth ref-phones re-phonemization** — saves another ~1–5 ms.
+
+The Memcmp guard at synth time defends against context-dependent BPE
+merges that could differ between the standalone prefix tokenization
+and the full-prompt tokenization. NeuTTS's IPA + special-token prompt
+should always match (clean BPE word boundary at the trailing space),
+but the guard is cheap insurance — on mismatch we log a warning and
+fall back to full prefill without losing correctness.
+
+`InoLlama` vtable entries this depends on: `llama_state_seq_get_size`
+/ `_get_data` / `_set_data` and `llama_memory_seq_rm`. If those resolve
+to nullptr on a given `llama.dll` (older builds), `PrimeVoice` errors
+out cleanly and synth runs the full-prefill path.
+
+### Why no per-voice synth overload
+
+Earlier the subsystem had `SynthesizeAsync(Text, Voice, Options, ...)`
+and a separate voice-less variant for the active voice. We dropped the
+per-voice overload in commit `fac495d` because:
+
+- It invited callers to thread `Voice` through every synth call, which
+  defeats the prime-once intent.
+- API surface was twice as wide for no upside.
+- Switching voices is a deliberate operation (~200–600 ms re-prime);
+  hiding it behind a per-call argument was misleading about cost.
+
+To do an "occasional one-off synth in a different voice without
+disturbing the primed voice", call `SetActiveVoiceAsync` twice (other
+→ original) and accept the 2× re-prime cost. This case is niche; the
+common case is "one character, one voice, many utterances".
+
+### Streaming synth
+
+`SynthesizeStreamAsync` interleaves the AR loop with rolling decoder
+runs to drop first-audio latency. Constants match vendor's
+`_infer_stream_ggml`:
+
+| Const | Value | Meaning |
 |---|---|---|
-| Input text | **Pre-phonemized IPA.** Caller supplies phonemes; no runtime text-to-phoneme. | v2: ONNX G2P model consumed via the existing `FInoOnnxSession` layer (MIT-licensed, ~5 MB). |
-| Default voice | **Baked in** — `NeuTtsNanoNative/Resources/default_voice.nvoice.json` ships with Neuphonic's `jo.wav` pre-encoded (653 FSQ codes, 251-char IPA phones, Apache 2.0 source). | Custom voices via `FInoNeuTtsNanoNativeVoiceRegistry` + scanning a user-provided voices dir. |
-| Backbone variant | **Q4 only** (`neutts-nano-Q4_0.gguf`, 195 MB). | Q8 entry + multi-variant settings. |
-| Streaming | **One-shot** — `OnComplete` fires once with full 24 kHz int16 PCM LE. | Streaming via decoder-chunk pattern mirroring Chatterbox's `FInoChatterboxTurboNativeDecoderWorker`. |
+| `kCodecHopLength` | 480 | 50 Hz token rate at 24 kHz output |
+| `kOverlapFrames`  | 1   | overlap frames around each chunk |
+| `kLookforward`    | 5   | tokens past the chunk's right edge |
+| `kLookback`       | 50  | tokens before the chunk's left edge |
+| `ChunkTokens`     | 25  | new tokens per emit (= 0.5 s audio) |
 
-### Voice cache (KV-prefix snapshot)
+**Decode-threshold off-by-one fix vs vendor.** Vendor's threshold is
+`>= ChunkTokens + kLookforward` (== 30) but the actual decode window
+extends to `n_decoded_tokens + ChunkTokens + kLookforward + kOverlapFrames`
+(== 31). Python's slice silently clamps; C++ TArrayView reads past the
+end into uninitialized memory. Our threshold is `>= ChunkTokens +
+kLookforward + kOverlapFrames` (== 31) — wait one extra token before
+the first decode, but always have a valid window. Comment in
+`InoNeuTtsSynthesisWorker.cpp` flags this for future readers.
 
-The synth prompt has a fixed-per-voice prefix (`user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} `) sitting before the variable input phones. When a voice is "active", the runner pre-tokenizes that prefix, prefills it into the LM context, snapshots the post-prefix KV state via `llama_state_seq_get_data`, and stores the bytes alongside the cached `RefPhones` (already phonemized) and the prefix's tokenization (for cross-checking).
+**Linear overlap-add** (`LinearOverlapAdd`, port of vendor's
+`_linear_overlap_add` with `power=1.0`) blends each chunk's edge into
+its neighbours via a triangular weight `(0.5 - |t - 0.5|)`. Output
+samples are weighted-summed and divided by the running weight sum, so
+overlapping regions average to unit gain rather than clipping.
 
-Per-synth path with the cache hit:
-1. Tokenize the full prompt as usual.
-2. `Memcmp` the first N tokens against the cached `PrefixTokens` — if BPE merged differently across the prefix/middle boundary, fall back to full prefill with a warning. (For NeuTTS's IPA + special-token prompt this should always match because the trailing space is a clean BPE boundary.)
-3. `llama_memory_clear` + `llama_state_seq_set_data` to restore the snapshot.
-4. `llama_decode` only the tokens past the prefix (input phones + suffix + RefCodes — the bulk of the prompt).
-5. AR loop as before.
+Each emitted chunk goes through `OnAudioChunk(Bytes, bIsFinal)` on
+the game thread. The final irregular chunk fires with `bIsFinal=true`
+before `OnComplete` delivers the concatenated full waveform.
 
-Realistic speedup: ~5–10% of total synth time (the cacheable prefix is small relative to the ~650-token RefCodes block, which sits AFTER the variable input phones in the chat template and so can't be cached as a prefix). The bigger win is the API ergonomics: `SetActiveVoiceAsync(Voice, OnReady)` once + voice-less `SynthesizeWithActiveVoiceAsync(Text, Options, OnComplete)` per call. The runner also short-circuits a redundant `SetActiveVoiceAsync` for the same voice via `HasCachedVoice`.
+### Audit pass / vendor alignment
 
-`UInoNeuTtsSubsystem`'s public surface:
-- `LoadModelAsync(Config, OnLoaded, OnDownloadProgress)` — load + download model files.
-- `SetActiveVoiceAsync(Voice, OnReady)` — async; phonemize RefText if needed, tokenize prefix, prefill, snapshot. Required before any synth.
-- `ClearActiveVoice()` — drop the snapshot. Cheap.
-- `HasActiveVoice()` / `GetActiveVoiceName()` — query state.
-- `SynthesizeAsync(Text, Options, OnComplete)` — uses the cached active voice. Errors fast if nothing primed.
-- `SynthesizeStreamAsync(Text, Options, ChunkTokens, OnAudioChunk, OnComplete)` — streaming variant.
+Subsequent to the initial port, a structured audit cross-checked
+every step against `vendor/neutts/neutts.py` + `phonemizers.py`. Result
+(committed in `c794fc6`): one HIGH correctness bug + four worthwhile
+improvements landed, no blockers remained.
 
-There is no per-voice synth overload. Voice is set once via `SetActiveVoiceAsync`; switching voices means calling `SetActiveVoiceAsync` again with a different voice (~200–600 ms re-prime cost). Bundling voice into the synth call would invite callers to thread it through every utterance, defeating the cache.
+| What | Status |
+|---|---|
+| Prompt template byte-identical to vendor | ✅ |
+| Tokenization flags match | ✅ |
+| Streaming chunking constants + threshold off-by-one fix | ✅ |
+| Linear overlap-add power=1 | ✅ |
+| NeuCodec input shape `[1, 1, N]` int32 | ✅ |
+| Voice prime / restore correctness (Memcmp guard, KV trim) | ✅ |
+| **Sampler chain — added top_p(0.95) + min_p(0.05)** | ✅ fixed |
+| **Phoneme whitespace normalization** | ✅ fixed |
+| **min_new_tokens=50 robustness** | ✅ fixed |
+| **Speech-tokens block cached at PrimeVoice** | ✅ fixed (perf) |
+| **Backbone warmup at LoadModel** | ✅ fixed (perf) |
+| Watermark (vendor's `perth.PerthImplicitWatermarker`) | ❌ omitted by design (Python+PyTorch only) |
 
-The vtable bits this depends on (added in `InoLlama` as part of this work): `llama_state_seq_get_size` / `_get_data` / `_set_data` and `llama_memory_seq_rm`. If those resolve to nullptr on a given `llama.dll` (older builds), `PrimeVoice` errors out cleanly and synth falls back to the full-prefill path.
+### Project Settings
 
-### Why phonemization is offline-only
+`UInoNeuTtsNativeSettings` (Project Settings → Plugins → Ino NeuTTS
+Native, `Config = Game`):
 
-NeuTTS Nano was trained on IPA phonemes (from espeak-ng), not raw English. The standard runtime phonemizer is espeak-ng itself, which is **GPLv3** — a copyleft dependency that poisons commercial games that ship NeuTTS. Our approach: phonemize **once at voice-encoding time** via the offline Python script (`NeuTtsNanoNative/scripts/encode-default-voice.py`), store the phonemes in the JSON alongside ref_codes, and keep the runtime plugin phonemizer-free. v2 will add an ONNX G2P (MIT) for plain-text input.
+- `BackboneModels` (`TArray<FInoNeuTtsBackboneEntry>`) — every NeuTTS
+  backbone you want available. Each entry: `DisplayName`,
+  `DownloadUrl`, `LocalFileName`, `ExpectedSha256`, `FileSizeBytes`,
+  `Language` (eSpeak code), `Quantization` (informational).
+- `DecoderModels` (`TArray<FInoNeuTtsDecoderEntry>`) — same shape minus
+  the language fields. Same NeuCodec decoder works for every backbone.
+
+Files land at
+`<FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>`.
+
+A `+BackboneModels=…` array seed is committed in
+`Config/DefaultGame.ini` so the smoke tests have something to download.
+
+### Public API surface (subsystem)
+
+`UInoNeuTtsSubsystem` (UGameInstanceSubsystem; all public methods on
+the game thread, all delegates fire on the game thread):
+
+**Model lifecycle**
+- `void LoadModelAsync(Config, OnLoaded, OnDownloadProgress)` —
+  download (if needed) + ThreadPool-load. `OnDownloadProgress` is a
+  single-cast `FInoNeuTtsDownloadProgressDelegate(const FInoDownloadProgress&)`
+  carrying the shared InoNodes progress struct.
+- `void DownloadModelAsync(Config, OnComplete, OnDownloadProgress)` —
+  download only, no load. Pre-stage at startup or drive a separate UI.
+- `bool IsModelDownloaded(Config) const` — pure file-stat check
+  (existence + non-zero size). UMG-safe.
+- `void UnloadModel()` — drop runner. Safe mid-synth (worker holds a
+  TSharedPtr).
+- `bool IsModelLoaded() const`
+
+**Active voice**
+- `void SetActiveVoiceAsync(Voice, OnReady)` — phonemize +
+  prefill-snapshot the prefix off-thread. Required before synth.
+- `void ClearActiveVoice()`
+- `bool HasActiveVoice() const` / `FString GetActiveVoiceName() const`
+
+**Synthesis**
+- `void SynthesizeAsync(Text, Options, OnComplete)` — uses active voice.
+- `void SynthesizeStreamAsync(Text, Options, ChunkTokens, OnAudioChunk, OnComplete)` —
+  streaming variant. `ChunkTokens=0` uses the default of 25.
+- `void CancelSynthesis()` — cooperative abort. Fires `OnComplete` with
+  `bSuccess=false / ErrorMessage="Cancelled"`.
+- `bool IsSynthInFlight() const`
+
+**Voice loading**
+- `bool LoadVoiceFromFile(FilePath, OutVoice)` — parse one
+  `.nvoice.json` into a `FInoNeuTtsVoice`.
+- `TArray<FInoNeuTtsVoice> ListBundledVoices()` — scan
+  `Plugins/InoAgents/NeuTTS/voices/`.
+
+**Audio format helpers (Pure)**
+- `int32 GetSampleRate()` — 24000.
+- `int32 GetNumChannels()` — 1.
+
+**Blueprint async-action wrappers** under `Public/`:
+- `UInoNeuTtsSynthesize` — one-shot. Pins: `OnComplete`, `OnError`.
+- `UInoNeuTtsStreamSynthesize` — streaming. Pins: `OnAudioChunk`,
+  `OnComplete`, `OnError`. Both consume the active voice; no Voice pin.
+
+### Configuration structs
+
+`FInoNeuTtsConfig` (passed to `LoadModelAsync` / `DownloadModelAsync`
+/ `IsModelDownloaded`):
+- `BackboneModelName` — Project Settings entry's DisplayName, "" =
+  first entry.
+- `DecoderModelName` — same shape for the decoder array.
+- `Backbone` — `FInoLlamaModelParams` (mmap, mlock, GPU offload count,
+  vocab-only, etc — see `InoLlama`).
+- `BackboneContext` — `FInoLlamaContextParams` (n_ctx, batch sizes,
+  threads, flash attention, KV dtype).
+- `DecoderOnnx` — `FInoOnnxSessionOptions` (CPU vs DirectML / NNAPI /
+  WebGPU, thread counts, graph optimization, etc).
+- `bWarmupDecoderOnLoad` (default true) — tiny dummy ONNX inference at
+  load time to pay JIT / kernel-selection / mem-pattern setup once.
+- `bWarmupBackboneOnLoad` (default true) — tiny 1-token prefill +
+  decode through the GGUF at load time, then `llama_memory_clear`. Pays
+  cold-start kernel JIT / KV allocation jitter at load instead of on
+  first synth.
+
+`FInoNeuTtsOptions` (passed to each synth):
+- `MaxNewTokens` (default 2048) — hard cap on AR-loop iterations.
+- `MinNewTokens` (default 50) — skip stop-token / EOG checks until at
+  least this many tokens emitted. Matches vendor's torch
+  `min_new_tokens=50` guard against rare premature stops.
+- `Temperature` (default 1.0), `TopK` (default 50), `TopP` (default
+  0.95), `MinP` (default 0.05) — sampler chain knobs. Defaults match
+  llama-cpp-python's effective chain when only temperature + top_k are
+  overridden by vendor.
+- `RandomSeed` (default -1) — `-1` = fresh time-based seed.
+
+### Voice format — `.nvoice.json`
+
+```json
+{
+  "Name":      "jo",
+  "Language":  "en-us",
+  "RefText":   "...transcript of the source WAV...",
+  "RefPhones": "h@l'oU D'e@ ...",       // optional pre-bake; empty = phonemize lazily
+  "RefCodes":  [5234, 7891, 4099, ...]   // 50 Hz FSQ speech tokens, ~650 for a 13 s ref
+}
+```
+
+Generated offline by
+`Plugins/InoAgents/NeuTTS/scripts/build-voices.py` (PyTorch +
+neucodec + phonemizer; uses vendor's `samples/*.{pt,txt}` as input).
+Five voices ship under `voices/`: `jo`, `dave`, `greta`, `juliette`,
+`mateo`.
+
+Voices are NOT in the model registry — they're lightweight JSON
+artefacts (~10 KB each) that ship with the plugin. Future work:
+runtime voice cloning via NeuCodec ONNX encoder (currently
+PyTorch-only; would need an ONNX export).
+
+### Why phonemization is offline-only-by-default
+
+NeuTTS was trained on IPA phonemes (from espeak-ng). The standard
+runtime phonemizer is espeak-ng itself, which is **GPLv3** — a
+copyleft dependency that would poison commercial games shipping
+NeuTTS via static linkage. We sidestep this by:
+
+- Pre-baking `RefPhones` offline via the build-voices script so
+  voice JSONs ship phonemized (zero runtime espeak dependency for the
+  reference text path).
+- Wrapping espeak-ng in a separate **`InoSpeakNG`** plugin that links
+  espeak-ng as a runtime DLL/.so (dynamic linkage, GPLv3 still applies
+  to that plugin in isolation but the linkage interface is compatible
+  with CCG sec. 4 / LGPL-style dynamic-link carve-out for proprietary
+  application code).
+
+Input text is still phonemized at runtime via InoSpeakNG. v2 follow-up:
+ship an MIT-licensed ONNX G2P (~5 MB) consumed via the existing
+`FInoOnnxSession` layer, and drop the InoSpeakNG runtime dependency
+entirely.
 
 ### File layout
 
 ```
 Plugins/InoAgents/
-├── NeuTtsNanoNative/                                        ← setup + baked-in voice
-│   ├── Resources/
-│   │   └── default_voice.nvoice.json                  ← 653 FSQ codes + IPA phones
-│   │                                                    (generated once from jo.wav)
-│   ├── scripts/
-│   │   ├── encode-default-voice.py                    ← OFFLINE PyTorch encoder
-│   │   │                                                (neucodec + phonemizer + torch)
-│   │   ├── setup-neutts-nano.ps1                      ← optional dev pre-stage
-│   │   └── clean.ps1
-│   └── README.md
+├── NeuTTS/                                          ← NeuTTS-specific assets / vendor / scripts
+│   ├── vendor/                                      ← git submodule, neuphonic/neutts pinned
+│   │   ├── neutts/{neutts.py, phonemizers.py}       ← canonical reference inference loop
+│   │   ├── examples/                                ← upstream Python examples
+│   │   └── samples/{jo, dave, ...}.{wav, txt, pt}   ← reference voices source
+│   ├── voices/{jo, dave, greta, juliette, mateo}.nvoice.json
+│   ├── scripts/build-voices.py                      ← offline encoder (PyTorch + neucodec)
+│   └── models/                                      ← optional dev-time drop (gitignored)
 │
-└── Source/InoAgents/
-    ├── Public/NeuTtsNanoNative/
-    │   ├── InoNeuTtsNanoNativeTypes.h                       ← entry / config / options
-    │   │                                                USTRUCTs, delegates (no variant
-    │   │                                                enum — Nano vs Air is just metadata
-    │   │                                                in the model registry, the runtime
-    │   │                                                doesn't branch on it)
-    │   └── InoNeuTtsNanoNativeSubsystem.h                   ← UInoNeuTtsNanoNativeSubsystem
-    └── Private/NeuTtsNanoNative/
-        ├── InoNeuTtsNanoNativeSubsystem.cpp                 ← Blueprint glue, download flow
-        │                                                (delegates to
-        │                                                InoNodes::Download::DownloadFilesAsync
-        │                                                — generic batch downloader with
-        │                                                .partial staging, atomic rename,
-        │                                                streaming SHA-256, multi-connection
-        │                                                range, retries, cancel tokens),
-        │                                                ThreadPool load dispatch
-        ├── InoNeuTtsNanoNativeTypes.cpp                     ← ResolveModelDir helper
-        ├── InoNeuTtsNanoNativeRunner.{h,cpp}                ← llama_model + llama_context +
-        │                                                 FInoOnnxSession owner (move-only)
-        ├── InoNeuTtsNanoNativePromptBuilder.{h,cpp}         ← BuildPrompt: exact chat-template
-        ├── InoNeuTtsNanoNativeSynthesisWorker.{h,cpp}       ← FRunnable + Spsc queue + full
-        │                                                 AR-loop synthesis pipeline
-        └── InoNeuTtsNanoNativeVoiceRegistry.{h,cpp}         ← .nvoice.json parser
+└── Source/InoNeuTtsNative/
+    ├── InoNeuTtsNative.Build.cs                     ← module deps (InoLlama, InoOnnx,
+    │                                                   InoSpeakNG, InoNodes, InoAgents,
+    │                                                   RuntimeAudioImporter, Json,
+    │                                                   DeveloperSettings)
+    │
+    ├── Public/
+    │   ├── InoNeuTtsNative.h                        ← module interface
+    │   ├── InoNeuTtsLog.h                           ← LogInoNeuTts category
+    │   ├── InoNeuTtsTypes.h                         ← USTRUCTs (Voice, Config, Options,
+    │   │                                              Result), single-cast delegates,
+    │   │                                              multicast async-action delegates
+    │   ├── InoNeuTtsSettings.h                      ← UInoNeuTtsNativeSettings + entry structs
+    │   ├── InoNeuTtsSubsystem.h                     ← UInoNeuTtsSubsystem (the public API)
+    │   ├── InoNeuTtsSynthesize.h                    ← BP async action: NeuTTS Synthesize
+    │   └── InoNeuTtsStreamSynthesize.h              ← BP async action: NeuTTS Synthesize Streaming
+    │
+    └── Private/
+        ├── InoNeuTtsNative.cpp                      ← thin module lifecycle
+        ├── InoNeuTtsCommon.{h,cpp}                  ← path resolvers (BackboneModels +
+        │                                               DecoderModels lookups), shared
+        │                                               TokenizePrompt, NormalizePhones
+        ├── InoNeuTtsSettings.cpp
+        ├── InoNeuTtsRunner.{h,cpp}                  ← FInoNeuTtsRunner: model + ctx +
+        │                                               vocab + decoder + voice cache
+        │                                               (PrimeVoice, ClearVoiceCache,
+        │                                               HasCachedVoice, GetVoiceCache)
+        ├── InoNeuTtsPromptBuilder.{h,cpp}           ← BuildSynthesisPrompt (RefCodes +
+        │                                               String overloads),
+        │                                               BuildSynthesisPromptPrefix,
+        │                                               BuildSpeechTokensBlock
+        ├── InoNeuTtsSynthesisWorker.{h,cpp}         ← RunSynthesis + RunStreamingSynthesis
+        │                                               free functions; NOT an FRunnable —
+        │                                               called directly from a ThreadPool
+        │                                               worker dispatched by the subsystem
+        ├── InoNeuTtsVoiceRegistry.{h,cpp}           ← .nvoice.json parser + bundled-voice scan
+        ├── InoNeuTtsSubsystem.cpp                   ← Blueprint glue + async-load chain +
+        │                                               InoNodes::Download::DownloadFilesAsync
+        │                                               wiring + active-voice state
+        ├── InoNeuTtsSynthesize.cpp                  ← BP async action impl
+        ├── InoNeuTtsStreamSynthesize.cpp
+        └── SmokeTests/
+            ├── InoNeuTtsLoadTest.cpp
+            ├── InoNeuTtsSynthTest.cpp
+            ├── InoNeuTtsStreamSynthTest.cpp
+            └── InoNeuTtsVoiceRegistryTest.cpp
 ```
+
+The smoke tests bypass the subsystem and call `FInoNeuTtsRunner::Create`
++ `InoNeuTtsNative::RunSynthesis` / `RunStreamingSynthesis` directly so
+they work outside PIE.
 
 ### Smoke tests
 
 | Command | What it proves | PIE? |
 |---|---|---|
-| `Ino.NeuTtsNanoNative.DownloadTest` | `UInoNeuTtsNanoNativeSubsystem::LoadModelAsync` downloads (cold) or finds (warm) both model files, dispatches the ThreadPool loader, fires `OnLoaded(true)`, file-stat verifies both files on disk. | yes |
-| `Ino.NeuTtsNanoNative.SynthTest [phonemes...]` | Full pipeline: auto-load → `SynthesizeAsync` with the args as pre-phonemized IPA (or a baked-in default) → writes `Saved/InoNeuTtsNanoNativeTest.wav` → logs real-time factor + sample count. | yes |
+| `Ino.NeuTts.LoadTest [backbone DisplayName]` | Resolves Project Settings → loads GGUF + ONNX + decoder warmup + backbone warmup → logs description, stop-token id, and decoder I/O. | no |
+| `Ino.NeuTts.SynthTest [voice=jo] [backbone] [text...]` | Full pipeline (load → live phonemize → synth → save WAV at `Saved/InoNeuTtsTest.wav`). Logs RTF + sample count. | no |
+| `Ino.NeuTts.StreamSynthTest [voice=jo] [backbone] [chunk_tokens=25] [text...]` | Streaming variant: per-chunk arrival timing log + TTFA + final WAV at `Saved/InoNeuTtsStreamTest.wav`. | no |
+| `Ino.NeuTts.VoiceRegistryTest` | Scans `Plugins/InoAgents/NeuTTS/voices/`; logs every parsed `.nvoice.json` with code count + lang. | no |
 
-### Observed numbers on CPU (alderlake variant, warm load)
+### Performance notes (CPU, alderlake-class)
 
-- Model load: **1.5 s** (backbone ~0.3 s + ORT codec ~1.2 s)
-- LM generation: **~120 tok/s** (Q4 GGUF, CPU)
-- NeuCodec decoder: **~70 ms per second of audio**
-- Full synth of short utterance (~45 chars phonemes, ~650 ref_codes, 2.5 s audio): **~10 s wall-clock** (0.25× real-time; dominant cost is prompt prefill on CPU, linear in ref_codes length)
+- Model load: **~1.5 s warm** (backbone ~0.3 s + ORT codec ~1.2 s).
+  Cold-disk add ~1–3 s for the OS file cache.
+- **Backbone warmup** at load adds ~50–200 ms but removes the same
+  jitter from the first user-visible synth.
+- LM throughput (Q4 GGUF, CPU): **~120 tok/s on Nano**, **~30–40 tok/s
+  on Air**.
+- NeuCodec decoder: **~70 ms per second of audio**.
+- Full synth, Nano-Q4, ~45-char input + ~650-code reference + 2.5 s
+  audio: **~10 s wall-clock, RTF 0.25×**. Dominant cost is prefill,
+  linear in `RefCodes.Num()`.
+- **Streaming TTFA**: ~30 tokens × per-token-ms + first decoder run ≈
+  ~0.5–1.0 s after `SynthesizeStreamAsync` is enqueued, depending on
+  prompt size.
 
-Throughput scales roughly as: shorter reference voice → less prompt prefill → better real-time factor. Vulkan offload via `Config.NumGpuLayers > 0` is available but untested; the llama.cpp Vulkan backend is registered at module startup on hosts with a working Vulkan driver.
+Vulkan offload via `Backbone.NumGpuLayers > 0` is available on hosts
+with a working Vulkan driver (registered at module startup by InoLlama)
+but currently untested. Set to 999 to "offload all" — same field works
+for both Nano and Air.
+
+### Roadmap
+
+| Tracked | Notes |
+|---|---|
+| ONNX G2P phonemizer (drop InoSpeakNG runtime dep) | MIT-licensed ~5 MB, would unblock pure-permissive shipping |
+| Runtime voice cloning | needs NeuCodec ONNX encoder export (currently PyTorch-only) |
+| Multi-voice cache | hold N voice snapshots simultaneously, identified by Voice.Name; useful for multi-character demos |
+| Watermarking | vendor's `perth` is Python+PyTorch; native port not pursued |
 
 ## UE-side integration architecture
 
@@ -985,7 +1419,7 @@ Hugging Face, Apache 2.0, public (no gating, no auth):
 
 ## How to update the runtime versions
 
-Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTtsNanoNative.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
+Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTts.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
 
 ## What to verify before trusting this file
 
