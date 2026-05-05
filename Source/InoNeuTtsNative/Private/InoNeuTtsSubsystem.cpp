@@ -143,6 +143,117 @@ void UInoNeuTtsSubsystem::LoadModelAsync(
 	EnsureFilesDownloaded(Job);
 }
 
+void UInoNeuTtsSubsystem::DownloadModelAsync(
+	const FInoNeuTtsConfig& Config,
+	const FInoNeuTtsLoadedDelegate& OnComplete,
+	const FInoNeuTtsDownloadProgressDelegate& OnDownloadProgress)
+{
+	check(IsInGameThread());
+
+	auto FailFast = [OnComplete](const FString& Why)
+	{
+		FInoNeuTtsLoadedDelegate Copy = OnComplete;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Why]()
+		{
+			Copy.ExecuteIfBound(false, Why);
+		});
+	};
+
+	if (bIsLoading)
+	{
+		UE_LOG(LogInoNeuTts, Warning,
+			TEXT("DownloadModelAsync: a load/download is already in flight."));
+		FailFast(TEXT("A load/download is already in flight."));
+		return;
+	}
+
+	// Resolve Project Settings entries (same lookup as LoadModelAsync;
+	// shared validation keeps error messages consistent).
+	const UInoNeuTtsNativeSettings* Settings =
+		GetDefault<UInoNeuTtsNativeSettings>();
+	if (Settings == nullptr)
+	{
+		FailFast(TEXT("UInoNeuTtsNativeSettings unavailable."));
+		return;
+	}
+
+	const FInoNeuTtsBackboneEntry* BackboneEntry =
+		UInoNeuTtsNativeSettings::FindBackbone(
+			Settings->BackboneModels, Config.BackboneModelName);
+	if (BackboneEntry == nullptr)
+	{
+		FailFast(FString::Printf(
+			TEXT("No backbone entry%s%s configured. ")
+			TEXT("Open Project Settings -> Plugins -> Ino NeuTTS Native and add at least one entry."),
+			Config.BackboneModelName.IsEmpty() ? TEXT("") : TEXT(" named '"),
+			Config.BackboneModelName.IsEmpty() ? TEXT("") : *(Config.BackboneModelName + TEXT("'"))));
+		return;
+	}
+
+	const FInoNeuTtsDecoderEntry* DecoderEntry =
+		UInoNeuTtsNativeSettings::FindDecoder(
+			Settings->DecoderModels, Config.DecoderModelName);
+	if (DecoderEntry == nullptr)
+	{
+		FailFast(TEXT("No NeuCodec decoder entry configured."));
+		return;
+	}
+
+	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job =
+		MakeShared<FLoadJob, ESPMode::ThreadSafe>();
+	Job->Config             = Config;
+	Job->GgufPath           = UInoNeuTtsNativeSettings::ResolveLocalPath(BackboneEntry->LocalFileName);
+	Job->OnnxPath           = UInoNeuTtsNativeSettings::ResolveLocalPath(DecoderEntry->LocalFileName);
+	Job->BackboneName       = BackboneEntry->DisplayName;
+	Job->OnLoaded           = OnComplete;
+	Job->OnDownloadProgress = OnDownloadProgress;
+	Job->bDownloadOnly      = true;
+
+	bIsLoading = true;
+	EnsureFilesDownloaded(Job);
+}
+
+bool UInoNeuTtsSubsystem::IsModelDownloaded(const FInoNeuTtsConfig& Config) const
+{
+	const UInoNeuTtsNativeSettings* Settings =
+		GetDefault<UInoNeuTtsNativeSettings>();
+	if (Settings == nullptr)
+	{
+		return false;
+	}
+
+	const FInoNeuTtsBackboneEntry* BackboneEntry =
+		UInoNeuTtsNativeSettings::FindBackbone(
+			Settings->BackboneModels, Config.BackboneModelName);
+	const FInoNeuTtsDecoderEntry* DecoderEntry =
+		UInoNeuTtsNativeSettings::FindDecoder(
+			Settings->DecoderModels, Config.DecoderModelName);
+	if (BackboneEntry == nullptr || DecoderEntry == nullptr)
+	{
+		return false;
+	}
+
+	const FString GgufPath =
+		UInoNeuTtsNativeSettings::ResolveLocalPath(BackboneEntry->LocalFileName);
+	const FString OnnxPath =
+		UInoNeuTtsNativeSettings::ResolveLocalPath(DecoderEntry->LocalFileName);
+
+	IFileManager& FM = IFileManager::Get();
+
+	// Existence + non-zero size. SHA verification is the downloader's
+	// job, not this query's — see header docstring.
+	auto IsRealFile = [&FM](const FString& Path)
+	{
+		if (!FM.FileExists(*Path))
+		{
+			return false;
+		}
+		return FM.FileSize(*Path) > 0;
+	};
+
+	return IsRealFile(GgufPath) && IsRealFile(OnnxPath);
+}
+
 void UInoNeuTtsSubsystem::EnsureFilesDownloaded(
 	TSharedRef<FLoadJob, ESPMode::ThreadSafe> Job)
 {
@@ -263,7 +374,16 @@ void UInoNeuTtsSubsystem::EnsureFilesDownloaded(
 				}
 			}
 
-			Self->DispatchModelLoad(Job);
+			// DownloadModelAsync path: stop here, fire OnComplete success.
+			// LoadModelAsync path: proceed to off-thread model load.
+			if (Job->bDownloadOnly)
+			{
+				Self->FinishLoadJob(Job, true, FString());
+			}
+			else
+			{
+				Self->DispatchModelLoad(Job);
+			}
 		});
 }
 

@@ -78,6 +78,52 @@ public:
 		const FInoNeuTtsDownloadProgressDelegate& OnDownloadProgress);
 
 	/**
+	 * Download the GGUF backbone + ONNX decoder for the configured
+	 * Config WITHOUT loading the model. Useful to:
+	 *
+	 *   - Pre-stage models at app startup or game install time so the
+	 *     first user-visible LoadModelAsync hits files already on disk
+	 *     and skips the multi-MB / multi-GB download.
+	 *   - Drive a download-progress UI separately from the load step.
+	 *   - Verify download integrity (SHA-256 if configured) before
+	 *     committing to a load.
+	 *
+	 * Dispatches both files in one InoNodes::Download::DownloadFilesAsync
+	 * batch (aggregate progress) on a thread pool worker. Skipped per file
+	 * if already cached on disk + SHA-256 matches (when configured).
+	 *
+	 *   OnComplete  — bSuccess=true means both files exist on disk and
+	 *                 are ready for LoadModelAsync. Game thread.
+	 *   OnDownloadProgress — fires zero or more times during the download.
+	 *                 Skipped entirely when both files are already cached.
+	 *
+	 * Errors fast if a previous LoadModelAsync / DownloadModelAsync /
+	 * SetActiveVoiceAsync is still in flight, or if the Config doesn't
+	 * resolve to valid Project Settings entries.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
+	void DownloadModelAsync(
+		const FInoNeuTtsConfig& Config,
+		const FInoNeuTtsLoadedDelegate& OnComplete,
+		const FInoNeuTtsDownloadProgressDelegate& OnDownloadProgress);
+
+	/**
+	 * File-stat check: do the GGUF + ONNX files for the given Config
+	 * already exist on disk under
+	 * <FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/?
+	 *
+	 * Pure (no I/O beyond directory enumeration). Safe to poll from a
+	 * UMG widget. Returns false if the Config doesn't resolve to valid
+	 * Project Settings entries.
+	 *
+	 * Note: only checks file existence + non-zero size, NOT SHA-256 —
+	 * a corrupt cached file will pass this check but fail the next
+	 * DownloadModelAsync (which re-downloads on hash mismatch).
+	 */
+	UFUNCTION(BlueprintPure, Category = "InoNeuTts")
+	bool IsModelDownloaded(const FInoNeuTtsConfig& Config) const;
+
+	/**
 	 * Drop the loaded model. Safe to call mid-synth — the in-flight
 	 * call still holds a TSharedPtr to the runner and finishes cleanly,
 	 * after which the runner's destructor runs.
@@ -224,6 +270,15 @@ private:
 		FString BackboneName;          // for diagnostics + cache logging
 		FInoNeuTtsLoadedDelegate           OnLoaded;
 		FInoNeuTtsDownloadProgressDelegate OnDownloadProgress;
+
+		/**
+		 * When true (set by DownloadModelAsync), the download chain fires
+		 * OnLoaded with bSuccess=true as soon as files are on disk and
+		 * skips DispatchModelLoad entirely. When false (set by
+		 * LoadModelAsync), the chain proceeds to ThreadPool model load
+		 * after download succeeds.
+		 */
+		bool bDownloadOnly = false;
 	};
 
 	/** Sequential async chain. Each step calls the next on success or FinishLoadJob on error. */
