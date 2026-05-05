@@ -58,4 +58,20 @@ namespace InoNeuTtsNative
 		const FString&                           Prompt,
 		TArray<llama_token>&                     OutTokens,
 		FString&                                 OutError);
+
+	/**
+	 * Normalize whitespace in a phonemized string the same way the
+	 * upstream NeuTTS reference's `_to_phones` does:
+	 *
+	 *     phones = phones.split()
+	 *     phones = " ".join(phones)
+	 *
+	 * I.e. collapse any run of whitespace (spaces, tabs, newlines, CRs)
+	 * to a single space and trim edges. eSpeak's TextToPhonemes
+	 * occasionally emits leading/trailing whitespace per clause, and
+	 * our clause-joining loop in InoSpeakNG can produce double spaces
+	 * between clauses — both produce subtly different tokenization
+	 * vs the vendor reference if not normalized.
+	 */
+	FString NormalizePhones(const FString& Phones);
 }

@@ -137,6 +137,17 @@ struct INONEUTTSNATIVE_API FInoNeuTtsConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Decoder")
 	bool bWarmupDecoderOnLoad = true;
+
+	/**
+	 * Run a tiny dummy prefill + 1-token decode on the GGUF backbone right
+	 * after Create() to pay the cold-start costs (kernel selection, KV
+	 * allocation, first-decode jitter) once at load time. Adds ~50–200 ms
+	 * to LoadModelAsync but removes the same jitter from the user-visible
+	 * first synth. Highly recommended; disable only when load-time latency
+	 * matters more than first-synth jitter.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts|Backbone")
+	bool bWarmupBackboneOnLoad = true;
 };
 
 /** Per-call sampling parameters for synthesis. */
@@ -153,6 +164,16 @@ struct INONEUTTSNATIVE_API FInoNeuTtsOptions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	int32 MaxNewTokens = 2048;
 
+	/**
+	 * Minimum tokens to generate before honouring the stop-token / EOG
+	 * checks. Prevents rare premature stops where the model emits
+	 * <|SPEECH_GENERATION_END|> in the first handful of tokens. Matches
+	 * the upstream torch reference's `min_new_tokens=50`. Set to 0 to
+	 * disable.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
+	int32 MinNewTokens = 50;
+
 	/** llama.cpp sampler temperature. Matches the upstream Python default. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	float Temperature = 1.0f;
@@ -160,6 +181,22 @@ struct INONEUTTSNATIVE_API FInoNeuTtsOptions
 	/** llama.cpp top-k sampler. Matches the upstream Python default. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
 	int32 TopK = 50;
+
+	/**
+	 * llama.cpp top-p (nucleus) sampler. 0.95 matches llama-cpp-python's
+	 * default which the upstream NeuTTS reference relies on (it overrides
+	 * only Temperature + TopK and lets TopP / MinP stay at their defaults).
+	 * Set to 1.0 to disable.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
+	float TopP = 0.95f;
+
+	/**
+	 * llama.cpp min-p sampler. 0.05 matches llama-cpp-python's default.
+	 * Set to 0.0 to disable.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")
+	float MinP = 0.05f;
 
 	/** Seed for the dist sampler. -1 = use a fresh time-based seed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTts")

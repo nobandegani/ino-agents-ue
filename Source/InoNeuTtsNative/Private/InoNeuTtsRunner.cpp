@@ -205,6 +205,49 @@ namespace InoNeuTtsNative
 			}
 		}
 
+		// ---- Backbone warmup -------------------------------------------
+		// Run a tiny prefill + 1-token decode through llama_decode to pay
+		// the cold-start costs (kernel JIT on Vulkan, KV cache allocation,
+		// per-layer init) once at load time. The dummy uses BOS-only input
+		// (always present in the vocab); the resulting logits are discarded.
+		// Cleared from KV right after via llama_memory_clear so the actual
+		// synth path starts from a clean slate. Skipped if
+		// Config.bWarmupBackboneOnLoad is false or the BOS token isn't
+		// resolvable for any reason.
+		if (Config.bWarmupBackboneOnLoad)
+		{
+			const double WarmupT0 = FPlatformTime::Seconds();
+			llama_token BosToken = -1;
+			if (Api->llama_vocab_get_add_bos != nullptr)
+			{
+				// BOS isn't always exposed by the vocab — fall back to
+				// resolving "<|TEXT_PROMPT_START|>" which we know exists
+				// in the NeuTTS-extended Qwen2 vocab.
+				BosToken = ResolveSingleSpecialToken(
+					*Api, Runner->Vocab, "<|TEXT_PROMPT_START|>");
+			}
+
+			if (BosToken >= 0)
+			{
+				llama_memory_t Mem = Api->llama_get_memory(Runner->Context);
+				Api->llama_memory_clear(Mem, /*data*/ true);
+
+				llama_token DummyTokens[1] = { BosToken };
+				struct llama_batch DummyBatch =
+					Api->llama_batch_get_one(DummyTokens, 1);
+				if (Api->llama_decode(Runner->Context, DummyBatch) == 0)
+				{
+					const double WarmupMs =
+						(FPlatformTime::Seconds() - WarmupT0) * 1000.0;
+					UE_LOG(LogInoNeuTts, Log,
+						TEXT("Backbone warmup: %.2f ms"), WarmupMs);
+				}
+				// Restore an empty KV state so the first real synth (or
+				// PrimeVoice) starts clean.
+				Api->llama_memory_clear(Mem, /*data*/ true);
+			}
+		}
+
 		UE_LOG(LogInoNeuTts, Log,
 			TEXT("Runner ready. n_ctx=%u stop=%d decoder I/O=%d->%d desc='%s'"),
 			Api->llama_n_ctx(Runner->Context),
@@ -278,6 +321,12 @@ namespace InoNeuTtsNative
 			}
 		}
 
+		// Normalize whitespace to match vendor's `phones.split() + " ".join()`.
+		// eSpeak occasionally emits per-clause leading/trailing whitespace, and
+		// our clause-joining produces double spaces between clauses — both
+		// shift tokenization in subtle ways. Idempotent on already-clean input.
+		ResolvedRefPhones = NormalizePhones(ResolvedRefPhones);
+
 		// ---- 2. Build + tokenize the cacheable prefix ----
 		const FString PrefixString = BuildSynthesisPromptPrefix(ResolvedRefPhones);
 
@@ -339,10 +388,16 @@ namespace InoNeuTtsNative
 		// bound; the written count is the canonical state size.
 		Snapshot.SetNum(static_cast<int32>(Written), EAllowShrinking::No);
 
-		// ---- 5. Commit to cache ----
+		// ---- 5. Pre-build the speech-tokens block string ----
+		// Done once at prime time. Saves 650 FString::Printf + concat calls
+		// per synth and a meaningful amount of allocation pressure.
+		FString SpeechTokensBlock = BuildSpeechTokensBlock(Voice.RefCodes);
+
+		// ---- 6. Commit to cache ----
 		TUniquePtr<FInoNeuTtsVoiceCache> NewCache(new FInoNeuTtsVoiceCache());
 		NewCache->VoiceName         = Voice.Name;
 		NewCache->ResolvedRefPhones = MoveTemp(ResolvedRefPhones);
+		NewCache->SpeechTokensBlock = MoveTemp(SpeechTokensBlock);
 		NewCache->PrefixTokens      = MoveTemp(PrefixTokens);
 		NewCache->KvSnapshot        = MoveTemp(Snapshot);
 
@@ -350,10 +405,12 @@ namespace InoNeuTtsNative
 
 		const double Elapsed = FPlatformTime::Seconds() - T0;
 		UE_LOG(LogInoNeuTts, Log,
-			TEXT("Voice cache primed: '%s' prefix=%d tokens, snapshot=%d bytes, %.2f ms"),
+			TEXT("Voice cache primed: '%s' prefix=%d tokens, snapshot=%d bytes, ")
+			TEXT("speech-block=%d chars, %.2f ms"),
 			*VoiceCache->VoiceName,
 			VoiceCache->PrefixTokens.Num(),
 			VoiceCache->KvSnapshot.Num(),
+			VoiceCache->SpeechTokensBlock.Len(),
 			Elapsed * 1000.0);
 
 		return true;

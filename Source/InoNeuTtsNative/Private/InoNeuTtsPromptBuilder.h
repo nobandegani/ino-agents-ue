@@ -29,6 +29,24 @@ namespace InoNeuTtsNative
 		const TArray<int32>& RefCodes);
 
 	/**
+	 * Faster overload that takes a pre-built speech-tokens block string
+	 * (e.g. cached on FInoNeuTtsVoiceCache from a single
+	 * BuildSpeechTokensBlock call at voice-prime time). Skips the 650
+	 * FString::Printf + concatenations the RefCodes overload runs.
+	 */
+	FString BuildSynthesisPrompt(
+		const FString& RefPhones,
+		const FString& InputPhones,
+		const FString& SpeechTokensBlock);
+
+	/**
+	 * Build the `<|speech_N1|><|speech_N2|>...<|speech_NK|>` string from
+	 * an array of NeuCodec FSQ codes. This is the dominant string-build
+	 * cost in BuildSynthesisPrompt — pre-build once per voice and reuse.
+	 */
+	FString BuildSpeechTokensBlock(const TArray<int32>& RefCodes);
+
+	/**
 	 * Build only the cacheable prefix of the synthesis prompt — everything
 	 * up to (but not including) InputPhones. Used by the voice-cache path
 	 * to pre-tokenize and KV-snapshot the fixed-per-voice prefix:

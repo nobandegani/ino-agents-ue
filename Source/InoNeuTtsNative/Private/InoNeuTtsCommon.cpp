@@ -112,4 +112,40 @@ namespace InoNeuTtsNative
 		}
 		return true;
 	}
+
+	FString NormalizePhones(const FString& Phones)
+	{
+		// Single-pass walk: skip over any whitespace, emit one space between
+		// non-whitespace runs, trim edges. Equivalent to vendor's
+		//   " ".join(phones.split())
+		// without an intermediate TArray<FString>.
+		FString Out;
+		Out.Reserve(Phones.Len());
+
+		bool bInWord = false;
+		bool bAnyWordEmitted = false;
+		for (TCHAR Ch : Phones)
+		{
+			const bool bIsWs =
+				Ch == TEXT(' ') || Ch == TEXT('\t') ||
+				Ch == TEXT('\n') || Ch == TEXT('\r');
+
+			if (bIsWs)
+			{
+				bInWord = false;
+			}
+			else
+			{
+				if (!bInWord && bAnyWordEmitted)
+				{
+					Out.AppendChar(TEXT(' '));
+				}
+				Out.AppendChar(Ch);
+				bInWord         = true;
+				bAnyWordEmitted = true;
+			}
+		}
+
+		return Out;
+	}
 }

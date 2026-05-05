@@ -118,6 +118,7 @@ namespace InoNeuTtsNative
 			llama_token StopTokenId,
 			struct llama_sampler* Chain,
 			int32 MaxNewTokens,
+			int32 MinNewTokens,
 			const std::atomic<bool>* CancelFlag,
 			FString& OutGeneratedText,
 			bool& bOutCancelled)
@@ -138,14 +139,19 @@ namespace InoNeuTtsNative
 				// idx=-1 -> sample from logits at the last position
 				llama_token Next = Api.llama_sampler_sample(Chain, Ctx, -1);
 
-				// Stop conditions
-				if (Next == StopTokenId)
+				// Stop conditions — skipped until we've generated at
+				// least MinNewTokens. Mirrors the vendor torch reference's
+				// `min_new_tokens=50` guard against rare premature stops.
+				if (Generated >= MinNewTokens)
 				{
-					break;
-				}
-				if (Api.llama_vocab_is_eog(Vocab, Next))
-				{
-					break;
+					if (Next == StopTokenId)
+					{
+						break;
+					}
+					if (Api.llama_vocab_is_eog(Vocab, Next))
+					{
+						break;
+					}
 				}
 
 				// Capture the token's text and notify the sampler chain.
@@ -168,8 +174,14 @@ namespace InoNeuTtsNative
 		}
 
 		/**
-		 * Build the full sampler chain matching Neuphonic's reference
-		 * Python defaults: top_k(50) -> temp(1.0) -> dist(seed).
+		 * Build the full sampler chain matching Neuphonic's effective
+		 * defaults via llama-cpp-python: top_k -> top_p -> min_p -> temp -> dist.
+		 *
+		 * Vendor's `_infer_ggml` only overrides temperature + top_k, but
+		 * llama-cpp-python's `_init_sampler` applies top_p=0.95 and
+		 * min_p=0.05 from defaults. Skipping them produces a wider
+		 * sampling distribution than vendor; matching the chain keeps
+		 * audio quality consistent with the reference.
 		 *
 		 * The chain takes ownership of each added sub-sampler. Chain
 		 * itself is owned by the caller (free with llama_sampler_free).
@@ -182,8 +194,33 @@ namespace InoNeuTtsNative
 				Api.llama_sampler_chain_default_params();
 			struct llama_sampler* Chain = Api.llama_sampler_chain_init(Params);
 
-			Api.llama_sampler_chain_add(Chain, Api.llama_sampler_init_top_k(Options.TopK));
-			Api.llama_sampler_chain_add(Chain, Api.llama_sampler_init_temp(Options.Temperature));
+			// top_k — keep only the K most likely tokens. K<=0 disables.
+			if (Options.TopK > 0)
+			{
+				Api.llama_sampler_chain_add(Chain,
+					Api.llama_sampler_init_top_k(Options.TopK));
+			}
+
+			// top_p (nucleus) — keep the smallest set of tokens whose
+			// cumulative probability >= p. min_keep=1 ensures we always
+			// have at least one candidate.
+			if (Options.TopP < 1.0f && Options.TopP > 0.0f)
+			{
+				Api.llama_sampler_chain_add(Chain,
+					Api.llama_sampler_init_top_p(Options.TopP, /*min_keep*/ 1));
+			}
+
+			// min_p — drop tokens whose probability is < min_p * max_prob.
+			if (Options.MinP > 0.0f)
+			{
+				Api.llama_sampler_chain_add(Chain,
+					Api.llama_sampler_init_min_p(Options.MinP, /*min_keep*/ 1));
+			}
+
+			// Temperature — softmax sharpening. Applied after pruning so
+			// the surviving distribution is what gets temperature-scaled.
+			Api.llama_sampler_chain_add(Chain,
+				Api.llama_sampler_init_temp(Options.Temperature));
 
 			const uint32 Seed = (Options.RandomSeed < 0)
 				? static_cast<uint32>(FPlatformTime::Cycles())
@@ -364,7 +401,7 @@ namespace InoNeuTtsNative
 			&& Cache->VoiceName.Equals(Voice.Name, ESearchCase::IgnoreCase);
 
 		// ---- 1. Phonemize input text + ref text (use pre-baked if present) ----
-		const FString InputPhones =
+		FString InputPhones =
 			UInoSpeakNGBPLibrary::Phonemize(InputText, Voice.Language);
 		if (InputPhones.IsEmpty())
 		{
@@ -373,9 +410,10 @@ namespace InoNeuTtsNative
 				TEXT("Is InoSpeakNG initialized?"),
 				*Voice.Language));
 		}
+		InputPhones = NormalizePhones(InputPhones);
 
-		// Prefer the cache's resolved RefPhones (already phonemized at prime
-		// time), then Voice.RefPhones (offline pre-bake), then phonemize live.
+		// Prefer the cache's resolved RefPhones (already phonemized + normalized
+		// at prime time), then Voice.RefPhones (offline pre-bake), then live.
 		FString RefPhones = bHaveCacheCandidate
 			? Cache->ResolvedRefPhones
 			: Voice.RefPhones;
@@ -390,10 +428,21 @@ namespace InoNeuTtsNative
 					*Voice.Language));
 			}
 		}
+		// Normalize even cache-hit RefPhones is already normalized — but for the
+		// non-cached path (offline pre-bake or live phonemize) we have to do it
+		// here. Idempotent so cheap to always apply.
+		if (!bHaveCacheCandidate)
+		{
+			RefPhones = NormalizePhones(RefPhones);
+		}
 
 		// ---- 2. Build prompt ----
-		const FString Prompt = BuildSynthesisPrompt(
-			RefPhones, InputPhones, Voice.RefCodes);
+		// Cache hit: reuse the pre-built speech-tokens block string (~10 KB
+		// formatted once at prime time, saving 650 FString::Printf calls per
+		// synth). Cache miss: build it on the fly.
+		const FString Prompt = bHaveCacheCandidate
+			? BuildSynthesisPrompt(RefPhones, InputPhones, Cache->SpeechTokensBlock)
+			: BuildSynthesisPrompt(RefPhones, InputPhones, Voice.RefCodes);
 
 		// ---- 3. Tokenize ----
 		TArray<llama_token> PromptTokens;
@@ -513,6 +562,7 @@ namespace InoNeuTtsNative
 			Runner.GetStopTokenId(),
 			Chain,
 			Options.MaxNewTokens,
+			FMath::Max(0, Options.MinNewTokens),
 			CancelFlag,
 			GeneratedText,
 			bCancelled);
@@ -640,7 +690,7 @@ namespace InoNeuTtsNative
 			&& Cache->IsValid()
 			&& Cache->VoiceName.Equals(Voice.Name, ESearchCase::IgnoreCase);
 
-		const FString InputPhones =
+		FString InputPhones =
 			UInoSpeakNGBPLibrary::Phonemize(InputText, Voice.Language);
 		if (InputPhones.IsEmpty())
 		{
@@ -648,6 +698,7 @@ namespace InoNeuTtsNative
 				TEXT("Phonemization of input failed for language '%s'."),
 				*Voice.Language));
 		}
+		InputPhones = NormalizePhones(InputPhones);
 
 		FString RefPhones = bHaveCacheCandidate
 			? Cache->ResolvedRefPhones
@@ -660,9 +711,14 @@ namespace InoNeuTtsNative
 				return MakeFailure(TEXT("Phonemization of voice ref_text failed."));
 			}
 		}
+		if (!bHaveCacheCandidate)
+		{
+			RefPhones = NormalizePhones(RefPhones);
+		}
 
-		const FString Prompt = BuildSynthesisPrompt(
-			RefPhones, InputPhones, Voice.RefCodes);
+		const FString Prompt = bHaveCacheCandidate
+			? BuildSynthesisPrompt(RefPhones, InputPhones, Cache->SpeechTokensBlock)
+			: BuildSynthesisPrompt(RefPhones, InputPhones, Voice.RefCodes);
 
 		TArray<llama_token> PromptTokens;
 		FString TokenizeError;
@@ -791,6 +847,8 @@ namespace InoNeuTtsNative
 
 		bool bCancelled = false;
 		FString GenText;  // buffer for parsing token pieces (kept small per step)
+		int32 NewTokensGenerated = 0;
+		const int32 MinNewTokensGuard = FMath::Max(0, Options.MinNewTokens);
 
 		for (int32 Iter = 0; Iter < Options.MaxNewTokens; ++Iter)
 		{
@@ -804,8 +862,12 @@ namespace InoNeuTtsNative
 
 			llama_token Next = Api.llama_sampler_sample(Chain, Ctx, -1);
 
-			if (Next == Runner.GetStopTokenId() ||
-				Api.llama_vocab_is_eog(Vocab, Next))
+			// Stop conditions are skipped until we've generated at least
+			// MinNewTokens — prevents the model from emitting <|SPEECH_END|>
+			// in the first handful of tokens (rare but observed).
+			if (NewTokensGenerated >= MinNewTokensGuard &&
+				(Next == Runner.GetStopTokenId() ||
+				 Api.llama_vocab_is_eog(Vocab, Next)))
 			{
 				break;
 			}
@@ -815,6 +877,7 @@ namespace InoNeuTtsNative
 			AppendTokenPiece(Api, Vocab, Next, GenText);
 			Api.llama_sampler_accept(Chain, Next);
 			ParseAndAppendSpeechIds(GenText, SpeechIdCache);
+			++NewTokensGenerated;
 
 			struct llama_batch StepBatch = Api.llama_batch_get_one(&Next, 1);
 			if (Api.llama_decode(Ctx, StepBatch) != 0)

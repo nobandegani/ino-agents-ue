@@ -20,9 +20,17 @@ namespace InoNeuTtsNative
 	 *
 	 * What's cached:
 	 *   - VoiceName              — identifies which voice the snapshot is for.
-	 *   - ResolvedRefPhones      — the IPA phonemization of Voice.RefText.
-	 *                              Lazy-computed at prime time so synth calls
-	 *                              don't re-phonemize the reference text.
+	 *   - ResolvedRefPhones      — the IPA phonemization of Voice.RefText,
+	 *                              already whitespace-normalized. Lazy-
+	 *                              computed at prime time so synth calls
+	 *                              don't re-phonemize / re-normalize the
+	 *                              reference text.
+	 *   - SpeechTokensBlock      — pre-built `<|speech_N1|><|speech_N2|>...`
+	 *                              string (~10 KB for a typical 650-token
+	 *                              voice). Built once at prime time so synth
+	 *                              calls don't re-run 650 FString::Printf
+	 *                              + concatenations every time (this was a
+	 *                              dominant per-synth cost before caching).
 	 *   - PrefixTokens           — pre-tokenized form of the cacheable prompt
 	 *                              prefix (everything up to and including the
 	 *                              space after RefPhones — the largest fixed
@@ -48,6 +56,7 @@ namespace InoNeuTtsNative
 	{
 		FString             VoiceName;
 		FString             ResolvedRefPhones;
+		FString             SpeechTokensBlock;
 		TArray<llama_token> PrefixTokens;
 		TArray<uint8>       KvSnapshot;
 
@@ -55,7 +64,8 @@ namespace InoNeuTtsNative
 		{
 			return !VoiceName.IsEmpty()
 				&& KvSnapshot.Num() > 0
-				&& PrefixTokens.Num() > 0;
+				&& PrefixTokens.Num() > 0
+				&& !SpeechTokensBlock.IsEmpty();
 		}
 	};
 
