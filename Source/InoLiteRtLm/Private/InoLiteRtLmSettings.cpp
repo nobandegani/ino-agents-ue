@@ -59,7 +59,7 @@ FString UInoLiteRtLmSettings::GetModelsDir()
     return FPaths::Combine(
         FPaths::ProjectPersistentDownloadDir(),
         TEXT("InoAgents"),
-        TEXT("Models"));
+        TEXT("LiteRTLM"));
 }
 
 FString UInoLiteRtLmSettings::ResolveLocalPath(const FString& LocalFileName)

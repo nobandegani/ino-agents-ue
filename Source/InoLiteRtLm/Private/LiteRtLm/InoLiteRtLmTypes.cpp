@@ -38,7 +38,7 @@ FString LiteRtLmResolveModelPath(const FString& LocalFileName)
     }
 
     // 2. Plugin directory — legacy dev path (manual drop into
-    //    Plugins/InoAgents/Models/). Kept for backward compat with
+    //    Plugins/InoAgents/LiteRTLM/). Kept for backward compat with
     //    pre-PersistentDownloadDir workflows.
     {
         const TSharedPtr<IPlugin> Plugin =
@@ -46,7 +46,7 @@ FString LiteRtLmResolveModelPath(const FString& LocalFileName)
         if (Plugin.IsValid())
         {
             const FString Path = FPaths::Combine(
-                Plugin->GetBaseDir(), TEXT("Models"), LocalFileName);
+                Plugin->GetBaseDir(), TEXT("LiteRTLM"), LocalFileName);
             if (IFileManager::Get().FileExists(*Path))
             {
                 return FPaths::ConvertRelativePathToFull(Path);

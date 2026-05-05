@@ -258,7 +258,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
     check(IsInGameThread());
 
     TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakThis(this);
-    const FString                       ModelPathCopy   = ModelPath;
+    const FString                       ModelPathCopy   = FPaths::ConvertRelativePathToFull(ModelPath);
     const EInoLiteRtLmBackend              BackendCopy     = LoadedConfig.Backend;
     const int32                         MaxNumTokens    = LoadedConfig.MaxNumTokens;
     const EInoLiteRtLmActivationType       ActivationType  = LoadedConfig.ActivationType;

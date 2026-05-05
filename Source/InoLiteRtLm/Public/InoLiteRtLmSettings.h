@@ -68,7 +68,7 @@ public:
 
     /**
      * Directory where downloaded model files are stored:
-     *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/Models/
+     *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/LiteRTLM/
      *
      * Per-user, sandboxed on mobile, persists across project reinstalls.
      */
@@ -81,7 +81,7 @@ public:
      * Pure path construction — does NOT check that the file exists on
      * disk. Use `LiteRtLmResolveModelPath` (in InoLiteRtLmTypes.h) for
      * the existence-checking variant that also walks the legacy
-     * Plugins/InoAgents/Models/ fallback.
+     * Plugins/InoAgents/LiteRTLM/ fallback.
      */
     static FString ResolveLocalPath(const FString& LocalFileName);
 };
