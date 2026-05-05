@@ -4,129 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working inside 
 
 ## Purpose
 
-`InoAgents` is an Unreal Engine 5.7 runtime plugin that embeds **Google Gemma 4** on-device, so UE games and tools can run LLM-powered agents inside the game process with no external server and no cloud dependency.
+`InoAgents` is an Unreal Engine 5.7 runtime plugin that delivers on-device AI capabilities to UE games and tools — agent-style tool calling, on-device TTS (Chatterbox Turbo + NeuTTS Nano/Air), cloud TTS (ElevenLabs), and the supporting Slate UI / animation helpers — through Blueprint-friendly subsystems.
 
 The plugin is named for "agents" deliberately: the goal is not just text generation but **tool-use / function-calling workflows** running natively in UE, driven from Blueprint.
 
-## Runtimes: LiteRT-LM + ONNX Runtime + llama.cpp
+## Runtimes: ONNX Runtime + llama.cpp
 
-The plugin carries **three** on-device ML runtimes, each doing what it's best at:
+The plugin carries **two** on-device ML runtimes, each doing what it's best at:
 
-- **LiteRT-LM** — Google's TFLite-based LLM runtime. Handles Gemma 4 inference (chat, tool calling, streaming). Built and staged by the sibling **`InoLiteRT`** plugin (see `Plugins/InoLiteRT/CLAUDE.md`); InoAgents links against the `LiteRtLm.dll` / `libLiteRtLm.so` it produces and consumes the same C API. See the sections below for how InoAgents uses the runtime.
 - **ONNX Runtime** — Microsoft's ONNX inference runtime. Reserved for everything non-LLM: TTS models (Chatterbox Turbo + NeuCodec decoder for NeuTTS Nano), audio codec decoders, future vision / classifier / embedding models. Built and staged by the sibling **`InoOnnx`** plugin (see `Plugins/InoOnnx/CLAUDE.md`); InoAgents links against the `InoOnnxRuntime.dll` / `libInoOnnxRuntime.so` it produces and consumes the `OrtApi` vtable via `InoAgents::Onnx::GetApi()`.
 - **llama.cpp** — The canonical on-device runtime for GGUF-format LLMs. Built and staged by the sibling **`InoLlama`** plugin (see `Plugins/InoLlama/CLAUDE.md`); InoAgents links against the `llama.dll` / `libllama.so` graph it produces and consumes the `FLlamaCppApi` vtable via `InoAgents::LlamaCpp::GetApi()`. First and currently only consumer: **NeuTTS Nano TTS**.
 
-Why three runtimes instead of one: each is purpose-built for a specific ecosystem of models. LiteRT-LM is purpose-built for Gemma 4 (KV-cache, chat-template-aware streaming, quantized weights) and has no credible story for running arbitrary ONNX or GGUF models. ONNX Runtime is the industry-standard runtime for ONNX graphs (the only format Chatterbox and NeuCodec ship in) with prebuilts on every platform. llama.cpp is the only production-grade runtime for GGUF-format LLMs (which covers Qwen, Phi, Llama, SmolLM, NeuTTS's Qwen2 backbone, and essentially every non-Gemma open LLM worth running on-device). Each runtime is small enough (~14 MB LiteRT-LM + ~14 MB ORT + ~2-80 MB llama.cpp depending on backends shipped) that carrying all three costs less than forcing one runtime to do all three jobs. All three use the same integration shape (prebuilt binaries, dynamic loading, platform-aware execution providers) so the mental model stays consistent.
-
-### LiteRT-LM
-
-LiteRT-LM is **owned by the sibling `InoLiteRT` plugin** — see
-`Plugins/InoLiteRT/CLAUDE.md` for the runtime itself: how it's built,
-which SHA is pinned, supported platforms, backend selection, build
-scripts, the C API header, and packaging. InoAgents is purely a
-**consumer** — we link against `InoLiteRT` via `PublicDependencyModuleNames`
-and call the C API directly from `Source/InoAgents/Private/LiteRtLm/`.
-
-Why LiteRT-LM as the LLM backend (vs llama.cpp / ONNX-GenAI / MLX /
-MediaPipe): single runtime that covers all our target platforms,
-first-class support for Gemma 4 with public Hugging Face model bundles,
-**native tool-use / function-calling exposed through the public C API**
-(matches the plugin's "agents" mandate, not prompt-engineered on top of
-a raw completion API), and a Windows GPU path that's pure D3D12 with no
-extra CUDA / Vulkan / OpenCL runtime to ship alongside the game.
-
-LiteRT-LM is **pre-1.0** — InoLiteRT pins a specific submodule SHA and
-never tracks `main`. When that pin bumps, re-test the items in the next
-section.
-
-### Known LiteRT-LM Gemma 4 runtime limitations
-
-These three Gemma-4-specific behaviours were originally discovered against v0.10.1. The pinned SHA bumped to post-v0.10.2 as part of the InoLiteRT extraction; items 1 and 2 are now re-enabled and pending smoke-test verification on the new SHA.
-
-1. **Session config (sampler params + max output tokens).** Passing a non-null `LiteRtLmSessionConfig*` previously caused `litert_lm_conversation_create` to return NULL for Gemma 4 models, with a knock-on effect that subsequent conversation creations on the same engine produced error 13 on `send_message_stream`. With the move to the post-v0.10.2 SHA the session-config path has been **re-enabled** in `InoLiteRtLmConversation.cpp` — `litert_lm_conversation_config_set_session_config` now passes `FInoLiteRtLmSamplerConfig` and `MaxOutputTokens` through to the engine. **Status: pending smoke-test verification on the new SHA — flip back to `nullptr` if `conversation_create` still returns NULL for Gemma 4.**
-
-2. **Activation data type (F16/I16/I8).** `litert_lm_engine_settings_set_activation_data_type` with non-F32 values previously loaded the engine successfully but `send_message_stream` returned error 13 (`absl::StatusCode::kInternal`) at runtime — corroborated by upstream `engine.cc:332-338` force-overriding activation to F32 for GPU backends and TODO bug `b/433590109` acknowledging FP16 GPU incompatibilities. Default `FInoLiteRtLmModelConfig::ActivationType` is now **F16** (was forced F32). **Status: pending smoke-test verification on the new SHA — change the default back to F32 if the first message returns error 13.** If a user previously loaded a model with one activation setting and gets error 13 after a config change, deleting the XNNPACK cache (next to the model file, or in the custom CacheDir) forces regeneration with the new format.
-
-3. **`extra_context` parameter is ignored by Gemma 4.** The C API's `litert_lm_conversation_send_message_stream` accepts an `extra_context` JSON string. The Rust minijinja runtime injects its top-level keys as Jinja2 template variables. However, the Gemma 4 chat template (embedded in the `.litertlm` model file) does **not** reference any custom template variables — it only uses `bos_token`, `messages`, `tools`, `add_generation_prompt`, and `enable_thinking`. Any `extra_context` values are silently dropped by the template engine. Verified by extracting the template from the model binary and by runtime testing with flat key-value JSON. **Workaround:** per-turn dynamic context (game state, player state) is prepended as plain text in the user message, wrapped in `[Context]`/`[/Context]` tags, via `BuildMergedContext()`. The `SetSystemContext`/`SetUserContext` API on `UInoLiteRtLmConversation` feeds into this path.
-
-When the InoLiteRT pinned SHA bumps again, re-test all three of these — they are the most impactful unlocks (lower RAM via F16, creative control via temperature, native context injection).
-
-## Integration approach: link, not subprocess
-
-We considered and rejected a subprocess-based integration (spawning `litert_lm_main --multi_turns` and piping stdin/stdout). Reasons:
-
-1. **Tool calling is only available through the C++ / C API, not the CLI.** The CLI's `--multi_turns` mode does plain text chat only. A subprocess backend could never expose the plugin's headline feature.
-2. **Subprocess is impossible on iOS** (code signing prohibits `exec` of bundled binaries) **and forbidden by Google Play Protect on Android.** Since phases 2–3 must link LiteRT-LM as a library anyway, doing subprocess for phase 1 would just mean writing the same backend twice.
-3. **Crash isolation is real but restart cost is huge.** Reloading a 3.2 GB Gemma 4 model after a subprocess crash takes seconds. Not a win in practice.
-
-The plugin uses **one integration strategy across all five platform phases: linked library via the LiteRT-LM public C API**.
-
-## DLL boundary: pure C API (`litert/lm/engine.h`)
-
-InoAgents calls the LiteRT-LM C API directly from
-`Source/InoAgents/Private/LiteRtLm/InoLiteRtLmConversation.cpp` and
-`InoLiteRtLmConversationWorker.cpp` — `#include "litert/lm/engine.h"`,
-which resolves through InoLiteRT's public include path. The header is
-pure C (`extern "C"`) with opaque pointers + primitive types + C
-callbacks, so the UE integration skips entire classes of pain:
-
-- **No C++ ABI matching** — no libstdc++-vs-MSVC-STL concerns, no
-  iterator ABI, no exception propagation across the DLL boundary.
-- **No STL types in the boundary** — `LiteRtLmEngine*`,
-  `LiteRtLmSession*`, `LiteRtLmConversation*`, etc. + primitive types
-  + `LiteRtLmStreamCallback`. Nothing more.
-- **No hand-written wrapper layer** — UE-side work is marshalling
-  between C types and UE types, not bridging ABIs.
-
-The subset of the API InoAgents actively consumes:
-
-- **Engine / conversation lifecycle.** `litert_lm_engine_settings_create`
-  (with backend `"cpu"` / `"gpu"` / `"npu"`, vision/audio backends
-  currently `nullptr`), `litert_lm_engine_create`, no-arg
-  `litert_lm_conversation_config_create()` + per-field setters
-  (`set_session_config`, `set_system_message`, `set_tools`,
-  `set_messages`, `set_enable_constrained_decoding`),
-  `litert_lm_conversation_create`.
-- **Streaming.** `litert_lm_conversation_send_message_stream` with our
-  `LiteRtLmStreamCallback` trampoline; `litert_lm_conversation_cancel_process`
-  for cooperative abort.
-- **Sampler params + activation precision** via `LiteRtLmSessionConfig`
-  + `litert_lm_engine_settings_set_activation_data_type` (see Gemma 4
-  runtime limitations above for current status).
-- **Logging.** `litert_lm_set_min_log_level` (called from the InoLiteRT
-  smoke test, not from InoAgents itself).
-
-What's available in the API but **not yet wired** in InoAgents:
-multimodal `LiteRtLmInputData` (image/audio types), tokenization helpers
-(`litert_lm_engine_tokenize` / `_detokenize`,
-`_get_start_token` / `_get_stop_tokens`), low-level prefill/decode split
-(`litert_lm_session_run_prefill` / `_run_decode`),
-`litert_lm_session_run_text_scoring`, benchmark info getters, speculative
-decoding. See `Plugins/InoLiteRT/Source/ThirdParty/Public/litert/lm/engine.h`
-for the full surface.
-
-## Model scope
-
-Only the two "E" (edge / on-device) Gemma 4 variants are in scope for this plugin:
-
-| Variant | Effective params | Context | Modalities | File size |
-|---|---|---|---|---|
-| **E2B** | ~2B | 128K | Text + Image + Audio | ~2.6 GB |
-| **E4B** | ~4B | 128K | Text + Image + Audio | ~3.7 GB |
-
-**Both variants are fully multimodal** — verified by inspecting the `.litertlm` containers directly. Both files carry `tf_lite_vision_encoder` + `vision_adapter_280` and `tf_lite_audio_encoder_hw` + `audio_adapter_features/mask` sections, plus `<|image|>` and `<|audio|>` special tokens and template branches for both modalities. E4B differs from E2B only in LLM backbone size (4B vs 2B effective params); the vision and audio encoders are identical. Earlier versions of this file claimed E2B was text+image-only — that was wrong.
-
-Note: **our UE-side wrapper currently passes `nullptr` for `vision_backend_str` and `audio_backend_str`** in `InoLiteRtLmSubsystem.cpp`'s `litert_lm_engine_settings_create` call, so even though the models support images/audio, the plugin's current code path only consumes text. Enabling multimodal input is tracked as future work — requires wiring image/audio payloads into our `UInoLiteRtLmConversation` Blueprint API and building `LiteRtLmInputData` arrays for the C API.
-
-Gemma 4's **31B dense** and **26B A4B MoE** server-class variants are **intentionally out of scope** — they are not realistic to run inside a consumer UE game process alongside a renderer (17+ GB VRAM just for weights), and LiteRT-LM is an edge runtime, not a server runtime.
+Why two runtimes instead of one: each is purpose-built for a specific ecosystem of models. ONNX Runtime is the industry-standard runtime for ONNX graphs (the only format Chatterbox and NeuCodec ship in) with prebuilts on every platform. llama.cpp is the only production-grade runtime for GGUF-format LLMs (which covers Qwen, Phi, Llama, SmolLM, NeuTTS's Qwen2 backbone, and essentially every open LLM worth running on-device). Both runtimes are small (~14 MB ORT + ~2-80 MB llama.cpp depending on backends shipped) and use the same integration shape (prebuilt binaries, dynamic loading, platform-aware execution providers) so the mental model stays consistent.
 
 ## Repository layout
 
 ```
 Plugins/InoAgents/
-├── InoAgents.uplugin                              ← declares "InoLiteRT", "InoOnnx", "InoLlama"
+├── InoAgents.uplugin                              ← declares "InoOnnx" and "InoLlama"
 │                                                    in its Plugins array so UE refuses to load
-│                                                    InoAgents without all three
+│                                                    InoAgents without both
 │
 ├── Chatterbox/                                    ← Chatterbox Turbo TTS — model staging
 │   ├── CHATTERBOX_VERSION                         ← HuggingFace repo revision pin
@@ -139,18 +36,12 @@ Plugins/InoAgents/
 │
 ├── Source/
 │   ├── InoAgents/                                 ← runtime module (UE-facing — consumes
-│   │                                                LiteRT-LM, ORT, llama.cpp via siblings)
+│   │                                                ORT and llama.cpp via siblings)
 │   │   ├── InoAgents.Build.cs
 │   │   ├── Public/
 │   │   │   ├── InoAgents.h                        ← module interface (FInoAgentsModule)
 │   │   │   ├── InoAgentsSettings.h                ← UInoAgentsSettings (UDeveloperSettings —
-│   │   │   │                                        ElevenLabs + LiteRT-LM + Chatterbox)
-│   │   │   ├── LiteRtLm/                          ← Blueprint-facing LLM types
-│   │   │   │   ├── InoLiteRtLmTypes.h             ← model config, message struct, delegates
-│   │   │   │   ├── InoLiteRtLmSubsystem.h         ← engine owner, tool registry, chat panel
-│   │   │   │   ├── InoLiteRtLmConversation.h      ← stateful chat, sentence/tag flag bitmasks
-│   │   │   │   ├── InoLiteRtLmToolBase.h          ← Blueprintable tool base class
-│   │   │   │   └── InoLiteRtLmAddNumbersTool.h    ← canonical tool sample
+│   │   │   │                                        ElevenLabs + Chatterbox)
 │   │   │   ├── Onnx/                              ← generic ONNX session / tensor API
 │   │   │   │   │                                    (built on top of the InoOnnx-supplied
 │   │   │   │   │                                    OrtApi vtable via InoAgents::Onnx::GetApi())
@@ -178,15 +69,6 @@ Plugins/InoAgents/
 │   │       │                                        sibling plugins pre-load at PreLoadingScreen)
 │   │       ├── InoAgentsLog.h                     ← shared LogInoAgents category
 │   │       ├── InoAgentsSettings.cpp
-│   │       ├── LiteRtLm/                          ← LLM-side impl
-│   │       │   ├── InoLiteRtLmSubsystem.cpp       ← engine owner + chunked download flow
-│   │       │   ├── InoLiteRtLmConversation.cpp    ← sentence/tag state machines
-│   │       │   ├── InoLiteRtLmConversationWorker.{h,cpp} ← FRunnable, tool agent loop
-│   │       │   ├── InoLiteRtLmTypes.cpp           ← model path resolution
-│   │       │   ├── InoLiteRtLmToolBase.cpp        ← schema builder
-│   │       │   ├── InoLiteRtLmAddNumbersTool.cpp
-│   │       │   ├── InoLiteRtLmStubs_NonWindows.cpp ← (compile-only) stubs for iOS/Linux/macOS
-│   │       │   └── InoSha256.{h,cpp}              ← model-file integrity check
 │   │       ├── Onnx/                              ← ORT-side impl (calls into the
 │   │       │   │                                    InoOnnx-supplied OrtApi vtable)
 │   │       │   ├── InoOnnxInternal.{h,cpp}        ← CheckOrtStatus, dtype conv, env singleton
@@ -217,18 +99,6 @@ Plugins/InoAgents/
 │   │       │   └── SInoToolPill.{h,cpp}
 │   │       └── SmokeTests/                        ← dev-time console commands
 │   │           ├── InoSmokeTestCommon.{h,cpp}     ← shared helpers (model paths, JSON, etc.)
-│   │           ├── InoLoadEngineTest.cpp          ← Ino.LoadEngineTest
-│   │           ├── InoGenerateTest.cpp            ← Ino.GenerateTest
-│   │           ├── InoConversationTest.cpp       ← Ino.ConversationTest
-│   │           ├── InoToolCallTest.cpp            ← Ino.ToolCallTest
-│   │           ├── InoStreamTest.cpp              ← Ino.StreamTest
-│   │           ├── InoLiteRtLmSubsystemLoadTest.{h,cpp}     ← Ino.LiteRtLm.SubsystemLoadTest
-│   │           ├── InoLiteRtLmConversationSendTest.{h,cpp}  ← Ino.LiteRtLm.ConversationSendTest
-│   │           ├── InoLiteRtLmConversationStreamTest.{h,cpp}← Ino.LiteRtLm.ConversationStreamTest
-│   │           ├── InoLiteRtLmConversationToolTest.{h,cpp}  ← Ino.LiteRtLm.ConversationToolTest
-│   │           ├── InoLiteRtLmConversationContextTest.{h,cpp} ← Ino.LiteRtLm.ConversationContextTest
-│   │           ├── InoLiteRtLmToolRegistryTest.cpp ← Ino.LiteRtLm.ToolRegistryTest
-│   │           ├── InoLiteRtLmShowChatPanelTest.cpp ← Ino.LiteRtLm.ShowChatPanel / HideChatPanel
 │   │           ├── InoOnnxTest.cpp                ← Ino.Onnx.ProvidersTest, .SessionFromFileTest
 │   │           ├── InoOnnxListDmlAdaptersTest.cpp ← Ino.Onnx.ListDmlAdaptersTest
 │   │           ├── InoLlamaCppBackendInfoTest.cpp ← Ino.LlamaCpp.BackendInfoTest
@@ -251,17 +121,16 @@ Plugins/InoAgents/
 └── (no Binaries/ThirdParty — sibling plugins own all runtime binaries)
 ```
 
-**The three runtimes are NOT in this layout.** They live in sibling plugins, each in its own repo with its own `CLAUDE.md`:
+**The two runtimes are NOT in this layout.** They live in sibling plugins, each in its own repo with its own `CLAUDE.md`:
 
-- `Plugins/InoLiteRT/` — LiteRT + LiteRT-LM (Bazel-built, owns its `Source/ThirdParty/` and `LiteRT/` workspace).
 - `Plugins/InoOnnx/`   — ONNX Runtime + DirectML (NuGet prebuilts, owns its `Source/ThirdParty/` and `OnnxRuntime/` workspace).
 - `Plugins/InoLlama/`  — llama.cpp (release prebuilts, owns its `Source/ThirdParty/` and `LlamaCpp/` workspace).
 
-All three pre-load their DLLs/.so at `LoadingPhase=PreLoadingScreen`, strictly before InoAgents' `Default`-phase StartupModule runs. From InoAgents' perspective the runtimes are simply available: `#include "litert/lm/engine.h"` / `#include "onnxruntime_c_api.h"` / `#include "llama.h"`, with the import libs and runtime staging handled by the sibling Build.cs files via the `"InoLiteRT"` / `"InoOnnx"` / `"InoLlama"` entries in `InoAgents.Build.cs`'s `PublicDependencyModuleNames`.
+Both pre-load their DLLs/.so at `LoadingPhase=PreLoadingScreen`, strictly before InoAgents' `Default`-phase StartupModule runs. From InoAgents' perspective the runtimes are simply available: `#include "onnxruntime_c_api.h"` / `#include "llama.h"`, with the import libs and runtime staging handled by the sibling Build.cs files via the `"InoOnnx"` / `"InoLlama"` entries in `InoAgents.Build.cs`'s `PublicDependencyModuleNames`.
 
 ## Build system: handled by sibling plugins
 
-InoAgents itself has no third-party build involvement. LiteRT-LM is built from source with Bazel by **`InoLiteRT`**; ONNX Runtime is downloaded as Microsoft prebuilts and patched / renamed by **`InoOnnx`**; llama.cpp is downloaded as ggml-org release artifacts by **`InoLlama`**. Adding new `litert_lm_*` / `Ort*` / `llama_*` calls in InoAgents only requires the corresponding `#include` — the headers are exposed via the sibling plugins' `PublicSystemIncludePaths`, the import libs are in their `PublicAdditionalLibraries`, and the runtime DLLs/.so are pre-loaded by their PreLoadingScreen-phase StartupModule. See `Plugins/InoLiteRT/CLAUDE.md`, `Plugins/InoOnnx/CLAUDE.md`, and `Plugins/InoLlama/CLAUDE.md` for each runtime's build / pin / packaging story. If a build error references a missing symbol, the fix is on the sibling-plugin side, not in InoAgents.
+InoAgents itself has no third-party build involvement. ONNX Runtime is downloaded as Microsoft prebuilts and patched / renamed by **`InoOnnx`**; llama.cpp is downloaded as ggml-org release artifacts by **`InoLlama`**. Adding new `Ort*` / `llama_*` calls in InoAgents only requires the corresponding `#include` — the headers are exposed via the sibling plugins' `PublicSystemIncludePaths`, the import libs are in their `PublicAdditionalLibraries`, and the runtime DLLs/.so are pre-loaded by their PreLoadingScreen-phase StartupModule. See `Plugins/InoOnnx/CLAUDE.md` and `Plugins/InoLlama/CLAUDE.md` for each runtime's build / pin / packaging story. If a build error references a missing symbol, the fix is on the sibling-plugin side, not in InoAgents.
 
 ## ONNX Runtime API surface (used by Chatterbox / NeuTTS Nano / future ONNX consumers)
 
@@ -428,13 +297,13 @@ constexpr int32   DEFAULT_MAX_NEW_TOKENS = 1024;  // reference script default
 ### Sizing / deployment realities
 
 - **Total repo size** across all 5 quantization levels: 7.39 GB. A single-dtype deployment bundle is roughly 1.4 GB (fp32) down to ~350 MB (q4) per the HF file listing plus tokenizer/config.
-- **RAM**: ~3.2 GB peak on iPhone/Mac at fp32 per HF Discussion #42. Gemma 4 E2B (~2.58 GB) + Chatterbox fp32 = ~5.8 GB resident, leaving ~2 GB for UE + OS on an 8 GB Android. Plan to ship **q4 or q4f16** on Android; fp16 or fp32 is fine on Win64.
+- **RAM**: ~3.2 GB peak on iPhone/Mac at fp32 per HF Discussion #42. Plan to ship **q4 or q4f16** on Android; fp16 or fp32 is fine on Win64.
 - **Bottleneck**: the `conditional_decoder`'s attention layers dominate wall time. Turbo's single-step decoder is already the big win — no further model-side optimization available to us.
 - **Streaming**: the reference loop is one-shot (full sentence synthesized before any audio is emitted). First-audio latency is roughly `max_new_tokens × per_token_ms + decoder_ms`. For conversational UX, plan to run the decoder incrementally on chunks of generated speech tokens so audio starts playing before the LM finishes — doable because Turbo's decoder is single-step and cheap per-chunk, but adds orchestration work.
 
 ### How it's wired up in the plugin
 
-Actual layout (follows the pattern established by `Source/InoAgents/Onnx` / `Source/InoAgents/LiteRtLm`):
+Actual layout (follows the pattern established by `Source/InoAgents/Onnx`):
 
 ```
 Plugins/InoAgents/
@@ -492,7 +361,7 @@ Only one variant is resident at a time — switching is `UnloadModels()` then a 
 
 ### Subsystem API surface
 
-`UInoChatterboxTurboNativeSubsystem` mirrors `UInoLiteRtLmSubsystem`'s ergonomics — game-instance-scoped, async load with progress, async synth with cancellation. Public methods that matter:
+`UInoChatterboxTurboNativeSubsystem` is game-instance-scoped, with async load + progress and async synth + cancellation. Public methods that matter:
 
 - `LoadModelsAsync(Config, OnLoaded)` — resolves missing files via the Project Settings entry (`UInoAgentsSettings::ChatterboxModels`), downloads them sequentially with `OnDownloadProgress` (HEAD-probe pass for aggregate total → GET pass with `.partial` staging + atomic rename → ThreadPool dispatch into `Models::LoadFromDir` + tokenizer parse), then fires `OnLoaded(true, "")` on the game thread. Optional `default_voice.wav` (~714 KB) is downloaded as a non-required file alongside the model, so the minimal "load + synth" flow can be a no-args `SynthesizeAsync` call (no reference voice required from the caller).
 - `SynthesizeAsync(Text, Voice, Options, OnComplete)` — one-shot synthesis. Worker dispatches the runner, runner produces the full 24 kHz mono int16 PCM LE waveform in `Result.AudioSamples`, marshals back to the game thread.
@@ -1088,66 +957,12 @@ for both Nano and Air.
 
 ## UE-side integration architecture
 
-The UE-facing API lives under `Source/InoAgents/Public/` (Blueprint-visible types) with mirroring private impl under `Source/InoAgents/Private/`. LLM-facing types are prefixed `LiteRtLm` rather than `InoAgents` on purpose — future versions of this plugin may host multiple LLM backends (OpenAI, Anthropic, llama.cpp) and each backend's classes live in their own subdirectory. Naming the classes after the backend from day one makes the boundary explicit. The same pattern applies to the other subsystems: `Chatterbox*` for the on-device TTS, `ElevenLabs*` for the cloud TTS, `*ChatPanel*` for the dev chat UI, etc.
+The UE-facing API lives under `Source/InoAgents/Public/` (Blueprint-visible types) with mirroring private impl under `Source/InoAgents/Private/`. Each subsystem is named after the backend it represents — `Chatterbox*` for the on-device TTS, `ElevenLabs*` for the cloud TTS — so the boundary between them is explicit.
 
-There is **no "agent component"** that bundles everything together. Earlier drafts of this file described a `UInoLiteRtLmAgentComponent` + `UInoAgentsStreamingAudioComponent` + `UInoLiteRtLmDialogueQueue` trio that wired LLM tokens directly into a TTS playback queue; that scaffolding was removed in favour of letting Blueprint / C++ callers wire the subsystems together themselves (the demo project's character actor is the integration point). What remains is a set of independently-useful subsystems and helpers, listed below.
+There is **no "agent component"** that bundles everything together. Blueprint / C++ callers wire the subsystems together themselves (the demo project's character actor is the integration point). What remains is a set of independently-useful subsystems and helpers, listed below.
 
 ```
-Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsystem)
-                 │     Owns LiteRtLmEngine*, tool registry, the in-PIE chat
-                 │     panel. LoadModelAsync auto-downloads + SHA-256-verifies
-                 │     models from URLs in UInoAgentsSettings; a chunked
-                 │     range-based download (500 MB chunks) keeps multi-GB
-                 │     downloads inside TArray<uint8>'s int32 size limit.
-                 │     Single-conversation invariant — see the header.
-                 │     OnDownloadProgress fires during download.
-                 │
-                 ├─ UInoLiteRtLmConversation         (UObject, BlueprintType)
-                 │     One stateful chat with the loaded engine. Owns one
-                 │     native LiteRtLmConversation* plus a pinned worker
-                 │     thread (FInoLiteRtLmConversationWorker). Multicast
-                 │     delegates fire on the game thread, in order:
-                 │       OnUserMessage(Text)              — synchronous echo
-                 │       OnToken(RawText, CleanText)      — per chunk
-                 │       OnSentence(RawText, CleanText)   — per split boundary
-                 │       OnSentenceBoundary()             — split signal (no payload)
-                 │       OnToolCalled(Name, ArgsJson, ResultJson) — diagnostic
-                 │       OnComplete(FullText)             — terminal (success)
-                 │       OnError(ErrorMessage)            — terminal (failure)
-                 │     Configurable bitmasks:
-                 │       SentenceSplitFlags — newline + which punctuation+space
-                 │                            triggers OnSentence (default: \n,
-                 │                            ". ", ", ", "? ", "! ")
-                 │       TagStripFlags      — which delimiter pairs get stripped
-                 │                            from CleanText (default: [...] {...})
-                 │     Per-turn context injection (NOT in chat history):
-                 │       SetSystemContext / SetUserContext (+ Add/Get/Clear)
-                 │       merged into the user message via [Context]/[/Context]
-                 │       tags by BuildMergedContext — see the Gemma 4 chat-template
-                 │       limitation around extra_context for why this isn't a
-                 │       template var.
-                 │     Lifecycle: Cancel (abort in-flight stream),
-                 │       IsStreamingInFlight, Shutdown (deterministic teardown,
-                 │       safe inside a delegate handler — unlike CollectGarbage),
-                 │       SubmitDeferredToolResult (header-only stub, see "Tool
-                 │       calling flow" below).
-                 │
-                 ├─ FInoLiteRtLmModelConfig         (USTRUCT, BlueprintType)
-                 │     Plain struct (NOT a UDataAsset). Fields:
-                 │       ModelFileName — resolved via LiteRtLmResolveModelPath:
-                 │         1. PersistentDownloadDir/InoAgents/Models/ (cached)
-                 │         2. Plugins/InoAgents/Models/ (legacy dev drop)
-                 │         3. auto-download from UInoAgentsSettings URL
-                 │       Backend (Cpu / Gpu), MaxNumTokens, SystemMessage
-                 │
-                 ├─ UInoLiteRtLmToolBase            (Blueprintable abstract UObject)
-                 │     Subclass, set ToolName/Description/Parameters, override
-                 │     Execute(ArgsJson)→ResultJson. Schema is built automatically
-                 │     from the properties via BuildSchemaJson.
-                 │     UInoLiteRtLmAddNumbersTool ships as the canonical example
-                 │     (used by Ino.LiteRtLm.ConversationToolTest).
-                 │
-                 ├─ UInoChatterboxTurboNativeSubsystem      (UGameInstanceSubsystem)
+Blueprint / C++ ─┬─ UInoChatterboxTurboNativeSubsystem      (UGameInstanceSubsystem)
                  │     On-device TTS. Owns the 4 ORT sessions
                  │     (speech_encoder / embed_tokens / language_model /
                  │     conditional_decoder) plus the GPT-2 BPE tokenizer.
@@ -1186,23 +1001,11 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │     or your own audio pipeline.
                  │
                  ├─ UInoAgentsSettings              (UDeveloperSettings)
-                 │     Project Settings → Plugins → InoAgents. Three sections:
+                 │     Project Settings → Plugins → InoAgents. Two sections:
                  │       ElevenLabs : ApiKey, BaseUrl, DefaultModelId,
                  │                    DefaultOutputFormat
-                 │       LiteRT-LM  : Models — array of {DisplayName, FileName,
-                 │                    DownloadUrl, ExpectedSha256}
                  │       Chatterbox : ChatterboxModels — array of {DisplayName,
                  │                    Variant, HuggingFaceRepoUrl, Revision}
-                 │
-                 ├─ Slate chat panel                 (dev / debug UI)
-                 │     SInoChatPanel + UInoChatBridge. Bridge holds a UPROPERTY
-                 │     ref to the conversation, owns the UFUNCTION handlers
-                 │     bound via AddDynamic, and forwards events into the panel
-                 │     via TWeakPtr. Subsystem methods ShowChatPanel /
-                 │     HideChatPanel + console commands
-                 │     Ino.LiteRtLm.ShowChatPanel / Ino.LiteRtLm.HideChatPanel
-                 │     drive it. Wraps the panel inside a viewport widget;
-                 │     PIE-end auto-hides via the PrePIEEnded hook.
                  │
                  ├─ UInoAnimationBlueprintHelper    (UBlueprintFunctionLibrary)
                  │     Stateless animation helpers exposed for the demo
@@ -1231,85 +1034,13 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                      in their training distribution during pauses, default
                      ~-76 dBFS); SaveInt16PcmAsWav (write PCM bytes + RIFF
                      header — useful for verifying Chatterbox output).
-                            │
-                            ▼
-                  FInoLiteRtLmConversationWorker (FRunnable, one per conversation)
-                            │   Owns the native LiteRtLmConversation + config.
-                            │   Multi-round agent loop. Marshals every delegate
-                            │   broadcast back to the game thread via AsyncTask.
-                            ▼
-                  LiteRtLm.dll  (pure C API — litert_lm_conversation_*)
 ```
-
-### Threading model (non-negotiable)
-
-- **`StartupModule` never blocks on model load.** Gemma 4 E2B is ~3.2 GB; synchronous load would freeze the editor for 5–30 seconds. `LoadModelAsync` dispatches via `Async(EAsyncExecution::ThreadPool, ...)`, calls `litert_lm_engine_create` there, and marshals the `FOnInoLiteRtLmModelLoaded` delegate back to the game thread via `AsyncTask(ENamedThreads::GameThread, ...)`. A `TWeakObjectPtr<UInoLiteRtLmSubsystem>` guards against the subsystem being torn down while the load is in flight.
-- **Inference never runs on the game thread.** Every `UInoLiteRtLmConversation` owns an `FInoLiteRtLmConversationWorker` (an `FRunnable` on a dedicated `FRunnableThread`). Messages enter the worker via a `TQueue<FString, EQueueMode::Spsc>` whose producer is `EnqueueMessage` on the game thread. The worker calls `litert_lm_conversation_send_message_stream` which itself is non-blocking — it returns immediately and fires the C callback from LiteRT-LM's own internal thread. The worker uses two `FEvent`s:
-  - **QueueEvent** (auto-reset) — wakes the worker thread when a new message is enqueued or `Stop` is called.
-  - **StreamEvent** (manual-reset) — signalled by the stream callback when a round reaches `is_final` or errors. The worker thread blocks on this inside `RunOneStreamRound` to serialise rounds within a send.
-- **Tokens marshal back to the game thread via `AsyncTask(ENamedThreads::GameThread, ...)`.** The static C callback never touches `UObject` state directly — it copies `chunk` / `error_msg` into `FString`s (which own their storage), dispatches an `OnToken` broadcast via `AsyncTask`, and then signals `StreamEvent` for terminal callbacks. The worker thread's `ProcessMessage` eventually dispatches the terminal `OnComplete` / `OnError` via the same `AsyncTask` pattern, so observers always see `OnToken`s in order followed by exactly one terminal broadcast.
-- **TUniquePtr<FInoLiteRtLmConversationWorker> ordering.** Because the worker is a forward-declared type in the public `UInoLiteRtLmConversation` header, UHT's generated `.gen.cpp` emits both the default constructor and the `FVTableHelper` hot-reload helper constructor inline. Both must be declared out-of-line in the header and defined in `InoLiteRtLmConversation.cpp` (where `InoLiteRtLmConversationWorker.h` is fully included) so the `TDefaultDelete<FInoLiteRtLmConversationWorker>` deleter instantiation lands in a TU with the complete type. Leaving any of them implicit produces C4150 "delete of pointer to incomplete type" — see the comments at the top of the class in `InoLiteRtLmConversation.h`.
-- **One worker per conversation.** LiteRT-LM conversations are stateful (KV cache) and not thread-safe. Concurrent conversations mean multiple native conversations, each with its own pinned worker thread. LiteRT-LM also appears to reject creating a second native conversation on the same engine while a prior one is still alive, so tests that run back-to-back must call `Conversation->Shutdown()` (synchronous worker teardown) before constructing the next one. `CollectGarbage` from inside a delegate handler is NOT a valid substitute — parallel GC workers racing the in-flight delegate's write access trigger `FMRSWRecursiveAccessDetector` ensure fires.
-- **Never call inference from `Tick`.** Not even once.
-
-### Tool calling flow
-
-1. A Blueprint or C++ class subclasses `UInoLiteRtLmToolBase`, sets `ToolName`, `Description`, and `Parameters` (array of `FInoLiteRtLmToolParameter`), and overrides `Execute(FString ArgumentsJson) → FString ResultJson`. The base class builds the OpenAI-style function-call JSON schema automatically from these properties via `BuildSchemaJson()`.
-2. `UInoLiteRtLmSubsystem::RegisterTool` validates the schema built from the tool's properties and checks that `function.name` matches `ToolName` before storing the tool in its internal `TMap<FName, TObjectPtr<UInoLiteRtLmToolBase>>`. Unparseable schemas are rejected with a clear error log.
-3. `UInoLiteRtLmSubsystem::CreateConversation` calls `BuildToolsJsonForConversation` which serialises every registered tool's schema into a JSON array via `FJsonSerializer::Serialize` with `TCondensedJsonPrintPolicy`. The conversation config is built by `litert_lm_conversation_config_create()` (no-arg) and populated via `litert_lm_conversation_config_set_tools(...)` + `litert_lm_conversation_config_set_enable_constrained_decoding(..., true)`. When no tools are registered, neither setter is called and the conversation behaves as a plain chat.
-4. When the model emits a tool call, LiteRT-LM delivers the chunk to the static C callback as an **OpenAI-compatible** envelope with `tool_calls` at the **top level** of the assistant message (NOT as a `content[*]` part):
-   ```json
-   {"role":"assistant",
-    "tool_calls":[
-      {"type":"function",
-       "function":{"name":"add_numbers","arguments":{"a":27,"b":15}}}]}
-   ```
-   `OnStreamChunk` walks `content[*]` for text parts AND the top-level `tool_calls[*]` independently, so a single chunk can in principle carry either or both.
-5. Tool-call entries are re-serialised (arguments sub-object → compact JSON string) and queued into `StreamPendingToolCalls`. Text from tool-call rounds is suppressed — `OnToken` only sees tokens from the final text-producing round, never intermediate tool-call JSON.
-6. When the round's `is_final` callback fires, the worker thread wakes from `StreamEvent->Wait`, sees non-empty `StreamPendingToolCalls`, and runs `ExecuteToolSynchronously` for each. That method:
-   - Allocates a pooled `FEvent` (auto-reset).
-   - Dispatches an `AsyncTask` to the game thread that looks up the tool via `Subsystem->FindTool(ToolName)`, calls `Tool->Execute(ArgsJson)` inside a try/catch, and triggers the `FEvent`.
-   - Blocks on the `FEvent`. The game thread is never blocked because the outer `SendMessageAsync` is already async.
-   - Returns the result JSON string (or a `"\"ERROR: ...\""` literal if the tool was missing / the subsystem was GC'd / Execute threw).
-7. The worker builds a single `{"role":"tool","content":[{"type":"tool_response",...}, ...]}` message bundling every executed tool's result, sends that via a fresh `litert_lm_conversation_send_message_stream` on the **same** native conversation (reusing the KV cache), and loops back to round N+1.
-8. Eventually a round produces final text with no tool calls. The worker dispatches `OnComplete` with the accumulated text of **that round only** — callers never see intermediate tool-call rounds. `OnToolCalled` fires once per tool execution on the game thread, strictly before the terminal `OnComplete`, as a diagnostic.
-9. A safety cap (`kMaxAgentLoopRounds = 8`) bounds the loop. Hitting it dispatches `OnError("Agent loop exceeded N rounds...")` rather than spinning forever.
-
-**Why this is not a deadlock trap.** Tools are executed via AsyncTask on the game thread while the worker blocks on an `FEvent`. The game thread itself is not blocked — `SendMessageAsync` has already returned control to the caller, so the game thread is free to run ticks, process more AsyncTasks, and eventually execute the tool. The worker wakes up when the tool is done.
-
-**Deferred tool results.** `UInoLiteRtLmConversation::SubmitDeferredToolResult` is declared in the public API but currently stubbed — it logs a warning and is a no-op. A future update will wire it through the worker's agent loop so tools that need to do their own async work (network, disk I/O, user confirmation dialogs) can unblock the worker with a fresh result later. The method exists in the header now so Blueprint consumers can wire it up ahead of the implementation landing.
 
 ## Smoke tests
 
-Development-time console commands. Two groups: the Phase 1 group exercises the native C API directly (no UObjects), and the UE API group exercises the UE-facing API surface end-to-end through PIE. Both groups stay in the codebase so a regression in either layer can be diagnosed without the other being a suspect.
+Development-time console commands that exercise the UE-facing API surface end-to-end through PIE. They live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
 
-Both groups live in `Source/InoAgents/Private/SmokeTests/`, one file per command, and register themselves as `FAutoConsoleCommand` globals at file scope so they become available the moment the module's DLL loads.
-
-Invoke from the editor's Output Log command input. UE API tests require **PIE** (the subsystem is a `UGameInstanceSubsystem`), Phase 1 tests do not.
-
-### Phase 1 — native C API layer (no UE API)
-
-| Command | What it proves | PIE? |
-|---|---|---|
-| `Ino.LoadEngineTest` | LiteRT-LM engine can be constructed and destroyed without crashing. | no |
-| `Ino.GenerateTest [prompt]` | Raw text generation via `session_generate_content` (no chat template). | no |
-| `Ino.ConversationTest [prompt]` | Chat-template API via `conversation_send_message` actually follows instructions. | no |
-| `Ino.ToolCallTest [prompt]` | Full tool-calling agent loop at the raw C API layer: user prompt → model emits tool call → we execute inline → tool result → final answer. Uses a local `add_numbers(a,b)` helper directly, NOT the UE API `UInoLiteRtLmAddNumbersTool`. | no |
-| `Ino.StreamTest [prompt]` | Non-blocking streaming via `generate_content_stream` with worker→game-thread marshaling through `AsyncTask`. First non-blocking smoke test. | no |
-
-All Phase 1 tests except `StreamTest` are synchronous (freeze the editor for 2–15 s). They resolve the default model at `Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm` via `InoSmokeTest::ResolveDefaultModelPath()` and call the LiteRT-LM C API directly — no UObjects, no subsystem, no conversations. Their purpose is to prove the native integration works independently of the UE API layer.
-
-### UE-facing LiteRT-LM API
-
-| Command | What it proves | PIE? |
-|---|---|---|
-| `Ino.LiteRtLm.SubsystemLoadTest` | `UInoLiteRtLmSubsystem::LoadModelAsync` dispatches to a ThreadPool worker, marshals `FOnInoLiteRtLmModelLoaded` back to the game thread, and `IsModelLoaded` reports true afterward. Non-blocking. | **yes** |
-| `Ino.LiteRtLm.ConversationSendTest` | `UInoLiteRtLmConversation` round-trips a non-streaming "What is 2 plus 2?" prompt through the worker's agent loop (streaming internally) and delivers the full accumulated text via `OnComplete`. | **yes** |
-| `Ino.LiteRtLm.ConversationStreamTest [prompt]` | Streaming surface: binds `OnToken` in addition to `OnComplete` and logs each chunk with per-stream elapsed time. Cross-checks that the locally-accumulated tokens match the `FullText` delivered to `OnComplete`. | **yes** |
-| `Ino.LiteRtLm.ToolRegistryTest` | Registry-only check (no model load): constructs a `UInoLiteRtLmAddNumbersTool`, registers it, looks it up, serialises `BuildToolsJsonForConversation`, invokes `Execute_Execute` via the BlueprintNativeEvent wrapper, unregisters, and verifies `FindTool` returns null. Fastest tool smoke test; useful as a pre-flight before running the full agent loop. | **yes** |
-| `Ino.LiteRtLm.ConversationToolTest [prompt]` | **The headline test.** Registers a `UInoLiteRtLmAddNumbersTool`, creates a conversation with `tools_json` + constrained decoding, binds all four delegates (`OnToken` / `OnToolCalled` / `OnComplete` / `OnError`), sends "What is 27 plus 15?", watches the multi-round agent loop run, and logs PASS if `OnToolCalled` fired with `add_numbers` + result `"42"` AND `OnComplete`'s text contains `"42"` or `"forty-two"`. | **yes** |
-| `Ino.LiteRtLm.ConversationContextTest` | Exercises `SetSystemContext` / `SetUserContext` end-to-end: injects game state (location, time) and player state (name, class) into the conversation, sends a prompt requiring the context, and checks that the model's response references the injected values. Validates the context → user message prepend pipeline. | **yes** |
-| `Ino.LiteRtLm.ShowChatPanel [tools]` / `Ino.LiteRtLm.HideChatPanel` | Brings up / tears down the in-PIE Slate chat panel (`SInoChatPanel` + `UInoChatBridge`). Optional `tools` arg pre-registers `UInoLiteRtLmAddNumbersTool` so the panel can exercise the agent loop. Useful for interactive smoke testing — type messages, watch streaming tokens fill the bubble, see tool-call pills render. | **yes** |
+Invoke from the editor's Output Log command input.
 
 ### Chatterbox (TTS) API
 
@@ -1348,88 +1079,24 @@ Smoke tests are compiled into every build configuration. For now they're gated b
 
 ## Platform support
 
-### LiteRT-LM (LLM)
+Sibling-plugin owned. `Plugins/InoOnnx/CLAUDE.md` and `Plugins/InoLlama/CLAUDE.md` list the per-platform support matrix and which providers / backends ship in each artifact. From InoAgents' perspective each runtime is either available on the platform or not, and InoAgents code calls into it via `InoAgents::Onnx::GetApi()` / `InoAgents::LlamaCpp::GetApi()` in either case.
 
-LiteRT-LM platform availability is owned by **InoLiteRT** — see
-`Plugins/InoLiteRT/CLAUDE.md` for which platforms ship which artifacts.
-From InoAgents' perspective it's a binary "available or not" question:
-
-| Platform              | LiteRT-LM via InoLiteRT |
-|---|---|
-| Windows (Win64, MSVC) | ✅ available |
-| Android (arm64-v8a)   | ✅ available |
-| Android (x86_64)      | ✅ available |
-| iOS / Linux / macOS   | ⏳ stubs only |
-
-`InoLiteRtLmStubs_NonWindows.cpp` is guarded by
-`#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID`, so it compiles in for
-iOS / Linux / macOS only. The stubs make every `litert_lm_*` symbol
-return null / non-zero so the InoAgents subsystem fails gracefully via
-its `OnLoaded` delegate on those platforms.
-
-### ONNX Runtime + llama.cpp
-
-Sibling-plugin owned. `Plugins/InoOnnx/CLAUDE.md` and `Plugins/InoLlama/CLAUDE.md` list the per-platform support matrix and which providers / backends ship in each artifact. From InoAgents' perspective the picture is the same as for LiteRT-LM: the runtime is either available on the platform or not, and InoAgents code calls into it via `InoAgents::Onnx::GetApi()` / `InoAgents::LlamaCpp::GetApi()` in either case.
-
-The UE API (subsystems, conversations, tools, delegates) is **identical across platforms**. On platforms where a sibling runtime isn't yet staged, the InoAgents subsystems fail gracefully — `UInoLiteRtLmSubsystem::LoadModelAsync` returns "Native engine failed" via `FOnInoLiteRtLmModelLoaded`, `FInoOnnxSession::Create` returns nullptr with a clear error log, and every non-runtime feature (ElevenLabs cloud TTS, Slate chat panel, animation/audio helpers) keeps working normally.
+The UE API (subsystems, delegates) is **identical across platforms**. On platforms where a sibling runtime isn't yet staged, the dependent InoAgents subsystems fail gracefully — `FInoOnnxSession::Create` returns nullptr with a clear error log — and every non-runtime feature (ElevenLabs cloud TTS, animation/audio helpers) keeps working normally.
 
 ### Android specifics
 
-All native packaging on Android — UPL XML, `<soLoadLibrary>` order, GPU/NNAPI accelerator staging — is owned by the sibling plugins (`InoLiteRT`, `InoOnnx`, `InoLlama`) at `LoadingPhase=PreLoadingScreen`. By the time InoAgents' `Default`-phase `FInoAgentsModule::StartupModule` runs, all three runtimes are mapped into the process. What InoAgents itself owns on Android:
+All native packaging on Android — UPL XML, `<soLoadLibrary>` order, GPU/NNAPI accelerator staging — is owned by the sibling plugins (`InoOnnx`, `InoLlama`) at `LoadingPhase=PreLoadingScreen`. By the time InoAgents' `Default`-phase `FInoAgentsModule::StartupModule` runs, both runtimes are mapped into the process. What InoAgents itself owns on Android:
 
-- **Model file distribution.** The 2.6–5 GB `.litertlm` model file cannot ship inside the APK (Play Store limit is 200 MB base APK). The subsystem auto-downloads to `FPaths::ProjectPersistentDownloadDir()` on first use; `android.permission.INTERNET` is required (already enabled for ElevenLabs). Same pattern for the Chatterbox ONNX bundle and the NeuTTS Nano GGUF + NeuCodec ONNX.
-- **Stubs.** `InoLiteRtLmStubs_NonWindows.cpp` excludes `PLATFORM_ANDROID` so Android links against the real LiteRT-LM symbols staged by InoLiteRT.
-
-## Model file distribution
-
-Gemma 4 `.litertlm` model files are 2.5–5 GB and **must never be committed**. Models are auto-downloaded on first use from URLs configured in Project Settings → Plugins → InoAgents → LiteRT-LM → Models.
-
-### Model path resolution
-
-`LiteRtLmResolveModelPath(ModelFileName)` (in `InoLiteRtLmTypes.h/.cpp`) checks two locations in order:
-
-1. **`FPaths::ProjectPersistentDownloadDir() / "InoAgents/Models/"`** — where auto-downloaded models are cached. This is UE's canonical location for runtime-acquired content that persists across sessions and app updates. Platform-appropriate (sandboxed on mobile, app-support on macOS).
-2. **`Plugins/InoAgents/Models/`** — legacy dev-time path. The plugin's `.gitignore` excludes `Models/` so the 2.5+ GB file never lands in git.
-
-If neither location has the file, `UInoLiteRtLmSubsystem::LoadModelAsync` looks up the `ModelFileName` in the `UInoAgentsSettings::Models` array to find the download URL, then downloads via `FHttpModule` and saves to `PersistentDownloadDir`. The subsystem fires `OnDownloadProgress(Percent, BytesReceived, TotalBytes)` during download for loading screens.
-
-### Model config
-
-Models are configured via `FInoLiteRtLmModelConfig` — a **plain USTRUCT** (not a UDataAsset). Build one in Blueprint via a Make node (or in C++ as a struct literal), set `ModelFileName`, `Backend`, `MaxNumTokens`, `SystemMessage`, and pass it to `UInoLiteRtLmSubsystem::LoadModelAsync`.
-
-Phase 1 smoke tests under `InoAgents.*` still hardcode the model path via `InoSmokeTest::ResolveDefaultModelPath()` because they bypass the UE API and call the C functions directly.
-
-### System message format
-
-The system message is passed to LiteRT-LM's C API as a **plain text string** (NOT wrapped in JSON). The C API's `engine.cc:214-226` tries to JSON-parse the input; when parsing fails (because raw text isn't valid JSON), it falls back to using the raw string as the "content" field: `{"role":"system","content":"Your prompt here..."}`. This is what Gemma's Jinja2 chat template expects — wrapping as `{"type":"text","text":"..."}` would produce a content object that the template silently drops.
-
-### Shipping builds
-
-Auto-download to `PersistentDownloadDir` is **implemented** and works for both dev and shipping:
-- First run downloads from the configured Hugging Face URL (~2.5–5 GB, 2–10 min)
-- `OnDownloadProgress` fires for loading-screen UI
-- Subsequent runs use the cached file (loads in <1 second with XNNPACK cache)
-- SHA-256 verification is NOT yet implemented (planned)
-
-### Model sources
-
-Hugging Face, Apache 2.0, public (no gating, no auth):
-- `litert-community/gemma-4-E2B-it-litert-lm` — 2.58 GB, Text + Image + Audio
-- `litert-community/gemma-4-E4B-it-litert-lm` — 3.65 GB, Text + Image + Audio
+- **Model file distribution.** Multi-GB model files cannot ship inside the APK (Play Store limit is 200 MB base APK). Each subsystem auto-downloads to `FPaths::ProjectPersistentDownloadDir()` on first use; `android.permission.INTERNET` is required (already enabled for ElevenLabs). Applies to the Chatterbox ONNX bundle and the NeuTTS Nano GGUF + NeuCodec ONNX.
 
 ## How to update the runtime versions
 
-Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoLiteRT/CLAUDE.md` (LiteRT-LM SHA), `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML), and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.LiteRtLm.*`, `Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTts.*`) to confirm InoAgents still talks to the new symbols correctly — pre-1.0 LiteRT-LM has churned its C API across SHAs, and a follow-up tweak in InoAgents may be needed.
+Runtime version bumps happen in the sibling plugins, not here — see `Plugins/InoOnnx/CLAUDE.md` (ONNX Runtime + DirectML) and `Plugins/InoLlama/CLAUDE.md` (llama.cpp release tag) for each plugin's update script and watch-outs. After any of those bumps, re-run InoAgents' UE-API smoke tests (`Ino.Onnx.*`, `Ino.Chatterbox.*`, `Ino.NeuTts.*`) to confirm InoAgents still talks to the new symbols correctly.
 
 ## What to verify before trusting this file
 
 This file describes design decisions and architectural intent. Specifics drift over time. Before acting on any specific claim:
 
-- **LiteRT-LM version + C API:** owned by InoLiteRT — check
-  `Plugins/InoLiteRT/CLAUDE.md` for the pinned SHA and authoritative
-  header paths. If the symbol names / signatures InoAgents uses differ
-  from what's in the staged header, trust the header — pre-1.0
-  LiteRT-LM still churns its C API.
 - **ONNX Runtime version + C API:** owned by InoOnnx — check
   `Plugins/InoOnnx/CLAUDE.md` for the pinned version, the staged
   `onnxruntime_c_api.h`, the rename/patch story, and the renamed binaries
@@ -1441,6 +1108,4 @@ This file describes design decisions and architectural intent. Specifics drift o
   `Plugins/InoLlama/CLAUDE.md` for the pinned tag, the staged `llama.h`,
   and the `FLlamaCppApi` vtable surface that InoAgents consumes via
   `InoAgents::LlamaCpp::GetApi()`.
-- **Conversation delegate signatures:** read `Source/InoAgents/Public/LiteRtLm/InoLiteRtLmConversation.h`. The list (OnUserMessage, OnToken, OnSentence, OnSentenceBoundary, OnComplete, OnError, OnToolCalled) and the per-event arg shapes are authoritative there — if they shift, this file's diagram in "UE-side integration architecture" goes out of date silently.
 - **Chatterbox per-session DML routing:** the matrix under "Per-session execution-provider overrides (DirectML caveats)" describes the empirical state of the current ORT pin + DirectML. Re-verify after each ORT bump in InoOnnx (`Ino.Chatterbox.SubsystemSynthTest` with the relevant `b*OnCpu` flag flipped is the fastest way to spot a regression or a fix).
-- **Tooling versions:** Gemma 4 variant specs and modality support may have evolved — confirm against https://ai.google.dev/gemma/docs/core.
