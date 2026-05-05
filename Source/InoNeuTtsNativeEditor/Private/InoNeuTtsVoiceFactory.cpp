@@ -166,22 +166,34 @@ bool UInoNeuTtsVoiceFactory::LoadInvFileIntoAsset(
 		return false;
 	}
 
-	// Pull each field — all optional except RefCodes. Empty strings are
-	// fine; runtime fallbacks (live phonemize, infer name from filename)
-	// handle them.
+	// Pull each field — all optional except ref_codes. Keys are snake_case
+	// (matches what build-voices.py emits and what the legacy
+	// FInoNeuTtsVoiceRegistry parser expects). Empty strings are fine;
+	// runtime fallbacks (live phonemize, infer name from filename)
+	// handle them. Also accept PascalCase as a fallback for convenience —
+	// FJsonObject::TryGetStringField is case-sensitive by default.
 	FString  ParsedName;
 	FString  ParsedLanguage;
 	FString  ParsedRefText;
 	FString  ParsedRefPhones;
 	const TArray<TSharedPtr<FJsonValue>>* CodesArray = nullptr;
 
-	Json->TryGetStringField(TEXT("Name"),      ParsedName);
-	Json->TryGetStringField(TEXT("Language"),  ParsedLanguage);
-	Json->TryGetStringField(TEXT("RefText"),   ParsedRefText);
-	Json->TryGetStringField(TEXT("RefPhones"), ParsedRefPhones);
-	if (!Json->TryGetArrayField(TEXT("RefCodes"), CodesArray))
+	auto ReadString = [&Json](const TCHAR* SnakeKey, const TCHAR* PascalKey, FString& Out)
 	{
-		OutError = TEXT("Missing required 'RefCodes' array.");
+		if (!Json->TryGetStringField(SnakeKey, Out))
+		{
+			Json->TryGetStringField(PascalKey, Out);
+		}
+	};
+
+	ReadString(TEXT("name"),       TEXT("Name"),      ParsedName);
+	ReadString(TEXT("language"),   TEXT("Language"),  ParsedLanguage);
+	ReadString(TEXT("ref_text"),   TEXT("RefText"),   ParsedRefText);
+	ReadString(TEXT("ref_phones"), TEXT("RefPhones"), ParsedRefPhones);
+	if (!Json->TryGetArrayField(TEXT("ref_codes"), CodesArray) &&
+		!Json->TryGetArrayField(TEXT("RefCodes"),  CodesArray))
+	{
+		OutError = TEXT("Missing required 'ref_codes' (or 'RefCodes') array.");
 		return false;
 	}
 
