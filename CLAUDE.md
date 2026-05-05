@@ -579,14 +579,15 @@ Per-synth path with the cache hit:
 
 Realistic speedup: ~5–10% of total synth time (the cacheable prefix is small relative to the ~650-token RefCodes block, which sits AFTER the variable input phones in the chat template and so can't be cached as a prefix). The bigger win is the API ergonomics: `SetActiveVoiceAsync(Voice, OnReady)` once + voice-less `SynthesizeWithActiveVoiceAsync(Text, Options, OnComplete)` per call. The runner also short-circuits a redundant `SetActiveVoiceAsync` for the same voice via `HasCachedVoice`.
 
-`UInoNeuTtsSubsystem`'s public surface for voice caching:
-- `SetActiveVoiceAsync(Voice, OnReady)` — async; phonemize RefText if needed, tokenize prefix, prefill, snapshot.
+`UInoNeuTtsSubsystem`'s public surface:
+- `LoadModelAsync(Config, OnLoaded, OnDownloadProgress)` — load + download model files.
+- `SetActiveVoiceAsync(Voice, OnReady)` — async; phonemize RefText if needed, tokenize prefix, prefill, snapshot. Required before any synth.
 - `ClearActiveVoice()` — drop the snapshot. Cheap.
 - `HasActiveVoice()` / `GetActiveVoiceName()` — query state.
-- `SynthesizeWithActiveVoiceAsync(Text, Options, OnComplete)` — voice-less; uses the cached active voice. Errors fast if nothing primed.
-- `SynthesizeStreamWithActiveVoiceAsync(...)` — streaming variant of the above.
+- `SynthesizeAsync(Text, Options, OnComplete)` — uses the cached active voice. Errors fast if nothing primed.
+- `SynthesizeStreamAsync(Text, Options, ChunkTokens, OnAudioChunk, OnComplete)` — streaming variant.
 
-The per-voice `SynthesizeAsync(Text, Voice, Options, OnComplete)` overloads still work and will hit the cache automatically when `Voice.Name` matches the primed active voice.
+There is no per-voice synth overload. Voice is set once via `SetActiveVoiceAsync`; switching voices means calling `SetActiveVoiceAsync` again with a different voice (~200–600 ms re-prime cost). Bundling voice into the synth call would invite callers to thread it through every utterance, defeating the cache.
 
 The vtable bits this depends on (added in `InoLlama` as part of this work): `llama_state_seq_get_size` / `_get_data` / `_set_data` and `llama_memory_seq_rm`. If those resolve to nullptr on a given `llama.dll` (older builds), `PrimeVoice` errors out cleanly and synth falls back to the full-prefill path.
 

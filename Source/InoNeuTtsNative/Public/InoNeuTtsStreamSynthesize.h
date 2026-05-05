@@ -15,6 +15,10 @@
  * with OnAudioChunk, OnComplete, and OnError pins. Each chunk fired on
  * OnAudioChunk is 24 kHz mono int16 PCM LE bytes — feed straight into
  * UStreamingSoundWave::AppendAudioDataFromRAW (RuntimeAudioImporter).
+ *
+ * Voice is set separately via SetActiveVoiceAsync — this node always
+ * synthesises with whatever voice is currently primed on the subsystem.
+ * Errors fast through OnError if no active voice has been set.
  */
 UCLASS()
 class INONEUTTSNATIVE_API UInoNeuTtsStreamSynthesize : public UBlueprintAsyncActionBase
@@ -54,7 +58,6 @@ public:
 	static UInoNeuTtsStreamSynthesize* SynthesizeStreamAsync(
 		UObject* WorldContextObject,
 		const FString& Text,
-		const FInoNeuTtsVoice& Voice,
 		const FInoNeuTtsOptions& Options,
 		int32 ChunkTokens = 25);
 
@@ -72,9 +75,6 @@ private:
 
 	UPROPERTY()
 	FString StoredText;
-
-	UPROPERTY()
-	FInoNeuTtsVoice StoredVoice;
 
 	UPROPERTY()
 	FInoNeuTtsOptions StoredOptions;

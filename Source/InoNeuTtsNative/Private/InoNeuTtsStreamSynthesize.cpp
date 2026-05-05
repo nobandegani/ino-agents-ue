@@ -10,14 +10,12 @@
 UInoNeuTtsStreamSynthesize* UInoNeuTtsStreamSynthesize::SynthesizeStreamAsync(
 	UObject* WorldContextObject,
 	const FString& Text,
-	const FInoNeuTtsVoice& Voice,
 	const FInoNeuTtsOptions& Options,
 	int32 ChunkTokens)
 {
 	UInoNeuTtsStreamSynthesize* Action = NewObject<UInoNeuTtsStreamSynthesize>();
 	Action->WorldContextObjectPtr = WorldContextObject;
 	Action->StoredText            = Text;
-	Action->StoredVoice           = Voice;
 	Action->StoredOptions         = Options;
 	Action->StoredChunkTokens     = ChunkTokens;
 	return Action;
@@ -59,7 +57,7 @@ void UInoNeuTtsStreamSynthesize::Activate()
 	DoneCb.BindUFunction(this, FName("HandleComplete"));
 
 	Subsystem->SynthesizeStreamAsync(
-		StoredText, StoredVoice, StoredOptions,
+		StoredText, StoredOptions,
 		StoredChunkTokens, ChunkCb, DoneCb);
 }
 

@@ -475,7 +475,6 @@ void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
 
 void UInoNeuTtsSubsystem::SynthesizeAsync(
 	const FString& Text,
-	const FInoNeuTtsVoice& Voice,
 	const FInoNeuTtsOptions& Options,
 	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
 {
@@ -498,19 +497,24 @@ void UInoNeuTtsSubsystem::SynthesizeAsync(
 		FailFast(TEXT("Model not loaded. Call LoadModelAsync first."));
 		return;
 	}
+	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
+	{
+		FailFast(TEXT("No active voice. Call SetActiveVoiceAsync first."));
+		return;
+	}
 	if (bSynthInFlight)
 	{
 		FailFast(TEXT("Synth already in flight. Wait for completion or call CancelSynthesis."));
 		return;
 	}
+	if (bIsPrimingVoice)
+	{
+		FailFast(TEXT("Cannot synthesize while a SetActiveVoiceAsync prime is in flight."));
+		return;
+	}
 	if (Text.IsEmpty())
 	{
 		FailFast(TEXT("Text is empty."));
-		return;
-	}
-	if (!Voice.bIsValid || Voice.RefCodes.Num() == 0)
-	{
-		FailFast(TEXT("Voice is invalid (load via LoadVoiceFromFile or ListBundledVoices)."));
 		return;
 	}
 
@@ -521,14 +525,15 @@ void UInoNeuTtsSubsystem::SynthesizeAsync(
 	// shared_ptr copy even if the subsystem releases its own.
 	TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> RunnerCopy = Runner;
 	TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> CancelCopy = CurrentCancelFlag;
+	const FInoNeuTtsVoice VoiceCopy = ActiveVoice;
 
 	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
-		[Text, Voice, Options, OnComplete, RunnerCopy, CancelCopy, WeakThis]() mutable
+		[Text, VoiceCopy, Options, OnComplete, RunnerCopy, CancelCopy, WeakThis]() mutable
 	{
 		const FInoNeuTtsResult Result = InoNeuTtsNative::RunSynthesis(
-			*RunnerCopy, Text, Voice, Options, CancelCopy.Get());
+			*RunnerCopy, Text, VoiceCopy, Options, CancelCopy.Get());
 
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Result, OnComplete]() mutable
@@ -560,7 +565,6 @@ void UInoNeuTtsSubsystem::HandleSynthComplete(
 
 void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 	const FString& Text,
-	const FInoNeuTtsVoice& Voice,
 	const FInoNeuTtsOptions& Options,
 	int32 ChunkTokens,
 	const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
@@ -585,19 +589,24 @@ void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 		FailFast(TEXT("Model not loaded. Call LoadModelAsync first."));
 		return;
 	}
+	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
+	{
+		FailFast(TEXT("No active voice. Call SetActiveVoiceAsync first."));
+		return;
+	}
 	if (bSynthInFlight)
 	{
 		FailFast(TEXT("Synth already in flight. Wait for completion or call CancelSynthesis."));
 		return;
 	}
+	if (bIsPrimingVoice)
+	{
+		FailFast(TEXT("Cannot synthesize while a SetActiveVoiceAsync prime is in flight."));
+		return;
+	}
 	if (Text.IsEmpty())
 	{
 		FailFast(TEXT("Text is empty."));
-		return;
-	}
-	if (!Voice.bIsValid || Voice.RefCodes.Num() == 0)
-	{
-		FailFast(TEXT("Voice is invalid."));
 		return;
 	}
 
@@ -606,11 +615,12 @@ void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 
 	TSharedPtr<InoNeuTtsNative::FInoNeuTtsRunner, ESPMode::ThreadSafe> RunnerCopy = Runner;
 	TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe> CancelCopy = CurrentCancelFlag;
+	const FInoNeuTtsVoice VoiceCopy = ActiveVoice;
 
 	TWeakObjectPtr<UInoNeuTtsSubsystem> WeakThis(this);
 
 	Async(EAsyncExecution::ThreadPool,
-		[Text, Voice, Options, ChunkTokens,
+		[Text, VoiceCopy, Options, ChunkTokens,
 		 OnAudioChunk, OnComplete,
 		 RunnerCopy, CancelCopy, WeakThis]() mutable
 	{
@@ -633,7 +643,7 @@ void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 
 		const FInoNeuTtsResult Result =
 			InoNeuTtsNative::RunStreamingSynthesis(
-				*RunnerCopy, Text, Voice, Options,
+				*RunnerCopy, Text, VoiceCopy, Options,
 				ChunkTokens, Callbacks, CancelCopy.Get());
 
 		AsyncTask(ENamedThreads::GameThread,
@@ -645,58 +655,6 @@ void UInoNeuTtsSubsystem::SynthesizeStreamAsync(
 			}
 		});
 	});
-}
-
-void UInoNeuTtsSubsystem::SynthesizeWithActiveVoiceAsync(
-	const FString& Text,
-	const FInoNeuTtsOptions& Options,
-	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
-{
-	check(IsInGameThread());
-
-	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
-	{
-		FInoNeuTtsResult Bad;
-		Bad.bSuccess     = false;
-		Bad.ErrorMessage = TEXT("No active voice. Call SetActiveVoiceAsync first.");
-		FInoNeuTtsSynthesisCompleteDelegate Copy = OnComplete;
-		AsyncTask(ENamedThreads::GameThread, [Copy, Bad]()
-		{
-			Copy.ExecuteIfBound(Bad);
-		});
-		return;
-	}
-
-	// Defer to the per-voice path; the runner will hit its KV cache
-	// via the matching Voice.Name.
-	SynthesizeAsync(Text, ActiveVoice, Options, OnComplete);
-}
-
-void UInoNeuTtsSubsystem::SynthesizeStreamWithActiveVoiceAsync(
-	const FString& Text,
-	const FInoNeuTtsOptions& Options,
-	int32 ChunkTokens,
-	const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
-	const FInoNeuTtsSynthesisCompleteDelegate& OnComplete)
-{
-	check(IsInGameThread());
-
-	if (ActiveVoiceName.IsEmpty() || !ActiveVoice.bIsValid)
-	{
-		FInoNeuTtsResult Bad;
-		Bad.bSuccess     = false;
-		Bad.ErrorMessage = TEXT("No active voice. Call SetActiveVoiceAsync first.");
-		FInoNeuTtsSynthesisCompleteDelegate Copy = OnComplete;
-		AsyncTask(ENamedThreads::GameThread, [Copy, Bad]()
-		{
-			Copy.ExecuteIfBound(Bad);
-		});
-		return;
-	}
-
-	SynthesizeStreamAsync(
-		Text, ActiveVoice, Options, ChunkTokens,
-		OnAudioChunk, OnComplete);
 }
 
 void UInoNeuTtsSubsystem::CancelSynthesis()

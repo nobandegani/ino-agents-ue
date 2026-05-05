@@ -10,13 +10,11 @@
 UInoNeuTtsSynthesize* UInoNeuTtsSynthesize::SynthesizeAsync(
 	UObject* WorldContextObject,
 	const FString& Text,
-	const FInoNeuTtsVoice& Voice,
 	const FInoNeuTtsOptions& Options)
 {
 	UInoNeuTtsSynthesize* Action = NewObject<UInoNeuTtsSynthesize>();
 	Action->WorldContextObjectPtr = WorldContextObject;
 	Action->StoredText            = Text;
-	Action->StoredVoice           = Voice;
 	Action->StoredOptions         = Options;
 	return Action;
 }
@@ -53,7 +51,7 @@ void UInoNeuTtsSynthesize::Activate()
 	FInoNeuTtsSynthesisCompleteDelegate Cb;
 	Cb.BindUFunction(this, FName("HandleComplete"));
 
-	Subsystem->SynthesizeAsync(StoredText, StoredVoice, StoredOptions, Cb);
+	Subsystem->SynthesizeAsync(StoredText, StoredOptions, Cb);
 }
 
 void UInoNeuTtsSynthesize::HandleComplete(const FInoNeuTtsResult& Result)

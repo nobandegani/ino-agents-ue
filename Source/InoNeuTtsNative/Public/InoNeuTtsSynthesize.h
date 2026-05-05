@@ -20,7 +20,11 @@
  *     [NeuTTS Synthesize]──OnComplete──►(use Result.AudioSamples)
  *           ▲              OnError───►(handle Result.ErrorMessage)
  *           │
- *     (Text, Voice, Options inputs)
+ *     (Text, Options inputs)
+ *
+ * Voice is set separately via SetActiveVoiceAsync — this node always
+ * synthesises with whatever voice is currently primed on the subsystem.
+ * Errors fast through OnError if no active voice has been set.
  */
 UCLASS()
 class INONEUTTSNATIVE_API UInoNeuTtsSynthesize : public UBlueprintAsyncActionBase
@@ -50,7 +54,6 @@ public:
 	static UInoNeuTtsSynthesize* SynthesizeAsync(
 		UObject* WorldContextObject,
 		const FString& Text,
-		const FInoNeuTtsVoice& Voice,
 		const FInoNeuTtsOptions& Options);
 
 	virtual void Activate() override;
@@ -64,9 +67,6 @@ private:
 
 	UPROPERTY()
 	FString StoredText;
-
-	UPROPERTY()
-	FInoNeuTtsVoice StoredVoice;
 
 	UPROPERTY()
 	FInoNeuTtsOptions StoredOptions;

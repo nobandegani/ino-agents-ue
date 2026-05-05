@@ -232,14 +232,13 @@ DECLARE_DYNAMIC_DELEGATE_OneParam(FInoNeuTtsDownloadProgressDelegate,
  *
  * bSuccess=true means the voice prefix was tokenized + prefilled into the
  * LM context AND the post-prefix KV state was snapshotted; subsequent
- * voice-less SynthesizeAsync calls will reuse that snapshot rather than
- * re-prefilling the prefix on every synth.
+ * SynthesizeAsync calls reuse that snapshot rather than re-prefilling the
+ * prefix on every synth.
  *
- * bSuccess=false (with ErrorMessage) means caching failed — typical
- * reasons are no model loaded, voice not valid (no ref_codes), or the
- * staged llama.cpp build doesn't expose the state_seq API. Synthesis
- * still works via the per-voice SynthesizeAsync overload; the only loss
- * is the prefix-prefill speedup.
+ * bSuccess=false (with ErrorMessage) means priming failed — typical reasons
+ * are no model loaded, voice not valid (no ref_codes), or the staged
+ * llama.cpp build doesn't expose the state_seq API. SynthesizeAsync will
+ * also fail until a voice is successfully primed.
  */
 DECLARE_DYNAMIC_DELEGATE_TwoParams(FInoNeuTtsVoiceReadyDelegate,
 	bool, bSuccess, FString, ErrorMessage);

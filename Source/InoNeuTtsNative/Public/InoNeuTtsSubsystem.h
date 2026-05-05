@@ -24,9 +24,10 @@ namespace InoNeuTtsNative
  *   1. LoadModelAsync(Config, OnLoaded, OnDownloadProgress)  // off-thread,
  *                                                             // fires on game thread
  *   2. ListBundledVoices() / LoadVoiceFromFile  // build / pick a voice
- *   3. SynthesizeAsync(Text, Voice, Options, OnComplete)
- *   4. (optionally CancelSynthesis() to abort an in-flight call)
- *   5. UnloadModel()                            // releases GGUF + ONNX
+ *   3. SetActiveVoiceAsync(Voice, OnReady)      // primes voice cache
+ *   4. SynthesizeAsync(Text, Options, OnComplete)  // (any number of times)
+ *   5. (optionally CancelSynthesis() to abort an in-flight call)
+ *   6. UnloadModel()                            // releases GGUF + ONNX
  *
  * Threading invariants:
  *   - All public methods MUST be called from the game thread.
@@ -147,31 +148,20 @@ public:
 	// ---- Synthesis ----
 
 	/**
-	 * Synthesize Text into 24 kHz mono int16 PCM in the given voice.
-	 * Dispatches to the UE thread pool. Fires OnComplete on the game
-	 * thread when done. Errors immediately if a previous synth is
-	 * still in flight (one at a time in v1).
+	 * Synthesize Text into 24 kHz mono int16 PCM using the active voice
+	 * (set via SetActiveVoiceAsync). Dispatches to the UE thread pool;
+	 * fires OnComplete on the game thread.
 	 *
-	 * If Voice.Name matches the currently cached active voice, the
-	 * runner reuses the prefix snapshot automatically — no need to
-	 * call SetActiveVoiceAsync first if you don't mind paying the
-	 * prefill cost on the first synth with a new voice.
+	 * Errors immediately if no active voice is set, no model is loaded,
+	 * Text is empty, or a previous synth is still in flight.
+	 *
+	 * The runner uses the active voice's KV-prefix snapshot to skip the
+	 * prefix prefill on every synth — that's the whole point of the
+	 * SetActiveVoice flow. To switch voice, call SetActiveVoiceAsync
+	 * with the new one and wait for OnReady before calling this again.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void SynthesizeAsync(
-		const FString& Text,
-		const FInoNeuTtsVoice& Voice,
-		const FInoNeuTtsOptions& Options,
-		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
-
-	/**
-	 * Voice-less synth — uses the cached active voice (set via
-	 * SetActiveVoiceAsync). Errors immediately if no active voice
-	 * is set.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
-		meta = (DisplayName = "Synthesize (Active Voice)"))
-	void SynthesizeWithActiveVoiceAsync(
 		const FString& Text,
 		const FInoNeuTtsOptions& Options,
 		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
@@ -185,22 +175,11 @@ public:
 	 * at 24 kHz). The final chunk has bIsFinal=true; OnComplete fires
 	 * immediately afterwards.
 	 *
-	 * Errors immediately if a previous synth (one-shot or streaming) is
-	 * still in flight.
+	 * Same precondition + error rules as SynthesizeAsync (active voice
+	 * required; one synth at a time).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "InoNeuTts")
 	void SynthesizeStreamAsync(
-		const FString& Text,
-		const FInoNeuTtsVoice& Voice,
-		const FInoNeuTtsOptions& Options,
-		int32 ChunkTokens,
-		const FInoNeuTtsAudioChunkDelegate& OnAudioChunk,
-		const FInoNeuTtsSynthesisCompleteDelegate& OnComplete);
-
-	/** Streaming variant using the cached active voice. */
-	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
-		meta = (DisplayName = "Synthesize Stream (Active Voice)"))
-	void SynthesizeStreamWithActiveVoiceAsync(
 		const FString& Text,
 		const FInoNeuTtsOptions& Options,
 		int32 ChunkTokens,
