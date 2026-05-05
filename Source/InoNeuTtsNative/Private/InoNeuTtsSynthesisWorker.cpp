@@ -475,10 +475,11 @@ namespace InoNeuTtsNative
 		if (bHaveCacheCandidate)
 		{
 			// Cross-check the per-call full-prompt's leading tokens match
-			// the cache's PrefixTokens. NeuTTS's IPA + special-token prompt
-			// SHOULD always match (clean BPE word boundary at the trailing
-			// space), but verify before relying on the snapshot — the cost
-			// is one TArray Memcmp.
+			// the cache's PrefixTokens. With the prefix ending BEFORE the
+			// trailing space (see BuildSynthesisPromptPrefix's comment for
+			// the BPE merge issue this avoids), this should always match.
+			// We keep the guard as defense in depth — a vocab change or
+			// future prompt-template tweak could re-introduce a divergence.
 			const int32 NPrefix = Cache->PrefixTokens.Num();
 			bool bPrefixMatches = PromptTokens.Num() > NPrefix;
 			if (bPrefixMatches)
@@ -526,10 +527,25 @@ namespace InoNeuTtsNative
 			}
 			else if (!bPrefixMatches)
 			{
+				// Locate the first divergence so we can debug recurrences.
+				// (cache.Num()<=PromptTokens.Num() guaranteed by the size
+				// check above.)
+				int32 DivergeAt = -1;
+				const int32 BoundN = FMath::Min(NPrefix, PromptTokens.Num());
+				for (int32 i = 0; i < BoundN; ++i)
+				{
+					if (Cache->PrefixTokens[i] != PromptTokens[i])
+					{
+						DivergeAt = i;
+						break;
+					}
+				}
 				UE_LOG(LogInoNeuTts, Warning,
 					TEXT("Synth: cached prefix tokens did not match per-call tokenization ")
-					TEXT("(cache=%d, prompt=%d) — using full prefill."),
-					NPrefix, PromptTokens.Num());
+					TEXT("(cache=%d, prompt=%d, diverged_at=%d, cache_tok=%d, prompt_tok=%d) — using full prefill."),
+					NPrefix, PromptTokens.Num(), DivergeAt,
+					DivergeAt >= 0 ? Cache->PrefixTokens[DivergeAt] : -1,
+					DivergeAt >= 0 ? PromptTokens[DivergeAt] : -1);
 			}
 		}
 
@@ -827,10 +843,22 @@ namespace InoNeuTtsNative
 			}
 			else if (!bPrefixMatches)
 			{
+				int32 DivergeAt = -1;
+				const int32 BoundN = FMath::Min(NPrefix, PromptTokens.Num());
+				for (int32 i = 0; i < BoundN; ++i)
+				{
+					if (Cache->PrefixTokens[i] != PromptTokens[i])
+					{
+						DivergeAt = i;
+						break;
+					}
+				}
 				UE_LOG(LogInoNeuTts, Warning,
 					TEXT("Stream synth: cached prefix tokens did not match per-call tokenization ")
-					TEXT("(cache=%d, prompt=%d) — using full prefill."),
-					NPrefix, PromptTokens.Num());
+					TEXT("(cache=%d, prompt=%d, diverged_at=%d, cache_tok=%d, prompt_tok=%d) — using full prefill."),
+					NPrefix, PromptTokens.Num(), DivergeAt,
+					DivergeAt >= 0 ? Cache->PrefixTokens[DivergeAt] : -1,
+					DivergeAt >= 0 ? PromptTokens[DivergeAt] : -1);
 			}
 		}
 

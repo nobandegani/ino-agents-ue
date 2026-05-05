@@ -49,16 +49,26 @@ namespace InoNeuTtsNative
 
 	FString BuildSynthesisPromptPrefix(const FString& RefPhones)
 	{
-		// Mirror BuildSynthesisPrompt's prefix exactly — the format must
-		// be byte-identical so the per-call full prompt's leading tokens
-		// match the cached prefix's tokens. The trailing space is the
-		// separator between {ref_phones} and {input_phones}; including
-		// it here means InputPhones tokenization starts at a fresh word
-		// boundary at synth time, matching how the full-prompt
-		// tokenization splits the same content.
+		// Mirror BuildSynthesisPrompt's prefix EXCEPT for the trailing
+		// space. Qwen2's BPE is byte-level + GPT-2-style space-prefix
+		// pre-tokenization: a trailing whitespace tokenizes as its own
+		// [" "] piece in standalone, but the equivalent character
+		// position in the full prompt sees the space merged with the
+		// next word into a single ` X` token. That makes the LAST token
+		// of the standalone prefix differ from the per-call full-prompt
+		// tokenization at the equivalent position, causing the synth-
+		// time Memcmp guard to fail and forcing a full prefill every
+		// call.
+		//
+		// Ending the prefix at the last RefPhones character lands inside
+		// the previous word, where BPE is stable across contexts (next-
+		// char doesn't affect already-emitted tokens once you've crossed
+		// a word boundary). The synth path then prefills " {InputPhones}
+		// ...{TEXT_PROMPT_END}\nassistant:..." as the suffix — same KV
+		// state as a full prefill, just with a clean cache hit.
 		return FString::Printf(
 			TEXT("user: Convert the text to speech:")
-			TEXT("<|TEXT_PROMPT_START|>%s "),
+			TEXT("<|TEXT_PROMPT_START|>%s"),
 			*RefPhones);
 	}
 }

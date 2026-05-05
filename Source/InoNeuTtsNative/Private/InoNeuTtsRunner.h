@@ -32,16 +32,18 @@ namespace InoNeuTtsNative
 	 *                              + concatenations every time (this was a
 	 *                              dominant per-synth cost before caching).
 	 *   - PrefixTokens           — pre-tokenized form of the cacheable prompt
-	 *                              prefix (everything up to and including the
-	 *                              space after RefPhones — the largest fixed
-	 *                              prefix possible given that InputPhones sit
-	 *                              between RefPhones and RefCodes in NeuTTS's
-	 *                              chat template). Stored so synth calls can
-	 *                              cross-check the per-call full-prompt
-	 *                              tokenization matches the cache before
-	 *                              relying on the snapshot — defends against
-	 *                              context-dependent BPE merges across the
-	 *                              prefix / variable-middle boundary.
+	 *                              prefix (the leading text + RefPhones, but
+	 *                              NOT the trailing space before InputPhones).
+	 *                              Ending at the last RefPhones character
+	 *                              keeps tokenization stable across contexts
+	 *                              (Qwen2's byte-level BPE merges trailing
+	 *                              whitespace into the next word, so a
+	 *                              standalone-tokenized trailing space would
+	 *                              not match the equivalent position in the
+	 *                              full-prompt tokenization). Stored so synth
+	 *                              calls can cross-check the per-call full-
+	 *                              prompt tokenization matches the cache
+	 *                              before relying on the snapshot.
 	 *   - KvSnapshot             — output of llama_state_seq_get_data after
 	 *                              prefilling PrefixTokens. Restored at the
 	 *                              start of every synth via _set_data, then
