@@ -6,6 +6,7 @@
 #include "InoNeuTtsRunner.h"
 #include "InoNeuTtsSettings.h"
 #include "InoNeuTtsSynthesisWorker.h"
+#include "InoNeuTtsVoiceAsset.h"
 #include "InoNeuTtsVoiceRegistry.h"
 
 // Generic file downloader living in InoNodes — model files (GGUF +
@@ -591,6 +592,45 @@ void UInoNeuTtsSubsystem::SetActiveVoiceAsync(
 			Copy.ExecuteIfBound(bOk, Error);
 		});
 	});
+}
+
+void UInoNeuTtsSubsystem::SetActiveVoiceFromAssetAsync(
+	UInoNeuTtsVoiceAsset* VoiceAsset,
+	const FInoNeuTtsVoiceReadyDelegate& OnReady)
+{
+	check(IsInGameThread());
+
+	auto FailFast = [&OnReady](const FString& Why)
+	{
+		FInoNeuTtsVoiceReadyDelegate Copy = OnReady;
+		AsyncTask(ENamedThreads::GameThread, [Copy, Why]()
+		{
+			Copy.ExecuteIfBound(false, Why);
+		});
+	};
+
+	if (VoiceAsset == nullptr)
+	{
+		FailFast(TEXT("VoiceAsset is null."));
+		return;
+	}
+	if (!VoiceAsset->IsUsable())
+	{
+		FailFast(FString::Printf(
+			TEXT("VoiceAsset '%s' is not usable: ")
+			TEXT("Name='%s', Language='%s', RefCodes=%d. ")
+			TEXT("Re-import the source .inv file to repopulate."),
+			*VoiceAsset->GetName(),
+			*VoiceAsset->Name,
+			*VoiceAsset->Language,
+			VoiceAsset->RefCodes.Num()));
+		return;
+	}
+
+	// Drop down to the FInoNeuTtsVoice path so all the prime / cache
+	// machinery runs identically whether the caller passed a UAsset or
+	// built the struct themselves.
+	SetActiveVoiceAsync(VoiceAsset->ToRuntimeVoice(), OnReady);
 }
 
 void UInoNeuTtsSubsystem::SynthesizeAsync(

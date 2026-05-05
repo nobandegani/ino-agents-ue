@@ -750,6 +750,10 @@ the game thread, all delegates fire on the game thread):
 **Active voice**
 - `void SetActiveVoiceAsync(Voice, OnReady)` — phonemize +
   prefill-snapshot the prefix off-thread. Required before synth.
+- `void SetActiveVoiceFromAssetAsync(VoiceAsset, OnReady)` —
+  convenience overload that takes a `UInoNeuTtsVoiceAsset*` (the
+  imported `.inv` UAsset). Calls `ToRuntimeVoice()` internally and
+  delegates to `SetActiveVoiceAsync` — same KV-snapshot caching.
 - `void ClearActiveVoice()`
 - `bool HasActiveVoice() const` / `FString GetActiveVoiceName() const`
 
@@ -807,7 +811,14 @@ the game thread, all delegates fire on the game thread):
   overridden by vendor.
 - `RandomSeed` (default -1) — `-1` = fresh time-based seed.
 
-### Voice format — `.nvoice.json`
+### Voice format
+
+Voices come in two layers — a JSON source produced offline and a UE
+asset wrapped around it.
+
+#### Source: `.inv` (or legacy `.nvoice.json`)
+
+Plain JSON, the offline encoder's output:
 
 ```json
 {
@@ -819,16 +830,64 @@ the game thread, all delegates fire on the game thread):
 }
 ```
 
-Generated offline by
-`Plugins/InoAgents/NeuTTS/scripts/build-voices.py` (PyTorch +
-neucodec + phonemizer; uses vendor's `samples/*.{pt,txt}` as input).
-Five voices ship under `voices/`: `jo`, `dave`, `greta`, `juliette`,
-`mateo`.
+Generated offline by `Plugins/InoAgents/NeuTTS/scripts/build-voices.py`
+(PyTorch + neucodec + phonemizer; uses vendor's `samples/*.{pt,txt}`
+as input). The `.inv` extension is the same JSON format under a
+NeuTTS-specific suffix — UE's import factory routes any `.inv` file
+to `UInoNeuTtsVoiceFactory` automatically based on extension.
 
-Voices are NOT in the model registry — they're lightweight JSON
-artefacts (~10 KB each) that ship with the plugin. Future work:
-runtime voice cloning via NeuCodec ONNX encoder (currently
-PyTorch-only; would need an ONNX export).
+#### UAsset: `UInoNeuTtsVoiceAsset`
+
+Editor-side wrapper. Drag any `.inv` file into the Content Browser →
+factory parses the JSON → creates a `UInoNeuTtsVoiceAsset` instance.
+Open the asset to inspect:
+
+- `Name` (EditAnywhere) — string identifier, used as the cache key by
+  `SetActiveVoiceAsync`.
+- `Language` (EditAnywhere) — eSpeak language code (`en-us`, `de`, ...).
+- `RefText` (EditAnywhere, multi-line) — the source transcript. **If
+  edited in-editor**, `PostEditChangeProperty` clears `RefPhones` so
+  the runtime re-phonemizes via InoSpeakNG on next synth.
+- `RefPhones` (VisibleAnywhere, read-only) — pre-baked IPA
+  phonemization. Source of truth is the offline encoder.
+- `RefCodes` (VisibleAnywhere, read-only) — the ~650-int FSQ token
+  array. Manual edits break the voice; re-import the source `.inv`
+  via Content Browser → right-click → Reimport to refresh.
+- `AssetImportData` — UE's standard import-tracking record. Drives
+  Reimport.
+
+Asset Registry tags (`GetAssetRegistryTags`): `VoiceName`, `Language`,
+`RefCodeCount`, `HasRefPhones`. Visible as Content Browser columns
+when filtering by asset class.
+
+Soft-reference from Blueprint via `TSoftObjectPtr<UInoNeuTtsVoiceAsset>`,
+hand to `UInoNeuTtsSubsystem::SetActiveVoiceFromAssetAsync(Asset, OnReady)`.
+The subsystem calls `ToRuntimeVoice()` internally and routes through
+the standard `SetActiveVoiceAsync` prime path — same KV-snapshot
+caching, same threading.
+
+#### Module split
+
+- **Runtime** (`InoNeuTtsNative` module, `Source/InoNeuTtsNative/`):
+  the `UInoNeuTtsVoiceAsset` UClass itself + the
+  `SetActiveVoiceFromAssetAsync` subsystem method. Ships in cooked /
+  shipping builds.
+- **Editor** (`InoNeuTtsNativeEditor` module,
+  `Source/InoNeuTtsNativeEditor/`, `Type=Editor` in `.uplugin`,
+  `LoadingPhase=PostEngineInit`): hosts `UInoNeuTtsVoiceFactory`
+  (subclass of `UFactory` + `FReimportHandler`). Excluded from non-
+  editor builds — the Factory + UnrealEd dependency don't ship.
+
+Five voice JSONs ship under `Plugins/InoAgents/NeuTTS/voices/`:
+`jo`, `dave`, `greta`, `juliette`, `mateo`. Rename to `.inv` and
+import to convert to UAssets; or keep using the legacy file-scan API
+(`UInoNeuTtsSubsystem::LoadVoiceFromFile` + `ListBundledVoices` —
+still supported for raw paths).
+
+Voices are NOT in the model registry — they're lightweight artefacts
+(~10 KB each) that ship with the plugin. Future work: runtime voice
+cloning via NeuCodec ONNX encoder (currently PyTorch-only; would
+need an ONNX export).
 
 ### Why phonemization is offline-only-by-default
 
@@ -864,52 +923,73 @@ Plugins/InoAgents/
 │   ├── scripts/build-voices.py                      ← offline encoder (PyTorch + neucodec)
 │   └── models/                                      ← optional dev-time drop (gitignored)
 │
-└── Source/InoNeuTtsNative/
-    ├── InoNeuTtsNative.Build.cs                     ← module deps (InoLlama, InoOnnx,
-    │                                                   InoSpeakNG, InoNodes, InoAgents,
-    │                                                   RuntimeAudioImporter, Json,
-    │                                                   DeveloperSettings)
+├── Source/InoNeuTtsNative/                         ← runtime module
+│   ├── InoNeuTtsNative.Build.cs                     ← module deps (InoLlama, InoOnnx,
+│   │                                                   InoSpeakNG, InoNodes, InoAgents,
+│   │                                                   RuntimeAudioImporter, Json,
+│   │                                                   DeveloperSettings)
+│   │
+│   ├── Public/
+│   │   ├── InoNeuTtsNative.h                        ← module interface
+│   │   ├── InoNeuTtsLog.h                           ← LogInoNeuTts category
+│   │   ├── InoNeuTtsTypes.h                         ← USTRUCTs (Voice, Config, Options,
+│   │   │                                              Result), single-cast delegates,
+│   │   │                                              multicast async-action delegates
+│   │   ├── InoNeuTtsSettings.h                      ← UInoNeuTtsNativeSettings + entry structs
+│   │   ├── InoNeuTtsSubsystem.h                     ← UInoNeuTtsSubsystem (the public API)
+│   │   ├── InoNeuTtsVoiceAsset.h                    ← UInoNeuTtsVoiceAsset (the .inv UAsset)
+│   │   ├── InoNeuTtsSynthesize.h                    ← BP async action: NeuTTS Synthesize
+│   │   └── InoNeuTtsStreamSynthesize.h              ← BP async action: NeuTTS Synthesize Streaming
     │
+│   └── Private/
+│       ├── InoNeuTtsNative.cpp                      ← thin module lifecycle
+│       ├── InoNeuTtsCommon.{h,cpp}                  ← path resolvers (BackboneModels +
+│       │                                               DecoderModels lookups), shared
+│       │                                               TokenizePrompt, NormalizePhones
+│       ├── InoNeuTtsSettings.cpp
+│       ├── InoNeuTtsRunner.{h,cpp}                  ← FInoNeuTtsRunner: model + ctx +
+│       │                                               vocab + decoder + voice cache
+│       │                                               (PrimeVoice, ClearVoiceCache,
+│       │                                               HasCachedVoice, GetVoiceCache)
+│       ├── InoNeuTtsPromptBuilder.{h,cpp}           ← BuildSynthesisPrompt (RefCodes +
+│       │                                               String overloads),
+│       │                                               BuildSynthesisPromptPrefix,
+│       │                                               BuildSpeechTokensBlock
+│       ├── InoNeuTtsSynthesisWorker.{h,cpp}         ← RunSynthesis + RunStreamingSynthesis
+│       │                                               free functions; NOT an FRunnable —
+│       │                                               called directly from a ThreadPool
+│       │                                               worker dispatched by the subsystem
+│       ├── InoNeuTtsVoiceAsset.cpp                  ← ToRuntimeVoice + edit-time hooks
+│       │                                               (PostEditChangeProperty clears
+│       │                                               RefPhones on RefText edit)
+│       ├── InoNeuTtsVoiceRegistry.{h,cpp}           ← legacy .nvoice.json parser + bundled-
+│       │                                               voice scan (kept for raw-path API)
+│       ├── InoNeuTtsSubsystem.cpp                   ← Blueprint glue + async-load chain +
+│       │                                               InoNodes::Download::DownloadFilesAsync
+│       │                                               wiring + active-voice state
+│       ├── InoNeuTtsSynthesize.cpp                  ← BP async action impl
+│       ├── InoNeuTtsStreamSynthesize.cpp
+│       └── SmokeTests/
+│           ├── InoNeuTtsLoadTest.cpp
+│           ├── InoNeuTtsSynthTest.cpp
+│           ├── InoNeuTtsStreamSynthTest.cpp
+│           └── InoNeuTtsVoiceRegistryTest.cpp
+│
+└── Source/InoNeuTtsNativeEditor/                   ← editor-only module (Type=Editor in
+    │                                                  .uplugin, LoadingPhase=PostEngineInit;
+    │                                                  excluded from cooked / shipping)
+    ├── InoNeuTtsNativeEditor.Build.cs               ← deps: UnrealEd, AssetTools, Json,
+    │                                                  EditorFramework, plus the runtime
+    │                                                  InoNeuTtsNative module
     ├── Public/
-    │   ├── InoNeuTtsNative.h                        ← module interface
-    │   ├── InoNeuTtsLog.h                           ← LogInoNeuTts category
-    │   ├── InoNeuTtsTypes.h                         ← USTRUCTs (Voice, Config, Options,
-    │   │                                              Result), single-cast delegates,
-    │   │                                              multicast async-action delegates
-    │   ├── InoNeuTtsSettings.h                      ← UInoNeuTtsNativeSettings + entry structs
-    │   ├── InoNeuTtsSubsystem.h                     ← UInoNeuTtsSubsystem (the public API)
-    │   ├── InoNeuTtsSynthesize.h                    ← BP async action: NeuTTS Synthesize
-    │   └── InoNeuTtsStreamSynthesize.h              ← BP async action: NeuTTS Synthesize Streaming
-    │
+    │   ├── InoNeuTtsNativeEditor.h                  ← FInoNeuTtsNativeEditorModule
+    │   └── InoNeuTtsVoiceFactory.h                  ← UInoNeuTtsVoiceFactory (UFactory +
+    │                                                  FReimportHandler) for .inv import
     └── Private/
-        ├── InoNeuTtsNative.cpp                      ← thin module lifecycle
-        ├── InoNeuTtsCommon.{h,cpp}                  ← path resolvers (BackboneModels +
-        │                                               DecoderModels lookups), shared
-        │                                               TokenizePrompt, NormalizePhones
-        ├── InoNeuTtsSettings.cpp
-        ├── InoNeuTtsRunner.{h,cpp}                  ← FInoNeuTtsRunner: model + ctx +
-        │                                               vocab + decoder + voice cache
-        │                                               (PrimeVoice, ClearVoiceCache,
-        │                                               HasCachedVoice, GetVoiceCache)
-        ├── InoNeuTtsPromptBuilder.{h,cpp}           ← BuildSynthesisPrompt (RefCodes +
-        │                                               String overloads),
-        │                                               BuildSynthesisPromptPrefix,
-        │                                               BuildSpeechTokensBlock
-        ├── InoNeuTtsSynthesisWorker.{h,cpp}         ← RunSynthesis + RunStreamingSynthesis
-        │                                               free functions; NOT an FRunnable —
-        │                                               called directly from a ThreadPool
-        │                                               worker dispatched by the subsystem
-        ├── InoNeuTtsVoiceRegistry.{h,cpp}           ← .nvoice.json parser + bundled-voice scan
-        ├── InoNeuTtsSubsystem.cpp                   ← Blueprint glue + async-load chain +
-        │                                               InoNodes::Download::DownloadFilesAsync
-        │                                               wiring + active-voice state
-        ├── InoNeuTtsSynthesize.cpp                  ← BP async action impl
-        ├── InoNeuTtsStreamSynthesize.cpp
-        └── SmokeTests/
-            ├── InoNeuTtsLoadTest.cpp
-            ├── InoNeuTtsSynthTest.cpp
-            ├── InoNeuTtsStreamSynthTest.cpp
-            └── InoNeuTtsVoiceRegistryTest.cpp
+        ├── InoNeuTtsNativeEditor.cpp
+        └── InoNeuTtsVoiceFactory.cpp                ← FactoryCreateFile parses JSON →
+                                                       populates UInoNeuTtsVoiceAsset;
+                                                       Reimport refreshes from source path
 ```
 
 The smoke tests bypass the subsystem and call `FInoNeuTtsRunner::Create`

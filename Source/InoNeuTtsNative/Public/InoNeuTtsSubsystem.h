@@ -179,6 +179,22 @@ public:
 		const FInoNeuTtsVoiceReadyDelegate& OnReady);
 
 	/**
+	 * Convenience overload that takes a UInoNeuTtsVoiceAsset directly —
+	 * the typical path for Blueprint code that references a voice as an
+	 * imported `.inv` UAsset. Internally calls
+	 * UInoNeuTtsVoiceAsset::ToRuntimeVoice() and routes through the
+	 * SetActiveVoiceAsync above.
+	 *
+	 * Errors fast (via OnReady) if VoiceAsset is null or its IsUsable()
+	 * check fails (no RefCodes / no Name / no Language).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "InoNeuTts",
+		meta = (DisplayName = "Set Active Voice From Asset (Async)"))
+	void SetActiveVoiceFromAssetAsync(
+		class UInoNeuTtsVoiceAsset* VoiceAsset,
+		const FInoNeuTtsVoiceReadyDelegate& OnReady);
+
+	/**
 	 * Drop the cached active voice. Subsequent voice-less SynthesizeAsync
 	 * calls will fail until a new voice is set. Cheap; no LM state changes.
 	 */

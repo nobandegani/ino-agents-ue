@@ -74,6 +74,11 @@
 			"Name": "InoNeuTtsNative",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "InoNeuTtsNativeEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
 		}
 	]
 }
