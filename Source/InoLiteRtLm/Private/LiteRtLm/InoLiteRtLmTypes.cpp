@@ -2,6 +2,8 @@
 
 #include "LiteRtLm/InoLiteRtLmTypes.h"
 
+#include "InoLiteRtLmSettings.h"
+
 #include "HAL/FileManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -17,32 +19,34 @@ const char* LiteRtLmBackendToString(EInoLiteRtLmBackend Backend)
     return "cpu";
 }
 
-FString LiteRtLmResolveModelPath(const FString& ModelFileName)
+FString LiteRtLmResolveModelPath(const FString& LocalFileName)
 {
-    if (ModelFileName.IsEmpty())
+    if (LocalFileName.IsEmpty())
     {
         return FString();
     }
 
-    // 1. PersistentDownloadDir — downloaded / cached models (dev + shipping).
+    // 1. PersistentDownloadDir — where the InoNodes downloader writes
+    //    cached models. Same path UInoLiteRtLmSettings::ResolveLocalPath
+    //    builds, so resolve / download / load all agree on one location.
     {
-        const FString Path = FPaths::Combine(
-            FPaths::ProjectPersistentDownloadDir(),
-            TEXT("InoAgents"), TEXT("Models"), ModelFileName);
-        if (IFileManager::Get().FileExists(*Path))
+        const FString Path = UInoLiteRtLmSettings::ResolveLocalPath(LocalFileName);
+        if (!Path.IsEmpty() && IFileManager::Get().FileExists(*Path))
         {
             return FPaths::ConvertRelativePathToFull(Path);
         }
     }
 
-    // 2. Plugin directory — legacy dev path (manual drop into Plugins/InoAgents/Models/).
+    // 2. Plugin directory — legacy dev path (manual drop into
+    //    Plugins/InoAgents/Models/). Kept for backward compat with
+    //    pre-PersistentDownloadDir workflows.
     {
         const TSharedPtr<IPlugin> Plugin =
             IPluginManager::Get().FindPlugin(TEXT("InoAgents"));
         if (Plugin.IsValid())
         {
             const FString Path = FPaths::Combine(
-                Plugin->GetBaseDir(), TEXT("Models"), ModelFileName);
+                Plugin->GetBaseDir(), TEXT("Models"), LocalFileName);
             if (IFileManager::Get().FileExists(*Path))
             {
                 return FPaths::ConvertRelativePathToFull(Path);

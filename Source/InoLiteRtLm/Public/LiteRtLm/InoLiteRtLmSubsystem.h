@@ -3,12 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GenericPlatform/GenericPlatformFile.h"
-#include "Interfaces/IHttpRequest.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UObject/ScriptInterface.h"
 
-#include "LiteRtLm/InoLiteRtLmTypes.h"
+#include "LiteRtLm/InoLiteRtLmTypes.h"  // FInoLiteRtLmDownloadProgressDelegate
+                                        // (transitively pulls FInoCancellationToken via InoDownloader.h)
 
 #include "InoLiteRtLmSubsystem.generated.h"
 
@@ -79,64 +78,56 @@ public:
 
     /**
      * Asynchronously load a LiteRT-LM engine from the given model config.
-     * Returns immediately. When loading finishes (success or failure),
-     * OnLoaded fires on the game thread.
+     * Returns immediately; OnLoaded fires on the game thread when done.
      *
      * Flow:
-     *   1. Resolve the model on disk (LiteRtLmResolveModelPath).
-     *   2. If missing → download from the model entry's DownloadUrl into
-     *      PersistentDownloadDir.
-     *   3. If the entry carries an ExpectedSha256, SHA-256 the file on a
-     *      ThreadPool worker before loading. On mismatch:
-     *        - Cached file: delete and re-download, then verify again.
-     *        - Freshly-downloaded file: hard fail (OnLoaded false) — no
-     *          redownload loop.
-     *   4. Call litert_lm_engine_create on the ThreadPool worker and
-     *      marshal the result back to the game thread.
+     *   1. Resolve the registry entry from `UInoLiteRtLmSettings::Models`
+     *      via `FindModel` (matches DisplayName OR LocalFileName).
+     *   2. Hand off to `InoNodes::Download::DownloadFileAsync`. The
+     *      downloader internally handles:
+     *        - Cache check (skip if file exists + SHA matches).
+     *        - HEAD probe → GET → `.partial` staging → atomic rename.
+     *        - Streaming SHA-256 verification against ExpectedSha256.
+     *        - Multi-connection range downloads for large files.
+     *        - Exponential-backoff retries on transient failures.
+     *        - Cancellation via the subsystem's stored cancel token.
+     *   3. On download success, call `litert_lm_engine_create` on a
+     *      ThreadPool worker and marshal the result back to the game
+     *      thread.
      *
-     * Error cases that fire OnLoaded with bSuccess=false:
-     *   - Another load is already in flight
-     *   - A model is already loaded (call UnloadModel first)
-     *   - The model file does not exist and no DownloadUrl is configured
-     *   - SHA-256 verification failed and cannot be recovered (no URL, or
-     *     a fresh download also mismatched)
-     *   - litert_lm_engine_settings_create returned NULL
-     *   - litert_lm_engine_create returned NULL (corrupt / unsupported model)
+     * Two per-call delegates (both single-cast dynamic delegates):
      *
-     * MUST be called on the game thread. The actual SHA-256 + engine
-     * construction run on ThreadPool workers; the OnLoaded callback
-     * marshals back to the game thread.
-     */
-    /**
-     * Dispatch a model load.
+     *   OnDownloadProgress — fires 0+ times on the game thread during
+     *     download. Payload is the shared `FInoDownloadProgress` struct
+     *     (BytesReceived / TotalBytes / ProgressPercent / BytesPerSecond
+     *     / EstimatedSecondsRemaining / RetryAttempt / ...). If the model
+     *     file is already cached on disk with a matching SHA, this
+     *     delegate never fires.
      *
-     * Two per-call delegates (both are single-cast dynamic delegates,
-     * same ergonomic as OnLoaded before this — they show as exec-pin
-     * Events on the BP node when AutoCreateRefTerm fires, and in C++
-     * you bind one handler per call via BindDynamic):
+     *   OnLoaded — fires exactly ONCE at the end, with bSuccess=true
+     *     when the engine is usable or bSuccess=false with an
+     *     ErrorMessage when a terminal error prevented load.
      *
-     *   OnDownloadProgress — fires 0+ times during download only. If
-     *     the model file is already cached on disk, this never fires.
-     *     Payload: (Percent, BytesReceived, TotalBytes, bCompleted).
-     *     bCompleted=false on every intermediate tick; bCompleted=true
-     *     on exactly ONE terminal tick, fired AFTER the download is
-     *     fully written + renamed on disk, BEFORE the SHA-256 verify
-     *     + engine construction begin. Use it to flip UI from
-     *     "downloading" to "loading" without waiting for OnLoaded.
+     * Error cases that fire OnLoaded(false, err):
+     *   - Another load is already in flight.
+     *   - A model is already loaded (call UnloadModel first).
+     *   - No registry entry matches Config.ModelFileName.
+     *   - The model file is missing and no DownloadUrl is configured.
+     *   - Download failed (network, HTTP error, SHA-256 mismatch the
+     *     downloader couldn't recover from).
+     *   - litert_lm_engine_settings_create returned NULL.
+     *   - litert_lm_engine_create returned NULL (corrupt model / out
+     *     of memory).
      *
-     *   OnLoaded — fires exactly ONCE at the end, when the engine is
-     *     actually usable (bSuccess=true) or a terminal error
-     *     prevented load (bSuccess=false, ErrorMessage filled).
-     *
-     * On download failure the OnDownloadProgress.bCompleted=true is
-     * NOT fired — the error flows through OnLoaded(false, err).
+     * MUST be called on the game thread. Download + engine construction
+     * run off-thread; all delegates marshal back to the game thread.
      */
     UFUNCTION(BlueprintCallable, Category="InoAgents|LiteRT-LM",
               meta=(AutoCreateRefTerm="OnDownloadProgress,OnLoaded"))
     void LoadModelAsync(
-        const FInoLiteRtLmModelConfig&         Config,
-        const FOnInoModelDownloadProgress&     OnDownloadProgress,
-        const FOnInoLiteRtLmModelLoaded&       OnLoaded);
+        const FInoLiteRtLmModelConfig&              Config,
+        const FInoLiteRtLmDownloadProgressDelegate& OnDownloadProgress,
+        const FOnInoLiteRtLmModelLoaded&            OnLoaded);
 
     /**
      * True if LoadModelAsync has successfully completed and UnloadModel has
@@ -297,66 +288,31 @@ private:
      *  Used by CreateConversation to read SystemMessage, etc. */
     FInoLiteRtLmModelConfig LoadedConfig;
 
-    // True from the moment LoadModelAsync dispatches to the ThreadPool
-    // until the OnLoaded callback fires back on the game thread.
+    // True from the moment LoadModelAsync dispatches to the InoNodes
+    // downloader (or the ThreadPool engine_create when the file is
+    // cached) until the OnLoaded callback fires back on the game thread.
     bool bLoadInFlight = false;
 
-    // Download state — chunked Range-based download to avoid UE's
-    // HTTP module accumulating the full response in a TArray<uint8>
-    // (which overflows int32 at ~2.1 GB and crashes for 3+ GB models).
-    // Each chunk is <=500 MB, safely within TArray limits.
-    static constexpr int64 kDownloadChunkSize = 500 * 1024 * 1024;  // 500 MB
+    // Per-call delegates stashed here for the duration of the load so
+    // every progress tick + the terminal OnLoaded all fire through the
+    // caller's delegates. Cleared on terminal completion so a stale
+    // delegate from a prior load can't be invoked against a fresh load.
+    FOnInoLiteRtLmModelLoaded            PendingOnLoaded;
+    FInoLiteRtLmDownloadProgressDelegate PendingOnDownloadProgress;
 
-    FString         DownloadUrl;
-    FString         PendingDownloadTargetPath;
-    FOnInoLiteRtLmModelLoaded        PendingOnLoaded;
-    /** Per-call download-progress handler stashed here for the
-     *  duration of the load so every progress tick (including the
-     *  bCompleted=true terminal tick) fires through the caller's
-     *  delegate. Cleared on terminal completion so a stale delegate
-     *  from a prior load can't be invoked against a fresh request. */
-    FOnInoModelDownloadProgress      PendingOnDownloadProgress;
-    IFileHandle*    DownloadFileHandle = nullptr;
-    int64           DownloadBytesWritten = 0;
-    // Full file size in bytes, as learned from the first response's
-    // Content-Range (for 206 Partial Content) or Content-Length (for 200 OK).
-    // -1 means "not yet known" or "server didn't advertise it" — in which
-    // case OnDownloadProgress fires with Percent=0 and TotalBytes=-1.
-    int64           DownloadTotalBytes = -1;
-    FHttpRequestPtr DownloadRequest;
-
-    void StartDownload(const FString& Url, const FString& TargetPath,
-                       const FOnInoLiteRtLmModelLoaded& OnLoaded);
-    void DownloadNextChunk();
-    void HandleChunkComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
-    void FinishDownloadSuccess();
-    void FinishDownloadError(const FString& Error);
-    void CleanupDownload();
-    void ProceedWithLoad(const FString& ModelPath, const FOnInoLiteRtLmModelLoaded& OnLoaded);
+    // Cancellation token for the in-flight InoNodes download. Created
+    // when LoadModelAsync starts a download; nulled when the download
+    // completes; cancelled in Deinitialize so the downloader stops
+    // writing to disk if the subsystem tears down mid-load.
+    FInoCancellationTokenPtr DownloadCancelToken;
 
     /**
-     * Verify the file at ModelPath against the entry's ExpectedSha256 (if set),
-     * then either:
-     *   - Hand off to ProceedWithLoad on a match (or if verification is skipped
-     *     because the entry has no expected hash).
-     *   - On mismatch: delete the file and, if bAllowRedownloadOnMismatch is
-     *     true and the entry has a DownloadUrl, call StartDownload with the
-     *     same OnLoaded delegate. Otherwise fail via the OnLoaded delegate
-     *     without retrying (used from FinishDownloadSuccess to avoid infinite
-     *     retry loops on persistently-bad downloads).
-     *
-     * SHA-256 computation is dispatched to the ThreadPool. Result dispatch
-     * back to the game thread is done via AsyncTask(ENamedThreads::GameThread).
-     * A TWeakObjectPtr<UInoLiteRtLmSubsystem> guards against teardown
-     * mid-verification — if the subsystem is gone when the result arrives,
-     * the lambda no-ops.
-     *
-     * MUST be called on the game thread.
+     * Once the file is on disk and verified by the InoNodes downloader,
+     * hand off to ThreadPool for `litert_lm_engine_create` and marshal
+     * the result back to the game thread via the stored
+     * PendingOnLoaded delegate. Game thread only.
      */
-    void VerifyAndLoad(const FString& ModelPath,
-                       const FInoLiteRtLmModelEntry* Entry,
-                       const FOnInoLiteRtLmModelLoaded& OnLoaded,
-                       bool bAllowRedownloadOnMismatch);
+    void DispatchModelLoad(const FString& ModelPath);
 
     // Weak ref to the most recently created conversation. Used to enforce
     // the single-conversation invariant and to tear the conversation down

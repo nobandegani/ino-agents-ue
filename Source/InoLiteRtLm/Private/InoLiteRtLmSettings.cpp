@@ -2,19 +2,32 @@
 
 #include "InoLiteRtLmSettings.h"
 
+#include "Misc/Paths.h"
+
 UInoLiteRtLmSettings::UInoLiteRtLmSettings()
 {
-    // Default model entries — public Hugging Face repos, no auth needed.
-    Models.Add({
-        TEXT("Gemma 4 E2B"),
-        TEXT("gemma-4-E2B-it.litertlm"),
-        TEXT("https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm")
-    });
-    Models.Add({
-        TEXT("Gemma 4 E4B"),
-        TEXT("gemma-4-E4B-it.litertlm"),
-        TEXT("https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm")
-    });
+    // Default model entries — public Hugging Face repos, no auth
+    // needed. Most-tested model is Gemma 4; users can add other
+    // .litertlm models (Gemma 3, Qwen 2.5, Phi-4-mini, Llama-3.2,
+    // etc.) via Project Settings → Plugins → InoLiteRtLm → Models.
+    {
+        FInoLiteRtLmModelEntry E;
+        E.DisplayName  = TEXT("Gemma 4 E2B");
+        E.DownloadUrl  = TEXT("https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm");
+        E.LocalFileName = TEXT("gemma-4-E2B-it.litertlm");
+        E.Language     = TEXT("multi");
+        E.Quantization = TEXT("INT4");
+        Models.Add(MoveTemp(E));
+    }
+    {
+        FInoLiteRtLmModelEntry E;
+        E.DisplayName  = TEXT("Gemma 4 E4B");
+        E.DownloadUrl  = TEXT("https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm");
+        E.LocalFileName = TEXT("gemma-4-E4B-it.litertlm");
+        E.Language     = TEXT("multi");
+        E.Quantization = TEXT("INT4");
+        Models.Add(MoveTemp(E));
+    }
 }
 
 const FInoLiteRtLmModelEntry* UInoLiteRtLmSettings::FindModelByFileName(
@@ -22,7 +35,7 @@ const FInoLiteRtLmModelEntry* UInoLiteRtLmSettings::FindModelByFileName(
 {
     for (const FInoLiteRtLmModelEntry& Entry : Models)
     {
-        if (Entry.ModelFileName.Equals(FileName, ESearchCase::IgnoreCase))
+        if (Entry.LocalFileName.Equals(FileName, ESearchCase::IgnoreCase))
         {
             return &Entry;
         }
@@ -56,4 +69,21 @@ const FInoLiteRtLmModelEntry* UInoLiteRtLmSettings::FindModel(
         }
     }
     return nullptr;
+}
+
+FString UInoLiteRtLmSettings::GetModelsDir()
+{
+    return FPaths::Combine(
+        FPaths::ProjectPersistentDownloadDir(),
+        TEXT("InoAgents"),
+        TEXT("Models"));
+}
+
+FString UInoLiteRtLmSettings::ResolveLocalPath(const FString& LocalFileName)
+{
+    if (LocalFileName.IsEmpty())
+    {
+        return FString();
+    }
+    return FPaths::Combine(GetModelsDir(), LocalFileName);
 }

@@ -235,7 +235,7 @@ static void RunLiteRtLmConversationStreamTest(const TArray<FString>& Args)
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationStreamTest: starting — loading model first (non-blocking)"));
 
-    Subsys->LoadModelAsync(Config, FOnInoModelDownloadProgress(), OnLoaded);
+    Subsys->LoadModelAsync(Config, FInoLiteRtLmDownloadProgressDelegate(), OnLoaded);
 }
 
 static FAutoConsoleCommand GLiteRtLmConversationStreamTestCommand(

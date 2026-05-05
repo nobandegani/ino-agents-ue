@@ -234,7 +234,7 @@ static void RunLiteRtLmConversationContextTest(const TArray<FString>& Args)
     UE_LOG(LogInoAgents, Log,
            TEXT("ConversationContextTest: starting — loading model first (non-blocking)"));
 
-    Subsys->LoadModelAsync(Config, FOnInoModelDownloadProgress(), OnLoaded);
+    Subsys->LoadModelAsync(Config, FInoLiteRtLmDownloadProgressDelegate(), OnLoaded);
 }
 
 static FAutoConsoleCommand GLiteRtLmConversationContextTestCommand(

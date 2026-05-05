@@ -69,6 +69,12 @@ public class InoLiteRtLm : ModuleRules
 				                    // and stages the runtime DLLs/.so for
 				                    // packaging at PreLoadingScreen.
 
+				"InoNodes",         // Generic file downloader + SHA-256 helpers
+				                    // (InoNodes::Download::DownloadFileAsync).
+				                    // Public dep so FInoDownloadProgress is reachable
+				                    // through the FInoLiteRtLmDownloadProgressDelegate
+				                    // declared in InoLiteRtLmTypes.h.
+
 				"Json",             // FJsonObject / FJsonSerializer for parsing
 				                    // LiteRT-LM responses (tool calls, content parts).
 				"JsonUtilities",    // FJsonObjectWrapper — Blueprint-friendly JSON
@@ -88,10 +94,12 @@ public class InoLiteRtLm : ModuleRules
 				"Projects",      // IPluginManager — used by the subsystem to
 				                 // resolve the plugin's base directory for
 				                 // bundled-resource lookup (legacy dev path).
-				"HTTP",          // FHttpModule / IHttpRequest / IHttpResponse —
-				                 // chunked Range-based model download (Gemma 4
-				                 // E2B is ~2.6 GB, E4B ~3.7 GB, exceeding the
-				                 // int32 TArray limit if downloaded in one shot).
+				// HTTP dropped — model file downloads now flow through
+				// InoNodes::Download::DownloadFileAsync, which owns the
+				// FHttpModule integration (with .partial staging, atomic
+				// rename, streaming SHA-256, multi-connection range,
+				// retries, cancel tokens). See
+				// Plugins/InoNodes/Source/InoNodes/Public/InoDownloader.h.
 			}
 			);
 

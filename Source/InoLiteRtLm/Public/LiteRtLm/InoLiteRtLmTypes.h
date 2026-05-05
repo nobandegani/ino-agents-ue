@@ -5,6 +5,11 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 
+// Pulls in FInoDownloadProgress for the download-progress delegate below.
+// InoNodes is a PUBLIC dep of this module so consumers binding to the
+// delegate get the struct definition for free.
+#include "InoDownloader.h"
+
 #include "InoLiteRtLmTypes.generated.h"
 
 /**
@@ -173,50 +178,96 @@ struct FInoLiteRtLmModelConfig
 
 /**
  * One entry in the model registry (Project Settings → Plugins →
- * InoAgents LiteRT-LM → Models). Maps a model filename to a download
- * URL so the agent component can auto-download on first use.
+ * InoLiteRtLm → Models). Maps a display name + on-disk filename to a
+ * download URL so the subsystem can auto-download on first use.
+ *
+ * The file lands at:
+ *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/Models/<LocalFileName>
+ *
+ * If the file is already present at that path, no download happens
+ * and DownloadUrl is unused. ExpectedSha256 (when set) is checked
+ * after download AND against any existing cached file, so a corrupt
+ * cached file is re-downloaded automatically.
  */
 USTRUCT(BlueprintType)
 struct FInoLiteRtLmModelEntry
 {
     GENERATED_BODY()
 
-    /** Human-readable name (for editor display). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    /**
+     * Human-readable name shown in editor / Blueprint pickers.
+     * Also the lookup key used by `FInoLiteRtLmModelConfig::ModelFileName`
+     * via `UInoLiteRtLmSettings::FindModel` (case-insensitive — falls
+     * back to LocalFileName match if nothing matches by display name).
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
     FString DisplayName;
 
-    /** Filename on disk (must match FInoLiteRtLmModelConfig::ModelFileName). */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
-    FString ModelFileName;
-
-    /** Direct download URL. For Hugging Face:
-     *  https://huggingface.co/<org>/<repo>/resolve/main/<file> */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
+    /**
+     * Direct download URL. For Hugging Face:
+     *   https://huggingface.co/<org>/<repo>/resolve/main/<file>
+     * Anything FHttpModule can GET works (HuggingFace, S3, your CDN).
+     * Public URLs only — no auth handling.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
     FString DownloadUrl;
 
-    /** Optional lowercase 64-character SHA-256 hex digest of the model file.
-     *  Same format as `sha256sum` / Hugging Face LFS OIDs.
+    /**
+     * Filename to save as locally. The runtime concatenates this with
+     * <persistent>/InoAgents/Models/ to get the full path. Must end in
+     * `.litertlm` for LiteRT-LM to recognize it.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
+    FString LocalFileName;
+
+    /**
+     * Hex-encoded SHA-256 hash for integrity verification. Optional
+     * but strongly recommended. Empty = skip verification (download is
+     * trusted by URL only). Lowercase, 64 chars, no separators —
+     * same format as `sha256sum` / Hugging Face LFS OIDs.
      *
-     *  When set, UInoLiteRtLmSubsystem::LoadModelAsync verifies the on-disk
-     *  file against this digest before handing it to the native engine.
-     *  A mismatch for a locally-cached file triggers an automatic delete +
-     *  re-download; a mismatch immediately after a fresh download is a hard
-     *  failure (no infinite loop).
-     *
-     *  Leave empty to skip verification (back-compat with pre-SHA workflows).
-     *  Obtain the hash from the model's upstream host — for Hugging Face
-     *  LFS files the SHA-256 is the `oid` shown on the file's page or via
-     *  the API's `X-Linked-Etag` header. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
+     * When set, the subsystem verifies the on-disk file against this
+     * digest before handing it to the native engine. A mismatch for a
+     * locally-cached file triggers an automatic delete + re-download;
+     * a mismatch immediately after a fresh download is a hard failure
+     * (no infinite loop).
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model",
               meta = (DisplayName = "Expected SHA-256"))
     FString ExpectedSha256;
+
+    /**
+     * Total file size in bytes. Used for the download-progress
+     * percentage when the server doesn't return Content-Length on
+     * GET. 0 = probe via a HEAD request before downloading.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
+    int64 FileSizeBytes = 0;
+
+    /**
+     * IETF language tag the model was trained on / is intended for
+     * ("en", "en-us", "ja", "multi"). Informational — drives no
+     * runtime behavior in this module today, but lets UI / picker
+     * code filter the list per locale.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
+    FString Language = TEXT("en");
+
+    /**
+     * Quantization label. Informational only — doesn't change runtime
+     * behavior (the dtype is intrinsic to the .litertlm file).
+     * Common values: "Q4_0", "Q8_0", "FP16", "INT8".
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
+    FString Quantization;
 };
 
 /** Resolve the on-disk path for a model filename. Checks:
- *  1. PersistentDownloadDir/InoAgents/Models/ (downloaded/cached)
+ *  1. PersistentDownloadDir/InoAgents/Models/ (downloaded/cached;
+ *     same path UInoLiteRtLmSettings::ResolveLocalPath builds)
  *  2. Plugins/InoAgents/Models/ (legacy dev path)
  *  Returns empty string if not found anywhere. */
-INOLITERTLM_API FString LiteRtLmResolveModelPath(const FString& ModelFileName);
+INOLITERTLM_API FString LiteRtLmResolveModelPath(const FString& LocalFileName);
 
 // ============================================================================
 // Delegates
@@ -330,26 +381,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnInoLiteRtLmToolCalled,
     FString, ArgumentsJson,
     FString, ResultJson);
 
-/** Fired during model file download.
+/**
+ * Single-cast delegate fired during model file download. Re-uses
+ * InoNodes' shared `FInoDownloadProgress` payload so callers see the
+ * same struct everywhere (BytesReceived, TotalBytes, ProgressPercent,
+ * BytesPerSecond, EstimatedSecondsRemaining, RetryAttempt, ...).
  *
- *   Percent         — 0..100 based on Content-Length; 0 if TotalBytes<0.
- *   BytesReceived   — rolling sum of bytes written to disk so far.
- *   TotalBytes      — known total, or -1 if the server didn't send
- *                     Content-Length (rare for Hugging Face).
- *   bCompleted      — false for every intermediate progress tick;
- *                     true on exactly ONE terminal broadcast, fired
- *                     after the download has been fully written and
- *                     renamed on disk, BEFORE LoadModelAsync chains
- *                     into the ThreadPool load. Bind this to flip UI
- *                     state from "downloading" to "loading" without
- *                     waiting for OnLoaded (the model isn't usable
- *                     yet at this point — the engine still has to
- *                     construct). On download failure, bCompleted=true
- *                     is NOT fired; the error flows through OnLoaded
- *                     with bSuccess=false instead.
+ * Always fires on the game thread. If the model is already cached on
+ * disk this delegate never fires — the load proceeds straight to
+ * SHA verification and engine construction.
  */
-DECLARE_DYNAMIC_DELEGATE_FourParams(FOnInoModelDownloadProgress,
-    float, Percent,
-    int64, BytesReceived,
-    int64, TotalBytes,
-    bool,  bCompleted);
+DECLARE_DYNAMIC_DELEGATE_OneParam(FInoLiteRtLmDownloadProgressDelegate,
+    const FInoDownloadProgress&, Progress);

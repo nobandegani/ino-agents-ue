@@ -7,14 +7,14 @@
 #include "InoLiteRtLmSettings.h"
 #include "LiteRtLm/InoLiteRtLmToolBase.h"
 #include "LiteRtLm/InoLiteRtLmTypes.h"
-#include "LiteRtLm/InoSha256.h"
+
+// Generic file downloader — owns HTTP, .partial staging, atomic
+// rename, streaming SHA-256 verification, retries, multi-connection
+// range, cancellation. Replaces the per-module chunked downloader +
+// VerifyAndLoad path that lived here previously.
+#include "InoDownloader.h"
 
 #include "Async/Async.h"
-#include "HAL/PlatformFileManager.h"
-#include "HttpModule.h"
-#include "Interfaces/IHttpRequest.h"
-#include "Interfaces/IHttpResponse.h"
-#include "Misc/FileHelper.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -58,16 +58,18 @@ void UInoLiteRtLmSubsystem::Deinitialize()
     // engine if shutdown races an in-flight load, which is acceptable
     // because the process is dying anyway.
 
-    // Cancel any in-flight download so we don't write to a file after
-    // the subsystem is gone.
-    if (DownloadRequest.IsValid())
+    // Cancel any in-flight InoNodes download so it stops writing to
+    // disk after the subsystem is gone. The downloader polls the
+    // token between chunks + before the rename, deletes its .partial,
+    // and fires its OnComplete with bSuccess=false / "Cancelled" — our
+    // completion lambda's WeakThis check then drops the result silently.
+    if (DownloadCancelToken.IsValid())
     {
         UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Download: Deinitialize — cancelling in-flight download request"));
-        DownloadRequest->CancelRequest();
-        DownloadRequest.Reset();
+               TEXT("LiteRtLm: Download: Deinitialize — cancelling in-flight download"));
+        DownloadCancelToken->Cancel();
+        DownloadCancelToken.Reset();
     }
-    CleanupDownload();
 
     // Release references to every registered tool so they become
     // eligible for GC along with the subsystem itself. This is not
@@ -82,9 +84,9 @@ void UInoLiteRtLmSubsystem::Deinitialize()
 }
 
 void UInoLiteRtLmSubsystem::LoadModelAsync(
-    const FInoLiteRtLmModelConfig&     Config,
-    const FOnInoModelDownloadProgress& OnDownloadProgress,
-    const FOnInoLiteRtLmModelLoaded&   OnLoaded)
+    const FInoLiteRtLmModelConfig&              Config,
+    const FInoLiteRtLmDownloadProgressDelegate& OnDownloadProgress,
+    const FOnInoLiteRtLmModelLoaded&            OnLoaded)
 {
     check(IsInGameThread());
 
@@ -112,90 +114,150 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
         return;
     }
 
-    // Stash the per-call progress delegate so every progress tick
-    // during download routes through it. Cleared on CleanupDownload
-    // so a stale delegate from a prior load can't fire against a
-    // subsequent load. Pre-flight rejections (above) never set this,
-    // which is fine — they failed before any download state was set up.
-    PendingOnDownloadProgress = OnDownloadProgress;
-
-    // Resolve settings entry first. FindModel is permissive — it matches
-    // by either ModelFileName ("gemma-4-E2B-it.litertlm") OR DisplayName
-    // ("Gemma 4 E2B"). If the caller passed a display name, we transparently
-    // canonicalize the file name in a local config copy so the rest of
-    // this function (disk check, download target path, download callback's
-    // rename step, smoke-test paths) all use one consistent on-disk name.
+    // Resolve settings entry. FindModel is permissive — matches by
+    // either DisplayName ("Gemma 4 E2B") OR LocalFileName
+    // ("gemma-4-E2B-it.litertlm"). Without an entry we have no
+    // download URL and no expected SHA, so we can't proceed.
     const UInoLiteRtLmSettings* LrlSettings = UInoLiteRtLmSettings::Get();
     const FInoLiteRtLmModelEntry* Entry = LrlSettings
         ? LrlSettings->FindModel(Config.ModelFileName)
         : nullptr;
 
-    FInoLiteRtLmModelConfig ResolvedConfig = Config;
-    if (Entry != nullptr &&
-        !ResolvedConfig.ModelFileName.Equals(Entry->ModelFileName, ESearchCase::IgnoreCase))
-    {
-        UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Subsystem: LoadModelAsync resolved '%s' via display-name match → file name '%s'"),
-               *ResolvedConfig.ModelFileName, *Entry->ModelFileName);
-        ResolvedConfig.ModelFileName = Entry->ModelFileName;
-    }
-
-    // Resolve the model file path. Checks PersistentDownloadDir first
-    // (downloaded/cached), then the plugin's Models/ dir (legacy dev).
-    const FString ModelPath = LiteRtLmResolveModelPath(ResolvedConfig.ModelFileName);
-
-    if (!ModelPath.IsEmpty())
-    {
-        // Found on disk — verify SHA-256 first (if the entry has one configured),
-        // then either proceed to load or delete+redownload on mismatch.
-        UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Subsystem: LoadModelAsync found cached model on disk (path=%s); proceeding to verify+load"),
-               *ModelPath);
-        bLoadInFlight = true;
-        UE_LOG(LogInoAgents, Verbose,
-               TEXT("LiteRtLm: Subsystem: bLoadInFlight → true (cached path)"));
-        LoadedConfig  = ResolvedConfig;
-        VerifyAndLoad(ModelPath, Entry, OnLoaded, /*bAllowRedownloadOnMismatch=*/ true);
-        return;
-    }
-
-    // Not on disk — we need the settings entry's download URL.
-    if (Entry == nullptr || Entry->DownloadUrl.IsEmpty())
+    if (Entry == nullptr)
     {
         const FString Err = FString::Printf(
-            TEXT("Model '%s' not found on disk and no download URL configured. "
-                 "Add an entry in Project Settings → Plugins → InoAgents → "
-                 "LiteRT-LM → Models (match either the Display Name or the "
-                 "Model File Name)."),
-            *ResolvedConfig.ModelFileName);
+            TEXT("Model '%s' is not in the registry. Add an entry in Project Settings "
+                 "→ Plugins → InoLiteRtLm → Models (match either DisplayName or LocalFileName)."),
+            *Config.ModelFileName);
         UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;
     }
 
-    // Download, then load.
-    bLoadInFlight = true;
-    UE_LOG(LogInoAgents, Verbose,
-           TEXT("LiteRtLm: Subsystem: bLoadInFlight → true (download path)"));
-    LoadedConfig  = ResolvedConfig;
+    // Canonicalize the runtime config to use the entry's actual filename.
+    // Subsequent code paths (path resolution, runtime logging, download
+    // target) all see one consistent on-disk name regardless of whether
+    // the caller passed in a DisplayName or a LocalFileName.
+    FInoLiteRtLmModelConfig ResolvedConfig = Config;
+    if (!ResolvedConfig.ModelFileName.Equals(Entry->LocalFileName, ESearchCase::IgnoreCase))
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Subsystem: LoadModelAsync resolved '%s' via display-name match → file name '%s'"),
+               *ResolvedConfig.ModelFileName, *Entry->LocalFileName);
+        ResolvedConfig.ModelFileName = Entry->LocalFileName;
+    }
 
-    const FString TargetDir = FPaths::Combine(
-        FPaths::ProjectPersistentDownloadDir(),
-        TEXT("InoAgents"), TEXT("Models"));
-    IFileManager::Get().MakeDirectory(*TargetDir, /*Tree=*/true);
+    // Build the InoNodes download request. The downloader handles
+    // HEAD probe → GET → .partial staging → atomic rename → streaming
+    // SHA-256 verification all internally; cached files with matching
+    // SHA short-circuit straight to the completion callback.
+    const FString TargetDir = UInoLiteRtLmSettings::GetModelsDir();
 
-    const FString TargetPath = FPaths::Combine(TargetDir, ResolvedConfig.ModelFileName);
+    FInoDownloadRequest Req;
+    Req.Url                = Entry->DownloadUrl;
+    Req.SaveDirectory      = TargetDir;
+    Req.FileName           = Entry->LocalFileName;
+    Req.ExpectedSha256     = Entry->ExpectedSha256;
+    Req.ExpectedTotalBytes = Entry->FileSizeBytes;
+    Req.bSkipIfCached      = true;
+
+    // If the download URL is empty, only proceed when the file is
+    // already cached (offline-after-first-run path). Otherwise this is
+    // a clear configuration error and we surface it before kicking off
+    // the downloader.
+    const FString TargetPath = FPaths::Combine(TargetDir, Req.FileName);
+    if (Req.Url.IsEmpty() && !IFileManager::Get().FileExists(*TargetPath))
+    {
+        const FString Err = FString::Printf(
+            TEXT("Model '%s' not found on disk and no DownloadUrl is configured "
+                 "in the registry entry. Either drop the file at %s manually or "
+                 "set DownloadUrl in Project Settings → Plugins → InoLiteRtLm → Models."),
+            *Entry->LocalFileName, *TargetPath);
+        UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
+        OnLoaded.ExecuteIfBound(false, Err);
+        return;
+    }
+
+    // Stash per-call delegates + ResolvedConfig for the duration of
+    // the load so every progress tick + the terminal OnLoaded fires
+    // through them. Cleared on terminal completion.
+    PendingOnLoaded           = OnLoaded;
+    PendingOnDownloadProgress = OnDownloadProgress;
+    LoadedConfig              = ResolvedConfig;
+
+    bLoadInFlight       = true;
+    DownloadCancelToken = MakeShared<FInoCancellationToken, ESPMode::ThreadSafe>();
 
     UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Subsystem: LoadModelAsync model not found locally, downloading from %s → %s"),
-           *Entry->DownloadUrl, *TargetPath);
+           TEXT("LiteRtLm: Subsystem: LoadModelAsync dispatching InoNodes download "
+                "(url=%s, target=%s, expected_sha=%s, expected_bytes=%lld)"),
+           Req.Url.IsEmpty() ? TEXT("<none, cached>") : *Req.Url,
+           *TargetPath,
+           Req.ExpectedSha256.IsEmpty() ? TEXT("<none>") : *Req.ExpectedSha256,
+           Req.ExpectedTotalBytes);
 
-    StartDownload(Entry->DownloadUrl, TargetPath, OnLoaded);
+    TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakThis(this);
+
+    InoNodes::Download::DownloadFileAsync(
+        Req,
+        // Progress — already marshalled to the game thread by InoNodes.
+        // Forward verbatim through the caller's delegate.
+        [WeakThis](const FInoDownloadProgress& P)
+        {
+            if (UInoLiteRtLmSubsystem* Self = WeakThis.Get())
+            {
+                Self->PendingOnDownloadProgress.ExecuteIfBound(P);
+            }
+        },
+        // Completion — game thread.
+        [WeakThis](const FInoDownloadResult& Result)
+        {
+            UInoLiteRtLmSubsystem* Self = WeakThis.Get();
+            if (Self == nullptr)
+            {
+                // Subsystem gone (Deinitialize cancelled us mid-flight).
+                // Downloader has already cleaned up its .partial state.
+                return;
+            }
+
+            // Download is no longer in flight — drop the cancel token
+            // either way so a fresh load can claim a new one.
+            Self->DownloadCancelToken.Reset();
+
+            if (!Result.bSuccess)
+            {
+                Self->bLoadInFlight = false;
+                Self->LoadedConfig  = FInoLiteRtLmModelConfig();
+                const FString Err = FString::Printf(
+                    TEXT("Model download failed for %s: %s"),
+                    *Result.FileName, *Result.ErrorMessage);
+                UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
+
+                // Snapshot + clear the pending delegate before firing so
+                // a re-entrant LoadModelAsync from inside the handler
+                // sees a clean state.
+                FOnInoLiteRtLmModelLoaded Cb = Self->PendingOnLoaded;
+                Self->PendingOnLoaded = FOnInoLiteRtLmModelLoaded();
+                Self->PendingOnDownloadProgress = FInoLiteRtLmDownloadProgressDelegate();
+                Cb.ExecuteIfBound(false, Err);
+                return;
+            }
+
+            // Success. File is on disk + (if SHA configured) verified.
+            // Hand off to ThreadPool for engine_create.
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LiteRtLm: Subsystem: download/cache OK (path=%s, %lld bytes, sha_verified=%s); loading engine..."),
+                   *Result.AbsolutePath, Result.SizeBytes,
+                   Result.bSha256Verified ? TEXT("yes") : TEXT("skipped"));
+            Self->DispatchModelLoad(Result.AbsolutePath);
+        },
+        DownloadCancelToken);
 }
 
-void UInoLiteRtLmSubsystem::ProceedWithLoad(
-    const FString& ModelPath, const FOnInoLiteRtLmModelLoaded& OnLoaded)
+void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
 {
+    check(IsInGameThread());
+
     TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakThis(this);
     const FString                       ModelPathCopy   = ModelPath;
     const EInoLiteRtLmBackend              BackendCopy     = LoadedConfig.Backend;
@@ -211,7 +273,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
 
     Async(EAsyncExecution::ThreadPool,
         [ModelPathCopy, BackendCopy, MaxNumTokens, ActivationType,
-         CacheDirCopy, WeakThis, OnLoaded, TStart]()
+         CacheDirCopy, WeakThis, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -272,7 +334,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
 
         // ============== HOP BACK TO GAME THREAD ==============
         AsyncTask(ENamedThreads::GameThread,
-            [WeakThis, NewEngine, NewSettings, LocalError, Elapsed, OnLoaded, BackendCopy]()
+            [WeakThis, NewEngine, NewSettings, LocalError, Elapsed, BackendCopy]()
         {
             // Subsystem gone (game instance shutting down, or race with
             // Deinitialize). Clean up native resources and drop the result.
@@ -290,6 +352,13 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
             UE_LOG(LogInoAgents, Verbose,
                    TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (engine_create returned)"));
 
+            // Snapshot + clear the pending delegate before firing so a
+            // re-entrant LoadModelAsync from inside the handler sees a
+            // clean state.
+            FOnInoLiteRtLmModelLoaded Cb = Subsys->PendingOnLoaded;
+            Subsys->PendingOnLoaded = FOnInoLiteRtLmModelLoaded();
+            Subsys->PendingOnDownloadProgress = FInoLiteRtLmDownloadProgressDelegate();
+
             if (NewEngine == nullptr)
             {
                 // Load failed. Clear the config reference so a subsequent
@@ -298,7 +367,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
                 UE_LOG(LogInoAgents, Error,
                        TEXT("LiteRtLm: Engine: engine_create FAILED after %.2f s: %s"),
                        Elapsed, *LocalError);
-                OnLoaded.ExecuteIfBound(false, LocalError);
+                Cb.ExecuteIfBound(false, LocalError);
                 return;
             }
 
@@ -308,7 +377,7 @@ void UInoLiteRtLmSubsystem::ProceedWithLoad(
             UE_LOG(LogInoAgents, Log,
                    TEXT("LiteRtLm: Engine: engine_create SUCCESS in %.2f s (backend=%s)"),
                    Elapsed, ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)));
-            OnLoaded.ExecuteIfBound(true, FString());
+            Cb.ExecuteIfBound(true, FString());
         });
     });
 }
@@ -333,7 +402,7 @@ bool UInoLiteRtLmSubsystem::IsModelDownloaded(const FString& ModelNameOrFileName
     {
         if (const FInoLiteRtLmModelEntry* Entry = LrlSettings->FindModel(ModelNameOrFileName))
         {
-            FileName = Entry->ModelFileName;
+            FileName = Entry->LocalFileName;
         }
     }
 
@@ -607,396 +676,4 @@ FString UInoLiteRtLmSubsystem::BuildToolsJsonForConversation() const
     FJsonSerializer::Serialize(SchemaArray, Writer);
 
     return OutJson;
-}
-
-// ======================================================================
-// Model download
-// ======================================================================
-
-void UInoLiteRtLmSubsystem::StartDownload(
-    const FString& Url, const FString& TargetPath,
-    const FOnInoLiteRtLmModelLoaded& OnLoaded)
-{
-    DownloadUrl               = Url;
-    PendingDownloadTargetPath = TargetPath;
-    PendingOnLoaded           = OnLoaded;
-    DownloadBytesWritten      = 0;
-    DownloadTotalBytes        = -1;  // learned from the first response
-
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Download: StartDownload (url=%s, target=%s, chunk_size=%lld bytes)"),
-           *Url, *TargetPath, kDownloadChunkSize);
-
-    // Open .partial temp file. A crash mid-download won't leave a
-    // corrupt file that ResolveModelPath would find.
-    const FString PartialPath = TargetPath + TEXT(".partial");
-    DownloadFileHandle = FPlatformFileManager::Get().GetPlatformFile().OpenWrite(*PartialPath);
-    if (DownloadFileHandle == nullptr)
-    {
-        const FString Err = FString::Printf(
-            TEXT("Failed to open %s for writing"), *PartialPath);
-        FinishDownloadError(Err);
-        return;
-    }
-
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Download: starting chunked download (%lld-byte chunks, partial=%s)"),
-           kDownloadChunkSize, *PartialPath);
-
-    DownloadNextChunk();
-}
-
-void UInoLiteRtLmSubsystem::DownloadNextChunk()
-{
-    const int64 RangeStart = DownloadBytesWritten;
-    const int64 RangeEnd   = RangeStart + kDownloadChunkSize - 1;
-
-    UE_LOG(LogInoAgents, Verbose,
-           TEXT("LiteRtLm: Download: requesting chunk bytes=%lld-%lld"),
-           RangeStart, RangeEnd);
-
-    DownloadRequest = FHttpModule::Get().CreateRequest();
-    DownloadRequest->SetURL(DownloadUrl);
-    DownloadRequest->SetVerb(TEXT("GET"));
-    DownloadRequest->SetHeader(TEXT("Accept"), TEXT("*/*"));
-    DownloadRequest->SetHeader(TEXT("Range"),
-        FString::Printf(TEXT("bytes=%lld-%lld"), RangeStart, RangeEnd));
-
-    DownloadRequest->OnProcessRequestComplete().BindUObject(
-        this, &UInoLiteRtLmSubsystem::HandleChunkComplete);
-
-    DownloadRequest->ProcessRequest();
-}
-
-void UInoLiteRtLmSubsystem::HandleChunkComplete(
-    FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bSucceeded)
-{
-    DownloadRequest.Reset();
-
-    if (!bSucceeded || !Response.IsValid())
-    {
-        FinishDownloadError(TEXT("Model download failed (network error)"));
-        return;
-    }
-
-    const int32 Code = Response->GetResponseCode();
-
-    // 416 Range Not Satisfiable = we've gone past the end of the file.
-    // This means the previous chunk was the last one — we're done.
-    if (Code == 416)
-    {
-        FinishDownloadSuccess();
-        return;
-    }
-
-    // Accept 200 (server ignores Range and returns the full file — only
-    // works if the file is < 2 GB) and 206 (partial content — expected
-    // for chunked downloads of large files).
-    if (Code != 200 && Code != 206)
-    {
-        FinishDownloadError(FString::Printf(TEXT("Model download failed: HTTP %d"), Code));
-        return;
-    }
-
-    // Write this chunk to disk.
-    const TArray<uint8>& Content = Response->GetContent();
-    if (Content.Num() > 0 && DownloadFileHandle != nullptr)
-    {
-        DownloadFileHandle->Write(Content.GetData(), Content.Num());
-        DownloadBytesWritten += Content.Num();
-    }
-
-    // Learn the full file size from the first response we can parse it from.
-    // HTTP 206 (Partial Content): Content-Range header carries
-    //   "bytes <start>-<end>/<total>" (or "/<*>" if unknown). We want <total>.
-    // HTTP 200 (server ignored Range): Content-Length IS the full file size.
-    if (DownloadTotalBytes < 0)
-    {
-        if (Code == 206)
-        {
-            const FString Range = Response->GetHeader(TEXT("Content-Range"));
-            int32         SlashIdx = INDEX_NONE;
-            if (Range.FindLastChar(TEXT('/'), SlashIdx))
-            {
-                const FString TotalStr = Range.Mid(SlashIdx + 1).TrimStartAndEnd();
-                if (!TotalStr.IsEmpty() && TotalStr != TEXT("*"))
-                {
-                    const int64 Parsed = FCString::Atoi64(*TotalStr);
-                    if (Parsed > 0)
-                    {
-                        DownloadTotalBytes = Parsed;
-                    }
-                }
-            }
-        }
-        else if (Code == 200)
-        {
-            const FString Len = Response->GetHeader(TEXT("Content-Length"));
-            if (!Len.IsEmpty())
-            {
-                const int64 Parsed = FCString::Atoi64(*Len);
-                if (Parsed > 0)
-                {
-                    DownloadTotalBytes = Parsed;
-                }
-            }
-        }
-
-        if (DownloadTotalBytes > 0)
-        {
-            UE_LOG(LogInoAgents, Log,
-                   TEXT("LiteRtLm: Download: full download size advertised as %lld bytes (%.1f MB)"),
-                   DownloadTotalBytes, DownloadTotalBytes / (1024.0 * 1024.0));
-        }
-    }
-
-    // Broadcast progress with real values when we know them. Clamp Percent to
-    // [0, 100] defensively — DownloadBytesWritten should never exceed
-    // DownloadTotalBytes under normal operation, but a mis-advertised total
-    // shouldn't make the delegate report 102% to UI code.
-    float Percent = 0.0f;
-    if (DownloadTotalBytes > 0)
-    {
-        Percent = FMath::Clamp(
-            static_cast<float>(static_cast<double>(DownloadBytesWritten) * 100.0 /
-                               static_cast<double>(DownloadTotalBytes)),
-            0.0f, 100.0f);
-    }
-    // Intermediate progress tick — bCompleted=false. The final
-    // bCompleted=true tick is fired inside FinishDownloadSuccess
-    // once the last chunk has been written to disk, so UI can flip
-    // state cleanly without waiting for the engine-load phase.
-    PendingOnDownloadProgress.ExecuteIfBound(
-        Percent, DownloadBytesWritten, DownloadTotalBytes, /*bCompleted=*/ false);
-
-    if (DownloadTotalBytes > 0)
-    {
-        UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Download: progress %lld / %lld MB (%.1f%%)"),
-               DownloadBytesWritten / (1024 * 1024),
-               DownloadTotalBytes   / (1024 * 1024),
-               Percent);
-    }
-    else
-    {
-        UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Download: progress %lld MB so far (total unknown)"),
-               DownloadBytesWritten / (1024 * 1024));
-    }
-
-    // If we got a 200 (full file) or the chunk was smaller than
-    // what we asked for, we're done — this was the last chunk.
-    if (Code == 200 || Content.Num() < kDownloadChunkSize)
-    {
-        FinishDownloadSuccess();
-        return;
-    }
-
-    // More to download — request the next chunk.
-    DownloadNextChunk();
-}
-
-void UInoLiteRtLmSubsystem::FinishDownloadSuccess()
-{
-    CleanupDownload();
-
-    // Rename .partial → final path.
-    const FString PartialPath = PendingDownloadTargetPath + TEXT(".partial");
-    if (!IFileManager::Get().Move(
-            *PendingDownloadTargetPath, *PartialPath, /*Replace=*/true))
-    {
-        IFileManager::Get().Delete(*PartialPath);
-        FinishDownloadError(FString::Printf(
-            TEXT("Failed to rename %s → %s"), *PartialPath, *PendingDownloadTargetPath));
-        return;
-    }
-
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Download: FinishDownloadSuccess — saved to %s (%lld bytes; %.1f MB)"),
-           *PendingDownloadTargetPath, DownloadBytesWritten,
-           DownloadBytesWritten / (1024.0 * 1024.0));
-
-    // Terminal download-progress tick — bCompleted=true. Fires
-    // exactly once per successful download, AFTER the .partial has
-    // been renamed to the final path. UI handlers bound to
-    // OnDownloadProgress can use this to flip from "downloading" to
-    // "loading" immediately, without waiting for OnLoaded (which only
-    // fires after SHA-256 verify + engine construction, seconds later).
-    // On download failure this does NOT fire — the caller sees
-    // OnLoaded(false, error) instead.
-    PendingOnDownloadProgress.ExecuteIfBound(
-        100.0f,
-        DownloadBytesWritten,
-        DownloadTotalBytes > 0 ? DownloadTotalBytes : DownloadBytesWritten,
-        /*bCompleted=*/ true);
-
-    // Verify the freshly-downloaded file against the entry's ExpectedSha256
-    // before handing it to the native engine. bAllowRedownloadOnMismatch=false
-    // so that a corrupt upstream can't put us in an infinite redownload loop —
-    // if a just-downloaded file fails verification we treat it as a hard error.
-    const UInoLiteRtLmSettings*     LrlSettings = UInoLiteRtLmSettings::Get();
-    const FInoLiteRtLmModelEntry* PostEntry    = LrlSettings
-        ? LrlSettings->FindModelByFileName(LoadedConfig.ModelFileName)
-        : nullptr;
-    VerifyAndLoad(PendingDownloadTargetPath, PostEntry, PendingOnLoaded,
-                  /*bAllowRedownloadOnMismatch=*/ false);
-}
-
-void UInoLiteRtLmSubsystem::FinishDownloadError(const FString& Error)
-{
-    CleanupDownload();
-    IFileManager::Get().Delete(*(PendingDownloadTargetPath + TEXT(".partial")));
-    bLoadInFlight = false;
-    UE_LOG(LogInoAgents, Verbose,
-           TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (FinishDownloadError)"));
-    LoadedConfig  = FInoLiteRtLmModelConfig();
-    UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Download: FinishDownloadError: %s"), *Error);
-    PendingOnLoaded.ExecuteIfBound(false, Error);
-}
-
-void UInoLiteRtLmSubsystem::CleanupDownload()
-{
-    if (DownloadFileHandle != nullptr)
-    {
-        delete DownloadFileHandle;
-        DownloadFileHandle = nullptr;
-    }
-}
-
-void UInoLiteRtLmSubsystem::VerifyAndLoad(
-    const FString&                   ModelPath,
-    const FInoLiteRtLmModelEntry*    Entry,
-    const FOnInoLiteRtLmModelLoaded& OnLoaded,
-    bool                             bAllowRedownloadOnMismatch)
-{
-    check(IsInGameThread());
-
-    // No registry entry at all, or entry has no expected hash → verification
-    // is effectively opt-in per model and this one is opted out. Proceed
-    // straight to load with the same behaviour the plugin had before SHA
-    // checks existed.
-    if (Entry == nullptr || Entry->ExpectedSha256.IsEmpty())
-    {
-        if (Entry != nullptr)
-        {
-            UE_LOG(LogInoAgents, Verbose,
-                   TEXT("LiteRtLm: Subsystem: VerifyAndLoad — no ExpectedSha256 configured for '%s'; skipping verification"),
-                   *Entry->ModelFileName);
-        }
-        ProceedWithLoad(ModelPath, OnLoaded);
-        return;
-    }
-
-    // Capture everything we need by value so the ThreadPool lambda has no
-    // lifetime dependency on Entry (which points into a UPROPERTY TArray
-    // that could, in principle, be edited from the editor mid-verify).
-    const FString                       ExpectedHash  = Entry->ExpectedSha256.ToLower();
-    const FString                       RedownloadUrl = Entry->DownloadUrl;
-    const FString                       ModelFileName = Entry->ModelFileName;
-    const FString                       PathCopy      = ModelPath;
-    TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakThis(this);
-    const double                         TStart        = FPlatformTime::Seconds();
-
-    UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Subsystem: VerifyAndLoad computing SHA-256 of %s (expected=%s; may take several seconds for multi-GB files)"),
-           *PathCopy, *ExpectedHash);
-
-    Async(EAsyncExecution::ThreadPool,
-        [PathCopy, ExpectedHash, RedownloadUrl, ModelFileName, WeakThis,
-         OnLoaded, bAllowRedownloadOnMismatch, TStart]()
-    {
-        // ============== WORKER THREAD ==============
-        const FString ActualHash = InoAgents::ComputeFileSha256(PathCopy).ToLower();
-        const double  Elapsed    = FPlatformTime::Seconds() - TStart;
-
-        AsyncTask(ENamedThreads::GameThread,
-            [PathCopy, ExpectedHash, ActualHash, RedownloadUrl, ModelFileName,
-             WeakThis, OnLoaded, bAllowRedownloadOnMismatch, Elapsed]()
-        {
-            // ============== GAME THREAD ==============
-            UInoLiteRtLmSubsystem* Self = WeakThis.Get();
-            if (Self == nullptr)
-            {
-                // Subsystem was torn down while the hash was running. The
-                // user can't see a result any more, so drop silently.
-                return;
-            }
-
-            if (!ActualHash.IsEmpty() && ActualHash == ExpectedHash)
-            {
-                UE_LOG(LogInoAgents, Log,
-                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad SHA-256 OK for %s (%.1f s, hash=%s)"),
-                       *ModelFileName, Elapsed, *ActualHash);
-                Self->ProceedWithLoad(PathCopy, OnLoaded);
-                return;
-            }
-
-            // --- Mismatch / read failure handling ---
-
-            if (ActualHash.IsEmpty())
-            {
-                UE_LOG(LogInoAgents, Warning,
-                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad failed to compute SHA-256 of %s (file unreadable or gone); "
-                            "treating as verification failure"),
-                       *PathCopy);
-            }
-            else
-            {
-                UE_LOG(LogInoAgents, Warning,
-                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad SHA-256 mismatch for %s. Expected %s, got %s."),
-                       *ModelFileName, *ExpectedHash, *ActualHash);
-            }
-
-            // Delete the bad file so the next load attempt sees a clean slate
-            // and won't waste another multi-second hash on the same bytes.
-            if (!IFileManager::Get().Delete(*PathCopy, /*RequireExists=*/ false,
-                                            /*EvenReadOnly=*/ true))
-            {
-                UE_LOG(LogInoAgents, Warning,
-                       TEXT("LiteRtLm: Subsystem: VerifyAndLoad also failed to delete %s — "
-                            "manual cleanup may be required"),
-                       *PathCopy);
-            }
-
-            if (!bAllowRedownloadOnMismatch)
-            {
-                // Post-download verification failure — do NOT loop.
-                Self->bLoadInFlight = false;
-                UE_LOG(LogInoAgents, Verbose,
-                       TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (post-download SHA mismatch)"));
-                Self->LoadedConfig  = FInoLiteRtLmModelConfig();
-                const FString Err = FString::Printf(
-                    TEXT("Model '%s' failed SHA-256 verification immediately after download "
-                         "(expected %s, got %s). The download may be corrupt or the configured "
-                         "hash may be wrong."),
-                    *ModelFileName, *ExpectedHash,
-                    ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
-                UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: VerifyAndLoad FAILED: %s"), *Err);
-                OnLoaded.ExecuteIfBound(false, Err);
-                return;
-            }
-
-            // Cached file went bad — try a fresh download if we have a URL.
-            if (RedownloadUrl.IsEmpty())
-            {
-                Self->bLoadInFlight = false;
-                UE_LOG(LogInoAgents, Verbose,
-                       TEXT("LiteRtLm: Subsystem: bLoadInFlight → false (cached SHA mismatch, no URL)"));
-                Self->LoadedConfig  = FInoLiteRtLmModelConfig();
-                const FString Err = FString::Printf(
-                    TEXT("Cached model '%s' failed SHA-256 verification and no DownloadUrl is "
-                         "configured — cannot recover. Expected %s, got %s."),
-                    *ModelFileName, *ExpectedHash,
-                    ActualHash.IsEmpty() ? TEXT("<unreadable>") : *ActualHash);
-                UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: VerifyAndLoad FAILED: %s"), *Err);
-                OnLoaded.ExecuteIfBound(false, Err);
-                return;
-            }
-
-            UE_LOG(LogInoAgents, Log,
-                   TEXT("LiteRtLm: Subsystem: VerifyAndLoad re-downloading %s from %s"),
-                   *ModelFileName, *RedownloadUrl);
-            Self->StartDownload(RedownloadUrl, PathCopy, OnLoaded);
-        });
-    });
 }
