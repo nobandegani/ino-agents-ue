@@ -6,28 +6,11 @@
 
 UInoLiteRtLmSettings::UInoLiteRtLmSettings()
 {
-    // Default model entries — public Hugging Face repos, no auth
-    // needed. Most-tested model is Gemma 4; users can add other
-    // .litertlm models (Gemma 3, Qwen 2.5, Phi-4-mini, Llama-3.2,
-    // etc.) via Project Settings → Plugins → InoLiteRtLm → Models.
-    {
-        FInoLiteRtLmModelEntry E;
-        E.DisplayName  = TEXT("Gemma 4 E2B");
-        E.DownloadUrl  = TEXT("https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm");
-        E.LocalFileName = TEXT("gemma-4-E2B-it.litertlm");
-        E.Language     = TEXT("multi");
-        E.Quantization = TEXT("INT4");
-        Models.Add(MoveTemp(E));
-    }
-    {
-        FInoLiteRtLmModelEntry E;
-        E.DisplayName  = TEXT("Gemma 4 E4B");
-        E.DownloadUrl  = TEXT("https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm");
-        E.LocalFileName = TEXT("gemma-4-E4B-it.litertlm");
-        E.Language     = TEXT("multi");
-        E.Quantization = TEXT("INT4");
-        Models.Add(MoveTemp(E));
-    }
+    // No defaults — arrays start empty. Configure entries in
+    // Project Settings → Plugins → InoLiteRtLm → Models.
+    // Same convention as UInoNeuTtsNativeSettings: the runtime is
+    // model-agnostic, so the registry should not privilege any
+    // particular .litertlm bundle.
 }
 
 const FInoLiteRtLmModelEntry* UInoLiteRtLmSettings::FindModelByFileName(
