@@ -468,26 +468,25 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
     // ABSL_LOG(ERROR) diagnostics via UE_LOG. Without this, error details
     // are lost because ABSL_LOG goes to stderr and UE GUI apps don't
     // display stderr output.
+    //
+    // Implementation: freopen the stderr FILE* to a temp file, then on
+    // exit re-attach to "NUL" (Windows null device) and read the temp.
+    // We use freopen instead of _dup/_dup2 because UE GUI apps have no
+    // console — _fileno(stderr) returns -2 (invalid fd) and _dup(-2)
+    // trips the SECURE CRT invalid-parameter handler. freopen operates
+    // on the FILE* directly and works regardless of whether the
+    // underlying fd was valid.
 #if PLATFORM_WINDOWS
-    // Redirect stderr to a temp file BEFORE the C API call.
-    // Guard: UE GUI apps have no console — _fileno(stderr) returns -2
-    // (invalid fd). Calling _dup/-2 trips the SECURE CRT invalid-parameter
-    // handler and crashes. Only attempt the redirect when stderr is valid.
-    FString StderrCapturePath;
-    FILE* StderrFile = nullptr;
-    int OldStderr = -1;
-    const int StderrFd = _fileno(stderr);
-    if (StderrFd >= 0)
+    FString StderrCapturePath = FPaths::CreateTempFilename(
+        *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
+    const FTCHARToUTF8 CapturePathUtf8(*StderrCapturePath);
+    FILE* RedirectedStderr = freopen(CapturePathUtf8.Get(), "w", stderr);
+    const bool bStderrCaptured = (RedirectedStderr != nullptr);
+    if (!bStderrCaptured)
     {
-        StderrCapturePath = FPaths::CreateTempFilename(
-            *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
-        const FTCHARToUTF8 PathUtf8(*StderrCapturePath);
-        OldStderr = _dup(StderrFd);
-        StderrFile = fopen(PathUtf8.Get(), "w");
-        if (StderrFile != nullptr)
-        {
-            _dup2(_fileno(StderrFile), StderrFd);
-        }
+        // freopen failed (rare) — best-effort, still issue the C call;
+        // we just won't be able to read back any error messages.
+        StderrCapturePath.Reset();
     }
 #endif
 
@@ -499,25 +498,27 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         /*callback_data=*/ this);
 
 #if PLATFORM_WINDOWS
-    // Restore stderr and read any captured output.
+    // Restore stderr by re-pointing it at the null device and read the
+    // captured file. Using "NUL" (Windows' /dev/null equivalent) keeps
+    // the FILE* valid for any future stderr writes from anywhere in the
+    // process — we don't try to restore the "original" stderr because
+    // there isn't one (UE GUI apps never had a real one).
     FString CapturedStderr;
-    if (StderrFile != nullptr)
+    if (bStderrCaptured)
     {
         fflush(stderr);
-        _dup2(OldStderr, StderrFd);
-        fclose(StderrFile);
-        _close(OldStderr);
+        // Detach from the temp file so we can read it. Re-point stderr
+        // at NUL so subsequent writes (from anywhere in the process)
+        // don't fail because stderr is closed.
+        freopen("NUL", "w", stderr);
+
         FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
         IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
-    }
-    else if (OldStderr >= 0)
-    {
-        _close(OldStderr);
     }
     if (!CapturedStderr.IsEmpty())
     {
         UE_LOG(LogInoAgents, Warning,
-               TEXT("LiteRtLm: Worker: LiteRT-LM stderr during send_message_stream: %s"),
+               TEXT("LiteRtLm: Worker: LiteRT-LM stderr during send_message_stream:\n%s"),
                *CapturedStderr.TrimEnd());
     }
 #endif
