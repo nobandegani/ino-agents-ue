@@ -129,16 +129,15 @@ void UInoLiteRtLmConversation::Initialize(
     //     (`Ino.LiteRtLm.ConversationTest`) which never attach a
     //     SessionConfig keep working on the same engine handle.
     //
-    // Disabled until either upstream re-fixes it or we discover a
-    // different code path for setting sampler params / max output tokens
-    // on this LiteRT-LM SHA. Conversations now run with engine defaults
+    // Caller-controlled via FInoLiteRtLmModelConfig::bAttachSessionConfig
+    // (default false). When false, conversations run with engine defaults
     // (TopK sampler, default temperature, unbounded output) — losing the
-    // FInoLiteRtLmConfig::Sampler / MaxOutputTokens overrides on this
-    // pin. Re-enable by flipping kAttachSessionConfig back to true and
-    // verifying with the smoke test before shipping.
-    constexpr bool kAttachSessionConfig = false;
+    // FInoLiteRtLmConfig::Sampler / MaxOutputTokens overrides. Flip on to
+    // test whether the v0.11.0 final pin has fixed the regression; verify
+    // with Ino.LiteRtLm.ConversationSendTest before shipping enabled.
+    const bool bAttachSessionConfig = InConfig.bAttachSessionConfig;
     LiteRtLmSessionConfig* SessionConfig =
-        kAttachSessionConfig ? litert_lm_session_config_create() : nullptr;
+        bAttachSessionConfig ? litert_lm_session_config_create() : nullptr;
     if (SessionConfig != nullptr)
     {
         LiteRtLmSamplerParams NativeSampler = {};

@@ -164,6 +164,17 @@ struct FInoLiteRtLmModelConfig
               meta = (ClampMin = "0"))
     int32 MaxOutputTokens = 0;
 
+    /** Attach a per-conversation LiteRtLmSessionConfig so Sampler + MaxOutputTokens
+     *  above are actually applied. Default false because v0.11.0-rc.1 made
+     *  Conversation::Create return NULL whenever a user SessionConfig was attached
+     *  (Gemma 4); v0.11.0 final may or may not have fixed it — flip on to test.
+     *  When false, conversations run with engine defaults and the two fields above
+     *  are silently ignored. See InoLiteRtLmConversation.cpp for the regression
+     *  history. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Conversation",
+              meta = (DisplayName = "Attach Session Config (experimental)"))
+    bool bAttachSessionConfig = false;
+
     // ----- Engine optimization -----
 
     /** Activation precision. Lower = faster + less RAM.
