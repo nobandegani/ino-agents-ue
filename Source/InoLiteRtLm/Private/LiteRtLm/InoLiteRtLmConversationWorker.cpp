@@ -497,31 +497,13 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         &FInoLiteRtLmConversationWorker::OnStreamChunkStatic,
         /*callback_data=*/ this);
 
-#if PLATFORM_WINDOWS
-    // Restore stderr by re-pointing it at the null device and read the
-    // captured file. Using "NUL" (Windows' /dev/null equivalent) keeps
-    // the FILE* valid for any future stderr writes from anywhere in the
-    // process — we don't try to restore the "original" stderr because
-    // there isn't one (UE GUI apps never had a real one).
-    FString CapturedStderr;
-    if (bStderrCaptured)
-    {
-        fflush(stderr);
-        // Detach from the temp file so we can read it. Re-point stderr
-        // at NUL so subsequent writes (from anywhere in the process)
-        // don't fail because stderr is closed.
-        freopen("NUL", "w", stderr);
-
-        FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
-        IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
-    }
-    if (!CapturedStderr.IsEmpty())
-    {
-        UE_LOG(LogInoAgents, Warning,
-               TEXT("LiteRtLm: Worker: LiteRT-LM stderr during send_message_stream:\n%s"),
-               *CapturedStderr.TrimEnd());
-    }
-#endif
+    // NOTE: send_message_stream returns immediately after dispatching;
+    // the actual inference runs on LiteRT-LM's internal worker thread.
+    // We must KEEP stderr redirected to the temp file until the stream
+    // terminates (StreamEvent signalled by the terminal callback) —
+    // otherwise we capture only the sync dispatch's threadpool log
+    // lines and miss every shader-compile / KV-alloc / GPU-init
+    // diagnostic emitted during the actual generation.
 
     if (StartRc != 0)
     {
@@ -532,18 +514,61 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         UE_LOG(LogInoAgents, Error,
                TEXT("LiteRtLm: Worker: send_message_stream failed to start (rc=%d)"),
                StartRc);
+
+#if PLATFORM_WINDOWS
+        // Bail-out path: restore stderr + read whatever was captured
+        // so the failure log includes any LiteRT-LM diagnostic.
+        if (bStderrCaptured)
+        {
+            fflush(stderr);
+            freopen("NUL", "w", stderr);
+            FString CapturedOnFailure;
+            FFileHelper::LoadFileToString(CapturedOnFailure, *StderrCapturePath);
+            IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
+            if (!CapturedOnFailure.IsEmpty())
+            {
+                UE_LOG(LogInoAgents, Warning,
+                       TEXT("LiteRtLm: Worker: LiteRT-LM stderr (dispatch failed):\n%s"),
+                       *CapturedOnFailure.TrimEnd());
+            }
+        }
+#endif
         return false;
     }
 
     UE_LOG(LogInoAgents, Verbose,
            TEXT("LiteRtLm: Worker: send_message_stream dispatched, waiting on StreamEvent"));
 
+    // Block here until the terminal stream callback signals StreamEvent.
+    // Stderr stays redirected to the temp file for the entire duration
+    // of the inference run.
     if (StreamEvent)
     {
         StreamEvent->Wait();
     }
 
     bStreamInFlight = false;
+
+#if PLATFORM_WINDOWS
+    // NOW restore stderr — the stream is done, every internal LiteRT-LM
+    // log line for this round has been written to the temp file.
+    FString CapturedStderr;
+    if (bStderrCaptured)
+    {
+        fflush(stderr);
+        freopen("NUL", "w", stderr);
+
+        FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
+        IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
+    }
+    if (!CapturedStderr.IsEmpty())
+    {
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Worker: LiteRT-LM stderr (full stream):\n%s"),
+               *CapturedStderr.TrimEnd());
+    }
+#endif
+
     return true;
 }
 
