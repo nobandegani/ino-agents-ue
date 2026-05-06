@@ -14,8 +14,8 @@ FString UInoNeuTtsNativeSettings::GetModelsDir()
 {
 	return FPaths::Combine(
 		FPaths::ProjectPersistentDownloadDir(),
-		TEXT("InoAgents"),
-		TEXT("NeuTTS"));
+		TEXT("ino-agents"),
+		TEXT("neu-tts"));
 }
 
 FString UInoNeuTtsNativeSettings::ResolveLocalPath(const FString& LocalFileName)
