@@ -25,11 +25,7 @@
  *
  * where <Subsystem> is one of:
  *
- *   Chatterbox    Chatterbox Turbo TTS (4-ORT-session pipeline)
  *   LiteRtLm      Google LiteRT-LM (Gemma 4 inference)
- *   NeuTtsNanoNative    Neuphonic NeuTTS Nano (llama.cpp + NeuCodec)
- *   Onnx          ONNX Runtime infrastructure (generic, not per-model)
- *   LlamaCpp      llama.cpp runtime infrastructure
  *   ElevenLabs    ElevenLabs cloud TTS
  *   Audio         InoAudioFunctionLibrary helpers
  *   Anim          InoAnimationBlueprintHelper helpers
@@ -41,58 +37,45 @@
  *                 public API entry/exit, state transitions)
  *   Module        DLL/.so init, symbol resolution, module startup/shutdown
  *   Conversation  LiteRtLm UInoLiteRtLmConversation UObject
- *   Worker        Any background worker thread (synth worker, conversation
- *                 worker, decoder worker)
- *   Session       An individual ORT / LiteRT session (per-component load,
- *                 single Run call diagnostics)
- *   Runner        Inner-loop pipeline driver (Chatterbox runner, NeuTtsNanoNative
- *                 runner)
- *   Decoder       Chatterbox's parallel conditional_decoder thread
- *   Tokenizer     BPE / SentencePiece tokenizer state + stats
+ *   Worker        Any background worker thread (conversation worker, etc.)
  *   Tool          LiteRtLm tool-call registry + dispatch
  *   Download      HTTP download flow (HEAD probe, chunk GET, rename)
- *   Voice         NeuTtsNanoNative voice registry + encoding
  *   Settings      UDeveloperSettings load / reload
  *   AsyncAction   UBlueprintAsyncActionBase subclasses
  *   SmokeTest     Test commands under Private/SmokeTests/ — prefixed by
- *                 their owning subsystem (e.g. "Chatterbox: SmokeTest: …")
+ *                 their owning subsystem (e.g. "ElevenLabs: SmokeTest: …")
  *
  * Log-level convention:
  *
  *   Log       Important events a developer reading the log should see:
- *             load/unload, synth complete, state transitions, delegate
- *             binding checks, milestone timings. Default verbosity.
+ *             load/unload, state transitions, delegate binding checks,
+ *             milestone timings. Default verbosity.
  *
- *   Verbose   Noisy per-iteration diagnostics: per-AR-token, per-chunk,
+ *   Verbose   Noisy per-iteration diagnostics: per-token, per-chunk,
  *             per-HTTP-header, per-sample stats. OFF by default; enable
  *             with console command `log LogInoAgents Verbose` when
  *             diagnosing a specific problem.
  *
  *   Warning   Recoverable issues: optional file 404, fallback triggered,
- *             user-visible suboptimal config (DML on known-broken session,
- *             mixed-group variants). Something the dev should know but
- *             doesn't break anything.
+ *             user-visible suboptimal config. Something the dev should
+ *             know but doesn't break anything.
  *
- *   Error     Unrecoverable failures: load failed, kernel missing, SHA
- *             mismatch with no URL, session construction failure. The
- *             operation's terminal callback will fire with bSuccess=false.
+ *   Error     Unrecoverable failures: load failed, SHA mismatch with no
+ *             URL, session construction failure. The operation's terminal
+ *             callback will fire with bSuccess=false.
  *
  * Grepping the log:
  *
- *   Find everything Chatterbox:            grep " Chatterbox: "
- *   Find everything about ORT sessions:    grep ": Session: "
- *   Find a specific synth attempt:         grep " Chatterbox: Subsystem: SynthesizeAsync"
+ *   Find everything LiteRtLm:              grep " LiteRtLm: "
+ *   Find a specific conversation round:    grep " LiteRtLm: Conversation: "
  *   Find all errors:                       grep "Error:"
  *   Find all downloads:                    grep ": Download: "
  *
  * Examples of well-formed lines:
  *
- *   LogInoAgents: Chatterbox: Subsystem: SynthesizeAsync queued (text_len=121, max_new_tokens=1024)
- *   LogInoAgents: Chatterbox: Runner: encoder done in 187.3 ms (cond_len=145, prompt_len=312)
- *   LogInoAgents: Chatterbox: Runner: AR loop iter 42/1024 (hit STOP: no, elapsed=3621 ms)
+ *   LogInoAgents: LiteRtLm: Subsystem: LoadModelAsync queued (path=...)
  *   LogInoAgents: LiteRtLm: Conversation: stream round 2 started (4 tool results pending)
- *   LogInoAgents: Onnx: Session: registered provider DirectML (adapter=0)
- *   LogInoAgents: NeuTtsNanoNative: Runner: llama_decode prefill complete (ctx=653 tokens, 318.4 ms)
+ *   LogInoAgents: ElevenLabs: AsyncAction: TextToDialogueStream begin (voice_id=...)
  *
  * When adding new logs: err on the side of more, not less. Runtime
  * cost of UE_LOG is nil when the verbosity is below the active level.

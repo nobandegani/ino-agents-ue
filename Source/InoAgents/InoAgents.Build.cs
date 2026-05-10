@@ -62,27 +62,10 @@ public class InoAgents : ModuleRules
 			new string[]
 			{
 				"Core",
-				"CoreUObject",       // UObject, UCLASS, UENUM, dynamic delegate macros — used throughout
-				                     // Source/InoAgents/Public/LiteRtLm/ starting at Milestone D.1.
+				"CoreUObject",       // UObject, UCLASS, UENUM, dynamic delegate macros — used throughout.
 				"Engine",            // UGameInstanceSubsystem, GEngine, FWorldContext —
 				                     // used by UInoElevenLabsSubsystem and the smoke
 				                     // test helpers in InoSmokeTestCommon.
-				"InoOnnx",           // ONNX Runtime (Ort::Session / Env / Value) supplied by the
-				                     // sibling InoOnnx plugin. Exposes:
-				                     //   #include "onnxruntime_c_api.h"   (ORT C API)
-				                     //   #include "InoOnnx.h"             (InoOnnx::GetApi() accessor)
-				                     // and stages the runtime DLLs/.so for packaging. The plugin
-				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
-				                     // are callable by the time this module's StartupModule runs.
-				                     // First consumer: Chatterbox Turbo TTS.
-				"InoLlama",          // llama.cpp runtime — supplied by the sibling InoLlama
-				                     // plugin. Exposes:
-				                     //   #include "llama.h"               (llama.cpp C API)
-				                     //   #include "InoLlama.h"            (InoAgents::LlamaCpp::GetApi() accessor + FLlamaCppApi vtable)
-				                     // and stages the runtime DLLs/.so for packaging. The plugin
-				                     // pre-loads its DLLs at LoadingPhase=PreLoadingScreen so they
-				                     // are callable by the time this module's StartupModule runs.
-				                     // First consumer: NeuTTS Nano TTS.
 				"Json",              // FJsonObject / FJsonSerializer for parsing LiteRT-LM responses
 				                     // and building ElevenLabs request bodies.
 				"JsonUtilities",     // FJsonObjectWrapper — Blueprint-friendly JSON struct used by
@@ -95,26 +78,15 @@ public class InoAgents : ModuleRules
 				                     // the streaming TTS audio sink the dialogue queue feeds into.
 			}
 			);
-			
-		
+
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
 			}
 			);
 
-		if (Target.Platform == UnrealTargetPlatform.Win64)
-		{
-			// DXGI system library for IDXGIFactory::EnumAdapters — used by
-			// the Ino.Onnx.ListDmlAdapters console command to enumerate D3D12
-			// adapters (which is the adapter order DirectML's
-			// OrtSessionOptionsAppendExecutionProvider_DML uses for its
-			// device_id parameter). System library, part of Windows SDK on
-			// every UE build host; no runtime redistribution needed.
-			PublicSystemLibraries.Add("dxgi.lib");
-		}
-		
-		
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{

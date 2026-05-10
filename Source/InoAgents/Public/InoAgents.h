@@ -7,20 +7,13 @@
 /**
  * InoAgents runtime module.
  *
- * All three foundation runtimes the plugin consumes are owned by sibling
- * plugins and pre-loaded at LoadingPhase=PreLoadingScreen, before this
- * Default-phase StartupModule:
- *   - LiteRT + LiteRT-LM — provided by the `InoLiteRT` plugin.
- *   - ONNX Runtime — provided by the `InoOnnx` plugin (consumed via
- *     InoOnnx::GetApi() — see "InoOnnx.h").
- *   - llama.cpp — provided by the `InoLlama` plugin (consumed via
- *     InoAgents::LlamaCpp::GetApi() — see "InoLlama.h").
+ * Hosts the cross-cutting infrastructure that the plugin's sub-modules
+ * (LiteRT-LM, ElevenLabs, etc.) share — the LogInoAgents log category,
+ * shared audio helpers, animation helpers, and the in-PIE chat panel.
  *
- * This module's StartupModule is currently a no-op — every runtime's
- * lifecycle is owned upstream. Subsystem-level work (model loading,
- * conversation lifecycle) happens lazily off the game thread in
- * UInoLiteRtLmSubsystem::LoadModelAsync, UInoChatterboxTurboNativeSubsystem,
- * UInoNeuTtsNanoNativeSubsystem, etc.
+ * Foundation runtimes used by sub-modules (LiteRT-LM via the `InoLiteRT`
+ * plugin) are owned by sibling plugins and pre-loaded at
+ * LoadingPhase=PreLoadingScreen, before this Default-phase StartupModule.
  *
  * See Plugins/InoAgents/README.md for the plugin's user-facing API and
  * Plugins/InoAgents/CLAUDE.md for the architecture + build notes.
