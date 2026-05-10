@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #include "litert/c/litert_tensor_buffer.h"
@@ -34,7 +34,7 @@ public:
 
     ~FInoQwen3ASRLiteRTTensor();
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     bool CreateManagedHost(
         LiteRtEnvironment Env,
         LiteRtElementType ElementType,
@@ -53,7 +53,7 @@ public:
 #endif
 
 private:
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtTensorBuffer Handle = nullptr;
     LiteRtElementType Type = kLiteRtElementTypeNone;
     TArray<int32, TInlineAllocator<4>> DimsCache;
@@ -62,7 +62,7 @@ private:
 
 namespace InoQwen3ASRLiteRT
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     size_t ElementByteSize(LiteRtElementType Type);
     const TCHAR* ElementTypeName(LiteRtElementType Type);
     FString FormatLayout(const LiteRtLayout& Layout);

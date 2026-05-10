@@ -8,7 +8,7 @@
 // LiteRT C API — staged into Source/ThirdParty/Public/litert/c/ by the
 // sibling InoLiteRT plugin's build scripts. PublicSystemIncludePaths in
 // InoLiteRT.Build.cs makes these resolve via <litert/...>.
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_environment.h"
 #endif
@@ -17,7 +17,7 @@ namespace InoChatterboxLiteRT
 {
     namespace
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FCriticalSection GEnvLock;
         LiteRtEnvironment GEnv = nullptr;
         bool bEnvCreationAttempted = false;
@@ -26,7 +26,7 @@ namespace InoChatterboxLiteRT
 
     LiteRtEnvironment GetEnvironment()
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FScopeLock Lock(&GEnvLock);
         if (GEnv)
         {
@@ -58,17 +58,17 @@ namespace InoChatterboxLiteRT
             TEXT("LiteRtEnvironment created (process singleton)."));
         return GEnv;
 #else
-        // iOS / Linux / macOS: no LiteRT runtime is shipped by InoLiteRT yet.
+        // Linux: no LiteRT runtime is shipped by InoLiteRT yet.
         UE_LOG(LogInoChatterboxLiteRT, Warning,
             TEXT("LiteRtEnvironment unavailable on this platform — InoLiteRT "
-                 "ships only Win64 + Android."));
+                 "ships Win64 + Android + Mac + iOS."));
         return nullptr;
 #endif
     }
 
     void Shutdown()
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FScopeLock Lock(&GEnvLock);
         if (GEnv)
         {

@@ -5,7 +5,7 @@
 #include "InoQwen3ASRLiteRT.h"
 #include "InoQwen3ASRLiteRTTensor.h"  // for InoQwen3ASRLiteRT::StatusToString
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_environment.h"
 #endif
@@ -14,7 +14,7 @@ namespace InoQwen3ASRLiteRT
 {
     namespace
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FCriticalSection GEnvLock;
         LiteRtEnvironment GEnv = nullptr;
         bool bEnvCreationAttempted = false;
@@ -23,7 +23,7 @@ namespace InoQwen3ASRLiteRT
 
     LiteRtEnvironment GetEnvironment()
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FScopeLock Lock(&GEnvLock);
         if (GEnv)
         {
@@ -59,7 +59,7 @@ namespace InoQwen3ASRLiteRT
 
     void Shutdown()
     {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         FScopeLock Lock(&GEnvLock);
         if (GEnv)
         {

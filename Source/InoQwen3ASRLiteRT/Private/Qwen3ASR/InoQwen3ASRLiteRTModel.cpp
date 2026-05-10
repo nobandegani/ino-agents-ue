@@ -5,7 +5,7 @@
 #include "InoQwen3ASRLiteRT.h"
 #include "InoQwen3ASRLiteRTTensor.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_compiled_model.h"
 #include "litert/c/litert_environment.h"
 #include "litert/c/litert_model.h"
@@ -14,7 +14,7 @@
 
 FInoQwen3ASRLiteRTModel::FInoQwen3ASRLiteRTModel(FInoQwen3ASRLiteRTModel&& Other) noexcept
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Model = Other.Model;
     CompiledModel = Other.CompiledModel;
     Other.Model = nullptr;
@@ -28,7 +28,7 @@ FInoQwen3ASRLiteRTModel::FInoQwen3ASRLiteRTModel(FInoQwen3ASRLiteRTModel&& Other
 FInoQwen3ASRLiteRTModel& FInoQwen3ASRLiteRTModel::operator=(FInoQwen3ASRLiteRTModel&& Other) noexcept
 {
     if (this == &Other) { return *this; }
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Reset();
     Model = Other.Model;
     CompiledModel = Other.CompiledModel;
@@ -43,12 +43,12 @@ FInoQwen3ASRLiteRTModel& FInoQwen3ASRLiteRTModel::operator=(FInoQwen3ASRLiteRTMo
 
 FInoQwen3ASRLiteRTModel::~FInoQwen3ASRLiteRTModel()
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Reset();
 #endif
 }
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 void FInoQwen3ASRLiteRTModel::Reset()
 {
@@ -364,7 +364,7 @@ bool FInoQwen3ASRLiteRTModel::GetInputTensorLayout(int32 SignatureIndex, int32 I
     return true;
 }
 
-#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
+#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 void FInoQwen3ASRLiteRTModel::LogSignatures() const
 {
@@ -376,7 +376,7 @@ void FInoQwen3ASRLiteRTModel::LogSignatures() const
             TEXT("  signature[%d] '%s'  inputs=%d outputs=%d"),
             Info.Index, *Info.Key.ToString(),
             Info.Inputs.Num(), Info.Outputs.Num());
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         for (int32 i = 0; i < Info.Inputs.Num(); ++i)
         {
             const FInoQwen3ASRLiteRTTensorMeta& M = Info.Inputs[i];

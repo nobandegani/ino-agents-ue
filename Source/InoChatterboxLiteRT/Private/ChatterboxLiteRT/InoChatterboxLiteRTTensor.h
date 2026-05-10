@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #include "litert/c/litert_tensor_buffer.h"
@@ -40,7 +40,7 @@ public:
 
     ~FInoChatterboxLiteRTTensor();
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     /**
      * Allocate a managed host-memory tensor of the given element type +
      * shape. Returns true on success, false on allocation / API failure
@@ -83,7 +83,7 @@ public:
 #endif
 
 private:
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtTensorBuffer Handle = nullptr;
     LiteRtElementType Type = kLiteRtElementTypeNone;
     TArray<int32, TInlineAllocator<4>> DimsCache;
@@ -92,7 +92,7 @@ private:
 
 namespace InoChatterboxLiteRT
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     /** Returns the size in bytes of a single element of the given type. 0 if unknown. */
     size_t ElementByteSize(LiteRtElementType Type);
 

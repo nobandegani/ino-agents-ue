@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #endif
@@ -14,7 +14,7 @@ struct FInoQwen3ASRLiteRTTensor;
 struct FInoQwen3ASRLiteRTTensorMeta
 {
     FName Name;
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtElementType ElementType = kLiteRtElementTypeNone;
 #endif
     TArray<int32, TInlineAllocator<4>> Dims;
@@ -52,7 +52,7 @@ public:
     FInoQwen3ASRLiteRTModel& operator=(FInoQwen3ASRLiteRTModel&& Other) noexcept;
     ~FInoQwen3ASRLiteRTModel();
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     bool Load(LiteRtEnvironment Env, const FString& AbsolutePath, int32 HardwareAcceleratorMask);
 
     int32 GetSignatureIndex(FName SignatureKey) const;
@@ -79,12 +79,12 @@ public:
     void LogSignatures() const;
 
 private:
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     void Reset();
     bool BuildSignatureCache();
 #endif
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtModel Model = nullptr;
     LiteRtCompiledModel CompiledModel = nullptr;
 #endif

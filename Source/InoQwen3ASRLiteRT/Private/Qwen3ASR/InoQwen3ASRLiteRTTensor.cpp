@@ -4,14 +4,14 @@
 
 #include "InoQwen3ASRLiteRT.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_layout.h"
 #include "litert/c/litert_tensor_buffer_types.h"
 #endif
 
 FInoQwen3ASRLiteRTTensor::FInoQwen3ASRLiteRTTensor(FInoQwen3ASRLiteRTTensor&& Other) noexcept
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Handle = Other.Handle;
     Type = Other.Type;
     DimsCache = MoveTemp(Other.DimsCache);
@@ -23,7 +23,7 @@ FInoQwen3ASRLiteRTTensor::FInoQwen3ASRLiteRTTensor(FInoQwen3ASRLiteRTTensor&& Ot
 FInoQwen3ASRLiteRTTensor& FInoQwen3ASRLiteRTTensor::operator=(FInoQwen3ASRLiteRTTensor&& Other) noexcept
 {
     if (this == &Other) { return *this; }
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     if (Handle) { LiteRtDestroyTensorBuffer(Handle); }
     Handle = Other.Handle;
     Type = Other.Type;
@@ -36,12 +36,12 @@ FInoQwen3ASRLiteRTTensor& FInoQwen3ASRLiteRTTensor::operator=(FInoQwen3ASRLiteRT
 
 FInoQwen3ASRLiteRTTensor::~FInoQwen3ASRLiteRTTensor()
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     if (Handle) { LiteRtDestroyTensorBuffer(Handle); Handle = nullptr; }
 #endif
 }
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 bool FInoQwen3ASRLiteRTTensor::CreateManagedHost(
     LiteRtEnvironment Env,
@@ -160,11 +160,11 @@ size_t FInoQwen3ASRLiteRTTensor::PackedBytes() const
     return Bytes;
 }
 
-#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
+#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 namespace InoQwen3ASRLiteRT
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
     size_t ElementByteSize(LiteRtElementType Type)
     {

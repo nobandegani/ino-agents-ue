@@ -5,7 +5,7 @@
 #include "InoChatterboxLiteRT.h"
 #include "InoChatterboxLiteRTTensor.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_compiled_model.h"
 #include "litert/c/litert_environment.h"
 #include "litert/c/litert_model.h"
@@ -14,7 +14,7 @@
 
 FInoChatterboxLiteRTModel::FInoChatterboxLiteRTModel(FInoChatterboxLiteRTModel&& Other) noexcept
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Model = Other.Model;
     CompiledModel = Other.CompiledModel;
     Other.Model = nullptr;
@@ -31,7 +31,7 @@ FInoChatterboxLiteRTModel& FInoChatterboxLiteRTModel::operator=(FInoChatterboxLi
     {
         return *this;
     }
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Reset();
     Model = Other.Model;
     CompiledModel = Other.CompiledModel;
@@ -46,12 +46,12 @@ FInoChatterboxLiteRTModel& FInoChatterboxLiteRTModel::operator=(FInoChatterboxLi
 
 FInoChatterboxLiteRTModel::~FInoChatterboxLiteRTModel()
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Reset();
 #endif
 }
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 void FInoChatterboxLiteRTModel::Reset()
 {
@@ -571,7 +571,7 @@ bool FInoChatterboxLiteRTModel::GetInputTensorLayout(
     return true;
 }
 
-#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
+#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 void FInoChatterboxLiteRTModel::LogSignatures() const
 {
@@ -585,7 +585,7 @@ void FInoChatterboxLiteRTModel::LogSignatures() const
             Info.Index, *Info.Key.ToString(),
             Info.Inputs.Num(), Info.Outputs.Num());
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
         for (int32 i = 0; i < Info.Inputs.Num(); ++i)
         {
             const FInoChatterboxLiteRTTensorMeta& M = Info.Inputs[i];

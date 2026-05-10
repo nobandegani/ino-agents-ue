@@ -4,11 +4,12 @@
 // LiteRT-LM C API stub implementations for non-shipped platforms.
 // ============================================================================
 //
-// LiteRT-LM is provided by the separate `InoLiteRT` plugin, which currently
-// ships built libraries for Windows (Win64) and Android (arm64-v8a + x86_64)
-// only. The plugin's LiteRT-LM consumer code (subsystem, conversation,
-// worker, smoke tests) compiles on every platform — but on platforms where
-// InoLiteRT has no library to link against, the linker would fail.
+// LiteRT-LM is provided by the separate `InoLiteRT` plugin, which ships
+// built libraries for Windows (Win64), Android (arm64-v8a + x86_64), macOS
+// (arm64), and iOS (arm64 device + sim_arm64). The plugin's LiteRT-LM
+// consumer code (subsystem, conversation, worker, smoke tests) compiles on
+// every platform — but on platforms where InoLiteRT has no library to link
+// against, the linker would fail.
 //
 // This file provides empty stub implementations of every litert_lm_* symbol
 // declared in litert/lm/engine.h. The stubs compile into the main InoAgents
@@ -23,19 +24,17 @@
 //   - Int-returning functions return 0 (or a non-zero failure code for
 //     stream-start functions).
 //
-// When LiteRT-LM is ported to each platform (in the InoLiteRT plugin —
-// see Plugins/InoLiteRT/LiteRT/scripts/), this file skips compilation
-// on that platform and real libraries take over.
-//   - Windows + Android: skipped here; InoLiteRT supplies the real .dll/.so.
-//   - iOS / Linux / macOS: not yet ported, stubs still apply.
+//   - Windows + Android + macOS + iOS: skipped here; InoLiteRT supplies
+//     the real .dll / .so / .dylib / .framework binary.
+//   - Linux: not yet ported by InoLiteRT, stubs still apply.
 //
-// Status note: on iOS / Linux / macOS, calling any LiteRT-LM feature
-// will produce an immediate "Native engine failed" error via the
-// subsystem's OnLoaded delegate. ElevenLabs, the streaming-audio
-// component, and all other plugin features unrelated to local LLM
-// inference continue to work normally on those platforms.
+// Status note: on Linux, calling any LiteRT-LM feature will produce an
+// immediate "Native engine failed" error via the subsystem's OnLoaded
+// delegate. ElevenLabs, the streaming-audio component, and all other
+// plugin features unrelated to local LLM inference continue to work
+// normally on that platform.
 
-#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID
+#if !PLATFORM_WINDOWS && !PLATFORM_ANDROID && !PLATFORM_IOS && !PLATFORM_MAC
 
 #include "CoreMinimal.h"
 
@@ -373,4 +372,4 @@ extern "C" LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     return nullptr;
 }
 
-#endif  // !PLATFORM_WINDOWS && !PLATFORM_ANDROID
+#endif  // !PLATFORM_WINDOWS && !PLATFORM_ANDROID && !PLATFORM_IOS && !PLATFORM_MAC

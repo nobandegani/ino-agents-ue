@@ -5,13 +5,14 @@
 #include "InoQwen3ASRConstants.h"
 #include "InoQwen3ASRLiteRT.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #endif
 
 namespace
 {
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     /** Validate one tensor's element type + concrete shape against the spec. */
     static bool ValidateTensorMeta(
         const FInoQwen3ASRLiteRTTensorMeta& Meta,
@@ -49,6 +50,7 @@ namespace
         }
         return true;
     }
+#endif
 
     /** Argmax over a contiguous float row of length N. */
     static int32 Argmax(const float* Row, int32 N)
@@ -76,7 +78,7 @@ bool FInoQwen3ASRRunner::LoadModel(const FString& TfliteAbsolutePath)
     EncodeSigIndex = INDEX_NONE;
     DecodeSigIndex = INDEX_NONE;
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtEnvironment Env = InoQwen3ASRLiteRT::GetEnvironment();
     if (!Env)
     {
@@ -168,7 +170,7 @@ bool FInoQwen3ASRRunner::Transcribe(
         return false;
     }
 
-#if !(PLATFORM_WINDOWS || PLATFORM_ANDROID)
+#if !(PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC)
     return false;
 #else
     using namespace InoQwen3ASR;

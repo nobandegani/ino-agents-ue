@@ -4,14 +4,14 @@
 
 #include "InoChatterboxLiteRT.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_layout.h"
 #include "litert/c/litert_tensor_buffer_types.h"
 #endif
 
 FInoChatterboxLiteRTTensor::FInoChatterboxLiteRTTensor(FInoChatterboxLiteRTTensor&& Other) noexcept
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     Handle = Other.Handle;
     Type = Other.Type;
     DimsCache = MoveTemp(Other.DimsCache);
@@ -26,7 +26,7 @@ FInoChatterboxLiteRTTensor& FInoChatterboxLiteRTTensor::operator=(FInoChatterbox
     {
         return *this;
     }
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     if (Handle)
     {
         LiteRtDestroyTensorBuffer(Handle);
@@ -42,7 +42,7 @@ FInoChatterboxLiteRTTensor& FInoChatterboxLiteRTTensor::operator=(FInoChatterbox
 
 FInoChatterboxLiteRTTensor::~FInoChatterboxLiteRTTensor()
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     if (Handle)
     {
         LiteRtDestroyTensorBuffer(Handle);
@@ -51,7 +51,7 @@ FInoChatterboxLiteRTTensor::~FInoChatterboxLiteRTTensor()
 #endif
 }
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 bool FInoChatterboxLiteRTTensor::CreateManagedHost(
     LiteRtEnvironment Env,
@@ -201,11 +201,11 @@ size_t FInoChatterboxLiteRTTensor::PackedBytes() const
     return Bytes;
 }
 
-#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
+#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
 namespace InoChatterboxLiteRT
 {
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 
     size_t ElementByteSize(LiteRtElementType Type)
     {
@@ -332,5 +332,5 @@ namespace InoChatterboxLiteRT
         return FString::Printf(TEXT("status=%d"), static_cast<int32>(Status));
     }
 
-#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID
+#endif  // PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 }

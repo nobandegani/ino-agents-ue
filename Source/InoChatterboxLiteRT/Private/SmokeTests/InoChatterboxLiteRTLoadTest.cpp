@@ -9,7 +9,7 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #endif
@@ -45,10 +45,10 @@ namespace
      */
     void RunLoadTest(const TArray<FString>& /*Args*/)
     {
-#if !(PLATFORM_WINDOWS || PLATFORM_ANDROID)
+#if !(PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC)
         UE_LOG(LogInoChatterboxLiteRT, Warning,
             TEXT("Ino.ChatterboxLiteRT.LoadTest: not supported on this platform "
-                 "— InoLiteRT ships only Win64 + Android."));
+                 "— InoLiteRT ships Win64 + Android + Mac + iOS."));
 #else
         UE_LOG(LogInoChatterboxLiteRT, Log, TEXT("=== Ino.ChatterboxLiteRT.LoadTest ==="));
 

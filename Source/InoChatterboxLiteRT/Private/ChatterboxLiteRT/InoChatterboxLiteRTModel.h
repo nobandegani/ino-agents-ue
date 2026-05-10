@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_model_types.h"
 #endif
@@ -19,7 +19,7 @@ struct FInoChatterboxLiteRTTensor;
 struct FInoChatterboxLiteRTTensorMeta
 {
     FName Name;
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtElementType ElementType = kLiteRtElementTypeNone;
 #endif
     TArray<int32, TInlineAllocator<4>> Dims;
@@ -67,7 +67,7 @@ public:
     FInoChatterboxLiteRTModel& operator=(FInoChatterboxLiteRTModel&& Other) noexcept;
     ~FInoChatterboxLiteRTModel();
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     /**
      * Load a .tflite from disk and create a CompiledModel against the given
      * environment. `HardwareAcceleratorMask` is a bitmask of LiteRtHwAccelerators
@@ -163,12 +163,12 @@ public:
     void LogSignatures() const;
 
 private:
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     void Reset();
     bool BuildSignatureCache();
 #endif
 
-#if PLATFORM_WINDOWS || PLATFORM_ANDROID
+#if PLATFORM_WINDOWS || PLATFORM_ANDROID || PLATFORM_IOS || PLATFORM_MAC
     LiteRtModel Model = nullptr;
     LiteRtCompiledModel CompiledModel = nullptr;
 #endif
