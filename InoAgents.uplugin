@@ -28,14 +28,6 @@
 			"Enabled": true
 		},
 		{
-			"Name": "InoOnnx",
-			"Enabled": true
-		},
-		{
-			"Name": "InoLlama",
-			"Enabled": true
-		},
-		{
 			"Name": "InoSpeakNG",
 			"Enabled": true
 		},
@@ -54,31 +46,6 @@
 			"Name": "InoLiteRtLm",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoChatterboxNative",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoChatterboxLiteRT",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoQwen3ASRLiteRT",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoNeuTtsNative",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "InoNeuTtsNativeEditor",
-			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit"
 		}
 	]
 }
