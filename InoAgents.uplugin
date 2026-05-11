@@ -46,6 +46,11 @@
 			"Name": "InoLiteRtLm",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "InoNeuTTS",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	]
 }
