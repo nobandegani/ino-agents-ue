@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working inside 
 `InoAgents` is an Unreal Engine 5.7 runtime plugin that delivers on-device + cloud AI capabilities to UE games and tools through Blueprint-friendly subsystems:
 
 - **On-device LLM chat with tool calling** via the `InoLiteRtLm` backend module, running Google's LiteRT-LM Gemma 4 engine.
+- **On-device voice-cloning TTS** via the `InoNeuTTS` backend module, running Neuphonic's NeuTTS Nano (backbone, `.litertlm`) + NeuCodec (decoder, `.tflite`). Real chunked streaming with overlap-add for low-latency playback.
 - **Cloud TTS** via ElevenLabs (`/v1/text-to-dialogue/stream`).
 - **Supporting helpers** — procedural blink / gaze animation utilities, mono PCM audio helpers (silence / dithered silence / WAV writer), a gyro-driven camera sway component.
 
@@ -115,6 +116,64 @@ Plugins/InoAgents/
 │               ├── InoLiteRtLmConversationToolTest.{h,cpp}
 │               └── InoLiteRtLmToolRegistryTest.cpp
 │
+├── Source/InoNeuTTS/                              ← NeuTTS Nano TTS backend module
+│   ├── InoNeuTTS.Build.cs                         ← deps: InoAgents, InoLiteRT, InoNodes,
+│   │                                                 InoSpeakNG, RuntimeAudioImporter, Json
+│   ├── Public/
+│   │   ├── InoNeuTTS.h                            ← FInoNeuTTSModule
+│   │   ├── InoNeuTTSSettings.h                    ← UInoNeuTTSSettings (BackboneModels[]
+│   │   │                                            + DecoderModels[])
+│   │   ├── InoNeuTTSVoiceAsset.h                  ← UInoNeuTTSVoiceAsset (.inv UAsset
+│   │   │                                            wrapper around a voice)
+│   │   └── NeuTTS/
+│   │       ├── InoNeuTTSTypes.h                   ← enums (Backend, ActivationType),
+│   │       │                                        FInoNeuTTSConfig / Options / Result,
+│   │       │                                        FInoNeuTTSVoice, all delegates
+│   │       ├── InoNeuTTSSubsystem.h               ← UInoNeuTTSSubsystem (load + voice +
+│   │       │                                        synth + cancel)
+│   │       ├── InoNeuTTSSynthesize.h              ← one-shot BP async-action wrapper
+│   │       └── InoNeuTTSStreamSynthesize.h        ← streaming BP async-action wrapper
+│   └── Private/
+│       ├── InoNeuTTS.cpp
+│       ├── InoNeuTTSSettings.cpp
+│       ├── InoNeuTTSVoiceAsset.cpp                ← PostInitProperties + GetAssetRegistryTags
+│       ├── NeuTTS/                                ← runtime layer
+│       │   ├── InoNeuTTSCommon.{h,cpp}            ← backend / activation mapping helpers,
+│       │   │                                        streaming constants (Lookback=50,
+│       │   │                                        Lookforward=5, OverlapFrames=1,
+│       │   │                                        DefaultChunkTokens=25), path resolvers
+│       │   ├── InoNeuTTSPromptBuilder.{h,cpp}     ← bakes the chat-template prompt
+│       │   │                                        (prefix + refphones + " " + inputphones
+│       │   │                                        + suffix + speech-tokens-block)
+│       │   ├── InoNeuTTSEngineBackend.{h,cpp}     ← LiteRT-LM session wrapper; RunSynthesis
+│       │   │                                        (blocking) + RunStreamingSynthesis
+│       │   │                                        (async with FEvent + cancel)
+│       │   ├── InoNeuTTSDecoderSession.{h,cpp}    ← bare LiteRT TFLite wrapper for NeuCodec;
+│       │   │                                        signature bucket picker + cached
+│       │   │                                        tensor buffers (reused across chunks)
+│       │   ├── InoNeuTTSRunner.{h,cpp}            ← engine + decoder + voice cache owner;
+│       │   │                                        PrimeVoice phonemizes via InoSpeakNG
+│       │   ├── InoNeuTTSSynthesisWorker.{h,cpp}   ← pipeline free functions: RunSynthesis
+│       │   │                                        (one-shot) + RunStreamingSynthesis
+│       │   │                                        (chunked decode + linear crossfade)
+│       │   └── InoNeuTTSSubsystem.cpp             ← Blueprint glue, InoNodes batch download,
+│       │                                            single-in-flight invariants
+│       └── SmokeTests/
+│           ├── InoNeuTTSDecoderProbeTest.cpp      ← Ino.NeuTTS.DecoderProbeTest
+│           │                                        (bare LiteRT C API spike)
+│           ├── InoNeuTTSBackboneSpikeTest.cpp     ← Ino.NeuTTS.BackboneSpikeTest
+│           │                                        (LiteRT-LM custom seeding, 7-way bisect)
+│           └── InoNeuTTSLoadTest.{h,cpp}          ← Ino.NeuTTS.LoadTest (subsystem-level)
+│
+├── Source/InoNeuTTSEditor/                        ← editor-only companion module
+│   ├── InoNeuTTSEditor.Build.cs                   ← Type=Editor, LoadingPhase=PostEngineInit
+│   ├── Public/
+│   │   ├── InoNeuTTSEditor.h                      ← thin module class
+│   │   └── InoNeuTTSVoiceFactory.h                ← UInoNeuTTSVoiceFactory (.inv import)
+│   └── Private/
+│       ├── InoNeuTTSEditor.cpp
+│       └── InoNeuTTSVoiceFactory.cpp              ← parses .inv JSON → UInoNeuTTSVoiceAsset
+│
 ├── DepricatedModules/                             ← retired backends, kept on disk for
 │   ├── Chatterbox/                                 reference. Not built. Not in
 │   ├── InoChatterboxNative/                        Modules[] of the .uplugin. Cherry-pick
@@ -134,10 +193,12 @@ The runtime-binary side — staging LiteRT + LiteRT-LM, the PreLoadingScreen-pha
 
 ## Module split + "self-contained deletion unit" pattern
 
-The plugin uses a **two-tier module split**:
+The plugin uses a **core + backends module split**:
 
 - **`InoAgents` (core)** — the thin always-present surface: shared log category, ElevenLabs cloud TTS, animation / audio / camera helpers, the smoke-test common helper. Does NOT depend on any backend module. Deleting a backend never affects InoAgents core.
-- **`InoLiteRtLm` (backend)** — a self-contained deprecation unit. Owns its own `UDeveloperSettings` page (`UInoLiteRtLmSettings`), its own `Private/SmokeTests/`, and consumes the sibling `InoLiteRT` plugin's LiteRT-LM C API directly. To remove the entire LiteRT-LM implementation: delete `Source/InoLiteRtLm/` and drop its entry from `InoAgents.uplugin`'s `Modules` array. Settings page, smoke tests, and subsystem all go with it.
+- **`InoLiteRtLm` (backend)** — Gemma 4 chat + tool calling. Self-contained deprecation unit. Owns its own `UDeveloperSettings` page (`UInoLiteRtLmSettings`), its own `Private/SmokeTests/`, and consumes the sibling `InoLiteRT` plugin's LiteRT-LM C API directly. To remove: delete `Source/InoLiteRtLm/` and drop its entry from `InoAgents.uplugin`.
+- **`InoNeuTTS` (backend)** — NeuTTS Nano voice-cloning TTS. Same pattern as InoLiteRtLm. Owns `UInoNeuTTSSettings`, its own smoke tests, and consumes BOTH the LiteRT-LM C API (for the backbone) AND the bare LiteRT TFLite C API (for the NeuCodec decoder) via the sibling `InoLiteRT` plugin.
+- **`InoNeuTTSEditor` (editor-only)** — companion to `InoNeuTTS` that hosts the `.inv` voice import factory. `Type=Editor` so it's excluded from cooked / shipping builds. Deleting it doesn't break runtime — `UInoNeuTTSVoiceAsset`'s editor-only `AssetImportData` UPROPERTY is `WITH_EDITORONLY_DATA`-guarded.
 
 The same pattern is what allowed the previous Chatterbox / NeuTTS / Qwen3 ASR backends to be moved cleanly to `DepricatedModules/` — each was its own module under `Source/`, with its own settings + smoke tests, and no reverse-dependency from `InoAgents` core. The `InoAgents.Build.cs` deliberately does NOT depend on backend modules; game code reaches a backend by fetching its subsystem on demand.
 
@@ -251,6 +312,123 @@ Downloaded files land at `<FPaths::ProjectPersistentDownloadDir()>/InoAgents/Lit
 
 `LiteRtLmResolveModelPath` (in `InoLiteRtLmTypes.h`) is the existence-checking resolver — checks the persistent-download dir first, then the legacy `Plugins/InoAgents/Models/` dev drop, returns empty string if neither has the file.
 
+## NeuTTS (Nano voice-cloning TTS)
+
+`UInoNeuTTSSubsystem` is the on-device TTS frontend. NeuTTS is **voice-cloning** — every synth needs a reference voice (transcript + IPA phonemes + ~650 NeuCodec FSQ codes from a sample WAV). You register voices via the editor `.inv` import workflow; the subsystem primes one voice at a time and synthesizes many lines against it.
+
+### Two-runtime architecture
+
+Unlike InoLiteRtLm (which uses only the LiteRT-LM LLM API), NeuTTS consumes BOTH halves of the `InoLiteRT` plugin's runtime surface:
+
+- **Backbone** (NeuTTS Nano LLM emitting speech tokens) — `litert/lm/engine.h` (LiteRT-LM). Bundle is a `.litertlm` produced by `Plugins/InoLiteRT/Convert/NeuTTS/scripts/build_litertlm.py`. Per-session config disables the bundle's baked chat template (`apply_prompt_template=false`) because we hand-build the full prompt manually (prefix + reference phonemes + " " + input phonemes + suffix + per-voice `<|speech_N|>` block). Generation produces speech-token text like `<|speech_5234|><|speech_7891|>...`; we regex-parse the FSQ codes out.
+- **Decoder** (NeuCodec FSQ → 24 kHz mono float32 PCM) — `litert/c/litert_*.h` (bare LiteRT C API). Bundle is a `.tflite` produced by `Plugins/InoLiteRT/Convert/NeuCodec/scripts/convert_to_tflite.py`. Multiple bucket signatures (`f50` / `f100` / `f200` / `f400` / `f600` / `f1000`) — wrapper picks the smallest fit and zero-pads.
+
+`InoNeuTTS` is the first consumer of the **bare LiteRT C API** in this repo (InoLiteRtLm uses only the LM API), so it forward-declares the LiteRT opaque handles in its headers (`LiteRtEnvironment`, `LiteRtModel`, `LiteRtTensorBuffer`, etc.) to keep cross-module includes light.
+
+### Lifecycle
+
+```
+1. (configure once)  Project Settings → Plugins → InoNeuTTS
+                       - BackboneModels[]: DisplayName, DownloadUrl,
+                         LocalFileName (.litertlm), ExpectedSha256, ...
+                       - DecoderModels[]: same shape (.tflite)
+
+2. (asset)           Voice asset workflow:
+                       a. Python encoder script emits a `<voice>.inv` JSON file:
+                            { "name": "...", "language": "en-us",
+                              "ref_text": "...", "ref_codes": [...] }
+                          (Both snake_case and PascalCase keys accepted by the
+                          factory.)
+                       b. Drag the `.inv` into a Content Browser folder.
+                          UInoNeuTTSVoiceFactory parses the JSON, populates a
+                          UInoNeuTTSVoiceAsset. Right-click → Reimport works.
+
+3. (async)           Subsys->LoadModelAsync(Config, OnLoaded, OnDownloadProgress)
+                       - FInoNeuTTSConfig carries: model names, backbone +
+                         decoder Backend (CPU / GPU / NPU), activation precision
+                         (F32 / F16 / I16 / I8), MaxNumTokens, CacheDir,
+                         PrefillChunkSize, warmup flags.
+                       - Resolves both registry entries.
+                       - InoNodes batch-downloads both files (HEAD probe + GET
+                         + .partial staging + atomic rename + streaming SHA-256).
+                       - ThreadPool-loads the runner (FInoNeuTTSEngineBackend +
+                         FInoNeuTTSDecoderSession + optional warmups).
+
+4. (async)           Subsys->SetActiveVoiceAsync(VoiceAsset, OnReady)
+                       - Phonemizes the reference transcript via InoSpeakNG
+                         (skipped when the .inv already has pre-baked
+                         RefPhones), normalizes whitespace, pre-builds the
+                         "<|speech_N|>..." string. Cached on the runner.
+                       - Required before any synth.
+
+5. (async, N times)  Subsys->SynthesizeAsync(Text, Options, OnComplete) — one-shot
+                  OR Subsys->SynthesizeStreamAsync(Text, Options, ChunkTokens,
+                                                   OnAudioChunk, OnComplete)
+                       - Phonemize input via InoSpeakNG.
+                       - Build full prompt with cached prefix.
+                       - Drive backbone (blocking for one-shot, async with
+                         per-chunk callback for streaming).
+                       - Decode FSQ codes (truncated to f1000 cap or
+                         windowed for streaming).
+                       - Float32 → int16 PCM LE → OnAudioChunk + OnComplete.
+
+6. (anytime)         Subsys->CancelSynthesis()  cooperative abort
+                     Subsys->ClearActiveVoice() drop the voice cache
+                     Subsys->UnloadModel()      drop the runner
+```
+
+### Voice cloning + the prompt format
+
+NeuTTS's prompt structure (must match `build_litertlm.py`'s baked template byte-for-byte):
+
+```
+user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phones}<|TEXT_PROMPT_END|>
+assistant:<|SPEECH_GENERATION_START|>{<|speech_N1|><|speech_N2|>...<|speech_NK|>}
+```
+
+The `<|speech_NK|>` block at the end is the reference voice's pre-encoded FSQ codes (~650 tokens for ~13 s of audio). The model continues by emitting MORE `<|speech_N|>` tokens until `<|SPEECH_GENERATION_END|>` (id 128261) or `MaxNewTokens`.
+
+We bypass the engine's chat-templating (`apply_prompt_template=false`) because the engine doesn't have a "seed assistant turn" API — we ARE the template here.
+
+### Streaming pipeline
+
+`SynthesizeStreamAsync` does real chunked decoding (NOT a one-big-chunk placeholder):
+
+- Engine runs `litert_lm_session_run_decode_async`; a C-callback bridge parses `<|speech_(\d+)|>` from each text chunk and forwards new ids to the worker.
+- Worker accumulates ids; once it has `ChunkTokens + Lookforward + Overlap` (default 31) new ids, it decodes a window `[last_emit - Lookback, last_emit + ChunkTokens + Lookforward + Overlap)` (default Lookback=50) for stable iSTFT context.
+- Emit slice is `ChunkTokens * 480` samples; appended to a `PendingAudio` buffer with a linear boundary crossfade over `OverlapFrames * 480` samples (default 480 = 20 ms) against the previous chunk's tail.
+- Everything in `PendingAudio` EXCEPT the trailing `OverlapSamples` is emitted (held back for the next chunk's crossfade).
+- Final flush emits whatever's left.
+
+Cost amortized: ~70 ms decode per ~500 ms of audio = ~14% of real-time on CPU. Decoder tensor buffers are cached and reused across chunks (allocation churn removed).
+
+Streaming constants are in `InoNeuTTSCommon.h` (`kStreamLookback` / `kStreamLookforward` / `kStreamOverlapFrames` / `kStreamDefaultChunkTokens`) for tuning.
+
+### Configuration constraints + gotchas
+
+- **Sampler type baked in bundle**: `build_litertlm.py` MUST set `sampler_params.type = TOP_P` (with `p=1.0` for top-K-equivalent behavior). The vendor CPU sampler in `runtime/components/sampler_factory.cc` only implements `TYPE_UNSPECIFIED` and `TOP_P`; `TOP_K` returns `UnimplementedError` and silently breaks `engine_create_session`. Diagnosed in Phase 0b — see commit history.
+- **Safe SessionConfig setters**: only `set_apply_prompt_template(false)` and `set_max_output_tokens(N)`. Calling `set_sampler_params` triggers the same TOP_K rejection, even with `type=TOP_P` set (LiteRT-LM bug). `FInoNeuTTSOptions::Temperature` / `TopK` / `RandomSeed` are informational placeholders for when the upstream fixes the regression.
+- **GPU caveats**: NeuTTS bundles declare `backend_constraint="gpu,cpu"` so CPU is always available. GPU specifically:
+  - **Backbone `q8` + GPU** — typically fails. The WebGPU delegate (Windows) has poor int8 coverage for generic models. Use the `fp16` bundle (`prefer_activation_type="fp16"` is what the converter advertises) for GPU. Q8 + CPU is the right pairing.
+  - **Decoder + GPU** — currently fails (`LiteRtCreateCompiledModel` returns status 504). The decoder was converted with no GPU-specific flags and uses `int64` codes input which WebGPU dislikes. Stay on CPU.
+  - **Diagnosis is silent on Windows**: LiteRT-LM logs to absl::stderr which isn't captured in UE on Windows headless processes. Our error log just says "engine_create returned NULL" — the actual rejection reason is in stderr that UE swallowed.
+- **Single in-flight invariants**: `SetActiveVoiceAsync` refuses while `bSynthInFlight`; `Synthesize{,Stream}Async` refuses while `bIsPrimingVoice`. Concurrent voice prime + synth would race on the runner's voice-cache fields. The synth worker has NO inline `PrimeVoice` fallback — callers MUST await `OnReady` before synthesizing.
+
+### Model + voice registry
+
+`UInoNeuTTSSettings` (Project Settings → Plugins → InoNeuTTS) has two arrays:
+
+| Array | Entry fields |
+|---|---|
+| `BackboneModels` | `DisplayName`, `DownloadUrl`, `LocalFileName` (must end `.litertlm`), `ExpectedSha256`, `FileSizeBytes`, `Language`, `Quantization` |
+| `DecoderModels`  | same shape, minus the language fields; `LocalFileName` ends `.tflite` |
+
+Downloaded files land at `<FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>`. Both backbone + decoder share the same dir (their `LocalFileName` extensions disambiguate).
+
+`UInoNeuTTSSubsystem::IsModelDownloaded(Config)` is a pure file-stat probe — UMG-safe.
+
+Voices are NOT in Project Settings — they're UAssets under `Content/` created from `.inv` imports. Pass a `UInoNeuTTSVoiceAsset*` reference to `SetActiveVoiceAsync`.
+
 ## UE-side integration architecture
 
 The UE-facing API lives under `Source/InoAgents/Public/` (cross-cutting helpers + ElevenLabs) and `Source/InoLiteRtLm/Public/` (Gemma 4 chat). Blueprint / C++ callers wire the subsystems together themselves; the demo project's character actor is the integration point.
@@ -285,6 +463,37 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │     Base class for tools. Subclass, set ToolName / Description
                  │     / Parameters, override Execute(JsonArgs, OutResultJson).
                  │     UInoLiteRtLmAddNumbersTool is the canonical sample.
+                 │
+                 ├─ UInoNeuTTSSubsystem              (UGameInstanceSubsystem)
+                 │     On-device voice-cloning TTS. Owns one FInoNeuTTSRunner
+                 │     (engine + decoder + voice cache). LoadModelAsync auto-
+                 │     downloads both .litertlm + .tflite via InoNodes batch.
+                 │     SetActiveVoiceAsync primes a UInoNeuTTSVoiceAsset off-
+                 │     thread. SynthesizeAsync (one-shot) and
+                 │     SynthesizeStreamAsync (chunked + boundary crossfade,
+                 │     OnAudioChunk fires multiple times) drive the synth.
+                 │     Output: 24 kHz mono int16 PCM LE → feed into
+                 │     UStreamingSoundWave::AppendAudioDataFromRAW
+                 │     (RuntimeAudioImporter).
+                 │     CancelSynthesis cooperatively aborts. Single-in-flight
+                 │     invariants enforced via bIsPrimingVoice / bSynthInFlight.
+                 │
+                 ├─ UInoNeuTTSVoiceAsset              (UObject, BP-friendly)
+                 │     Wraps a NeuTTS voice (Name, Language, RefText,
+                 │     RefPhones, RefCodes). Created via the editor's .inv
+                 │     UFactory (drag `<voice>.inv` into Content Browser)
+                 │     or programmatically via NewObject. Reimport refreshes
+                 │     from the source `.inv` file on re-encoding.
+                 │
+                 ├─ UInoNeuTTSSynthesize              (UBlueprintAsyncActionBase)
+                 │     BP node "NeuTTS Synthesize" — OnComplete / OnError pins.
+                 │     Uses the subsystem's active voice.
+                 │
+                 ├─ UInoNeuTTSStreamSynthesize        (UBlueprintAsyncActionBase)
+                 │     BP node "NeuTTS Synthesize Streaming" — OnAudioChunk
+                 │     / OnComplete / OnError pins. OnAudioChunk fires
+                 │     repeatedly (~one per ChunkTokens of audio ≈ 0.5 s)
+                 │     until bIsFinal=true on the last chunk.
                  │
                  ├─ UInoElevenLabsSubsystem          (UGameInstanceSubsystem)
                  │     Caches settings (API key, base URL, default model id,
@@ -377,6 +586,16 @@ Under `Source/InoLiteRtLm/Private/SmokeTests/`. The granular tests stage on inte
 | `Ino.LiteRtLm.ConversationToolTest [model]` | Subsystem-level tool round-trip: RegisterTool → CreateConversation → SendMessageAsync → OnToolCalled. | **yes** |
 | `Ino.LiteRtLm.ToolRegistryTest` | Register + lookup + unregister + double-register-overwrites semantics on the subsystem's tool registry. | no |
 
+### NeuTTS (on-device voice-cloning TTS)
+
+Under `Source/InoNeuTTS/Private/SmokeTests/`. The Phase-0 spike commands stage at the lowest level (bare LiteRT API + LiteRT-LM session construction) so a regression in either runtime is isolatable without running the full synth.
+
+| Command | What it proves | PIE? |
+|---|---|---|
+| `Ino.NeuTTS.DecoderProbeTest <abs path to .tflite>` | Bare LiteRT C API spike. Loads the NeuCodec `.tflite`, enumerates signatures, runs one inference with random FSQ codes, logs output shape + amplitude stats. First consumer of the bare LiteRT C API in this repo. | no |
+| `Ino.NeuTTS.BackboneSpikeTest <abs path to .litertlm>` | LiteRT-LM custom-seeding spike. Bisect probe over 7 SessionConfig variants (NULL, empty, individual setters, combinations) to confirm `apply_prompt_template=false` works and the model continues an injected `<|speech_N|>` seed block. Diagnostic for TOP_K / SessionConfig regressions in upstream LiteRT-LM. | no |
+| `Ino.NeuTTS.LoadTest [backbone] [decoder]` | End-to-end via `UInoNeuTTSSubsystem::LoadModelAsync` — InoNodes batch download (cached on subsequent runs) + ThreadPool runner construction + optional warmups. Logs each download-progress tick (throttled) + terminal OnLoaded with wall-clock time. | **yes** |
+
 ### ElevenLabs (cloud TTS)
 
 | Command | What it proves | PIE? |
@@ -421,4 +640,6 @@ This file describes design decisions and architectural intent. Specifics drift o
 
 - **LiteRT-LM version + C API:** owned by `InoLiteRT` — check `Plugins/InoLiteRT/CLAUDE.md` for the pinned version, the staged `litert/lm/engine.h`, and the runtime DLLs/.so it provides.
 - **Session-config regression:** the `bAttachSessionConfig = false` default in `FInoLiteRtLmModelConfig` exists because of a specific `v0.11.0-rc.1` issue. Check `InoLiteRtLmConversation.cpp` for the comment thread, and re-verify after every LiteRT-LM bump.
+- **NeuTTS bundle sampler type**: `build_litertlm.py` MUST set `sampler_params.type = TOP_P`. If a future run sets `TOP_K` (the vendor enum's "default" name but no CPU impl), `engine_create_session` will silently return NULL with no UE-visible log. Re-verify after any conversion-script change.
+- **NeuTTS GPU support**: per current `InoLiteRT` Win64 build, only the backbone fp16 variant has any chance of working on GPU; q8 + GPU and the decoder + GPU are known-broken. Re-verify after either an InoLiteRT bump (especially WebGPU delegate updates) or a NeuTTS re-conversion with different flags.
 - **Deprecated backends:** anything described here as "removed" or "moved to DepricatedModules/" reflects the state at the time of writing. If a future task touches that area, check `git log Plugins/InoAgents/DepricatedModules/` and the `.uplugin` `Modules[]` to confirm whether the backend has been resurrected.
