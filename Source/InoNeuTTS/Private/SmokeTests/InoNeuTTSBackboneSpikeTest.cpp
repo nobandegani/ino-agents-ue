@@ -15,31 +15,30 @@
 // (= token 128260) and BEFORE the model starts predicting — we need to
 // inject custom text that the engine does NOT re-template.
 //
-// The LiteRT-LM C API exposes
+// Initial finding (2026-05-11): passing a non-NULL LiteRtLmSessionConfig
+// to `litert_lm_engine_create_session` returns NULL. Same shape as the
+// Gemma-4-era regression noted in the InoLiteRtLm docs. We need to know
+// WHICH setter triggers it, OR if any config attachment fails — both
+// answers determine the path forward.
 //
-//   litert_lm_session_config_set_apply_prompt_template(config, false);
+// This spike runs a bisect probe over 7 session-config variants and
+// reports which (if any) accepts the attach. For the first one that
+// succeeds, it also drives a real prefill+decode with our manual prompt
+// to verify the template-bypass actually works at runtime.
 //
-// which is supposed to bypass templating entirely. This spike tests
-// whether that flag does what its name claims:
+// Pass criteria (cumulative — best case has all four green):
+//   1. At least one SessionConfig variant produces a non-NULL session.
+//   2. Among those, `set_apply_prompt_template(false)` is settable.
+//   3. After bypass, our hand-built prompt (prefix + phonemes + suffix
+//      + <|speech_N|> seed block) is fed in without re-templating.
+//   4. The decoded response contains `<|speech_*|>` tokens.
 //
-//   1. Load the .litertlm engine.
-//   2. Create a session with `apply_prompt_template = false`.
-//   3. Build the FULL prompt by hand (prefix + dummy phonemes + suffix
-//      + a small synthetic <|speech_N|> seed block).
-//   4. Prefill + decode synchronously with a tiny max_output_tokens.
-//   5. Regex-extract <|speech_(\d+)|> from the response text.
-//
-// Pass criterion: the response contains <|speech_*|> tokens. That
-// confirms the model continued the FSQ-token sequence we seeded,
-// which means it accepted our custom prompt as-is.
-//
-// Fail mode 1: response is empty or has no <|speech_*|> ids. The
-// model either re-applied the chat template (the flag has no effect)
-// or rejected the custom prompt. → Pivot the backbone to raw
-// `.tflite` via the bare LiteRT C API (mirrors Phase 0a's mechanics).
-//
-// Fail mode 2: a function call fails outright. → File an InoLiteRT
-// bug; the LM C API has a regression in this build.
+// If only (1) holds and (2)/(3) fail, the backbone pivots from
+// `.litertlm` to raw `.tflite` via the bare LiteRT C API (the path
+// validated by Phase 0a). The user can also re-convert the `.litertlm`
+// without baking the chat template (set `_USER_PREFIX = ""` /
+// `_USER_SUFFIX = ""` in `Convert/NeuTTS/scripts/build_litertlm.py`),
+// which sidesteps the SessionConfig requirement entirely.
 //
 // Usage:
 //   Ino.NeuTTS.BackboneSpikeTest <abs path to neutts_nano_*.litertlm>
@@ -49,7 +48,6 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Regex.h"
-#include "Math/UnrealMathUtility.h"
 
 #include "litert/lm/engine.h"
 
@@ -57,142 +55,122 @@ namespace
 {
 
 // ---------------------------------------------------------------------
-// Build the full handwritten prompt body. The prefix + suffix strings
-// here MUST match what `build_litertlm.py` bakes into the .litertlm
-// bundle byte-for-byte; if they drift, the model sees a different
-// chat shape than it was trained on and we'll get garbage even if the
-// no-template flag works.
-//
-// Source: Plugins/InoLiteRT/Convert/NeuTTS/scripts/build_litertlm.py
-//   _USER_PREFIX = "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
-//   _USER_SUFFIX = "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
+// Manual prompt — must match `_USER_PREFIX` + `_USER_SUFFIX` strings
+// baked by `build_litertlm.py` byte-for-byte (otherwise the model sees
+// a different chat shape than it was trained on and we get garbage
+// even if `apply_prompt_template=false` works).
 // ---------------------------------------------------------------------
-static FString BuildSpikePrompt()
+static FString BuildManualPrompt()
 {
     const FString Prefix =
         TEXT("user: Convert the text to speech:<|TEXT_PROMPT_START|>");
     const FString Suffix =
         TEXT("<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>");
 
-    // Dummy phonemes. NeuTTS expects `<ref_phones> <input_phones>`
-    // (space-separated). We're not testing audio quality here — any
-    // tokenizable IPA-ish text works as long as it's non-empty. Use
-    // a short English greeting phonemization so the model sees a
-    // realistic-shaped body.
+    // Dummy phonemes — short English greeting, just to give the model
+    // a realistic-shaped body. Not testing audio quality here.
     const FString Phonemes = TEXT("h@l'oU D'e@ h@l'oU");
 
-    // Synthetic <|speech_N|> seed block. In a real synth this would
-    // be the encoded reference voice's FSQ codes (~650 tokens).
-    // For the spike, 5 arbitrary codes in [0, 65535] is enough to
-    // give the AR loop something to continue from.
+    // 5 arbitrary FSQ codes as a seed block. In a real synth this would
+    // be the encoded reference voice's ~650 codes.
     FString SeedTokens;
     static constexpr int32 SeedIds[] = {100, 250, 500, 1000, 2000};
     for (int32 Id : SeedIds)
     {
         SeedTokens += FString::Printf(TEXT("<|speech_%d|>"), Id);
     }
-
     return Prefix + Phonemes + Suffix + SeedTokens;
 }
 
 // ---------------------------------------------------------------------
-// Main entry.
+// Probe types — which setter combinations to test on the SessionConfig
+// before passing it into `create_session`.
 // ---------------------------------------------------------------------
-static void RunBackboneSpikeTest(const TArray<FString>& Args)
+enum class EProbeKind : uint8
 {
-    if (Args.Num() < 1)
+    NullConfig,                       // pass nullptr — engine default
+    EmptyConfig,                      // create but call no setters
+    ApplyTemplateOnly,                // only set_apply_prompt_template(false)
+    MaxOutputTokensOnly,              // only set_max_output_tokens(20)
+    SamplerOnly,                      // only set_sampler_params(top_k=50, T=1.0)
+    TemplateAndMaxTokens,             // apply_template + max_tokens (no sampler)
+    AllThree,                         // every setter we want to use in prod
+};
+
+static const TCHAR* ProbeKindName(EProbeKind Kind)
+{
+    switch (Kind)
     {
-        UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] usage: Ino.NeuTTS.BackboneSpikeTest <abs path to .litertlm>"));
-        return;
+        case EProbeKind::NullConfig:           return TEXT("NULL config");
+        case EProbeKind::EmptyConfig:          return TEXT("empty config (no setters)");
+        case EProbeKind::ApplyTemplateOnly:    return TEXT("config + set_apply_prompt_template(false)");
+        case EProbeKind::MaxOutputTokensOnly:  return TEXT("config + set_max_output_tokens(20)");
+        case EProbeKind::SamplerOnly:          return TEXT("config + set_sampler_params(TopK,k=50,T=1.0)");
+        case EProbeKind::TemplateAndMaxTokens: return TEXT("config + apply_template + max_tokens");
+        case EProbeKind::AllThree:             return TEXT("config + apply_template + max_tokens + sampler");
+        default: return TEXT("<unknown>");
+    }
+}
+
+// Build a SessionConfig for the requested probe. Returns nullptr for
+// the NullConfig case (so the caller passes nullptr through).
+static LiteRtLmSessionConfig* BuildConfigForProbe(EProbeKind Kind)
+{
+    if (Kind == EProbeKind::NullConfig)
+    {
+        return nullptr;
     }
 
-    const FString ModelPath = Args[0];
-    UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][BackboneSpike] === BEGIN === model=%s"), *ModelPath);
-
-    // Crank up LM library logging so any internal errors surface.
-    litert_lm_set_min_log_level(2 /* INFO */);
-
-    // -----------------------------------------------------------------
-    // 1. Build engine settings + create engine.
-    // -----------------------------------------------------------------
-    const FTCHARToUTF8 PathUtf8(*ModelPath);
-    LiteRtLmEngineSettings* Settings = litert_lm_engine_settings_create(
-        PathUtf8.Get(), /*backend_str=*/"cpu",
-        /*vision_backend_str=*/nullptr,
-        /*audio_backend_str=*/nullptr);
-    if (!Settings)
+    LiteRtLmSessionConfig* Cfg = litert_lm_session_config_create();
+    if (!Cfg)
     {
-        UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_engine_settings_create returned NULL"));
-        return;
+        return nullptr;
     }
-    // Cap context at the value the .litertlm was converted for.
-    litert_lm_engine_settings_set_max_num_tokens(Settings, 2048);
 
-    const double EngineStart = FPlatformTime::Seconds();
-    LiteRtLmEngine* Engine = litert_lm_engine_create(Settings);
-    // The engine takes ownership of the settings' contents at create-time;
-    // we still delete the settings handle to free the wrapper.
-    litert_lm_engine_settings_delete(Settings);
-    Settings = nullptr;
-
-    if (!Engine)
-    {
-        UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_engine_create returned NULL — model load failed."));
-        return;
-    }
-    UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][BackboneSpike] engine loaded in %.1f ms"),
-        (FPlatformTime::Seconds() - EngineStart) * 1000.0);
-
-    // -----------------------------------------------------------------
-    // 2. Session config — THE crux of the spike. Disable chat template.
-    // -----------------------------------------------------------------
-    LiteRtLmSessionConfig* SessionConfig = litert_lm_session_config_create();
-    if (!SessionConfig)
-    {
-        UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_session_config_create returned NULL"));
-        litert_lm_engine_delete(Engine);
-        return;
-    }
-    litert_lm_session_config_set_apply_prompt_template(SessionConfig, /*apply=*/false);
-    // Cap output to keep the spike fast (~20 tokens of decoding ≈ <1s on CPU).
-    litert_lm_session_config_set_max_output_tokens(SessionConfig, 20);
-
-    // Match the sampler baked into the .litertlm (TOP_K, k=50, T=1.0).
     LiteRtLmSamplerParams Sampler{};
     Sampler.type = kLiteRtLmSamplerTypeTopK;
     Sampler.top_k = 50;
     Sampler.top_p = 0.0f;
     Sampler.temperature = 1.0f;
-    Sampler.seed = 12345;  // deterministic for the spike
-    litert_lm_session_config_set_sampler_params(SessionConfig, &Sampler);
+    Sampler.seed = 12345;
 
-    // -----------------------------------------------------------------
-    // 3. Create session.
-    // -----------------------------------------------------------------
-    LiteRtLmSession* Session = litert_lm_engine_create_session(Engine, SessionConfig);
-    if (!Session)
+    switch (Kind)
     {
-        UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_engine_create_session returned NULL ")
-            TEXT("(known Gemma-4-era regression: NeuTTS may need bAttachSessionConfig=false ")
-            TEXT("equivalent — flag for follow-up if reproducible)."));
-        litert_lm_session_config_delete(SessionConfig);
-        litert_lm_engine_delete(Engine);
-        return;
+        case EProbeKind::EmptyConfig:
+            break;
+        case EProbeKind::ApplyTemplateOnly:
+            litert_lm_session_config_set_apply_prompt_template(Cfg, false);
+            break;
+        case EProbeKind::MaxOutputTokensOnly:
+            litert_lm_session_config_set_max_output_tokens(Cfg, 20);
+            break;
+        case EProbeKind::SamplerOnly:
+            litert_lm_session_config_set_sampler_params(Cfg, &Sampler);
+            break;
+        case EProbeKind::TemplateAndMaxTokens:
+            litert_lm_session_config_set_apply_prompt_template(Cfg, false);
+            litert_lm_session_config_set_max_output_tokens(Cfg, 20);
+            break;
+        case EProbeKind::AllThree:
+            litert_lm_session_config_set_apply_prompt_template(Cfg, false);
+            litert_lm_session_config_set_max_output_tokens(Cfg, 20);
+            litert_lm_session_config_set_sampler_params(Cfg, &Sampler);
+            break;
+        default: break;
     }
+    return Cfg;
+}
 
-    // -----------------------------------------------------------------
-    // 4. Build the prompt + prefill.
-    // -----------------------------------------------------------------
-    const FString Prompt = BuildSpikePrompt();
+// ---------------------------------------------------------------------
+// Drive prefill + decode through a given session with our manual prompt,
+// extract `<|speech_*|>` ids from the response. Returns true if at least
+// one speech token was parsed.
+// ---------------------------------------------------------------------
+static bool DriveDecodeAndCheckForSpeechTokens(LiteRtLmSession* Session)
+{
+    const FString Prompt = BuildManualPrompt();
     UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][BackboneSpike] sending prompt (%d chars): %s"),
+        TEXT("[NeuTTS][BackboneSpike]   driving prompt (%d chars): %s"),
         Prompt.Len(), *Prompt);
 
     const FTCHARToUTF8 PromptUtf8(*Prompt);
@@ -207,108 +185,228 @@ static void RunBackboneSpikeTest(const TArray<FString>& Args)
     if (PrefillStatus != 0)
     {
         UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_session_run_prefill failed: status=%d"),
-            PrefillStatus);
-        litert_lm_session_delete(Session);
-        litert_lm_session_config_delete(SessionConfig);
-        litert_lm_engine_delete(Engine);
-        return;
+            TEXT("[NeuTTS][BackboneSpike]   prefill FAILED: status=%d"), PrefillStatus);
+        return false;
     }
     UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][BackboneSpike] prefill OK in %.1f ms"), PrefillMs);
+        TEXT("[NeuTTS][BackboneSpike]   prefill OK in %.1f ms"), PrefillMs);
 
-    // -----------------------------------------------------------------
-    // 5. Decode (blocking — keep the spike simple; the real path uses
-    //    `run_decode_async` for token-stream callbacks).
-    // -----------------------------------------------------------------
     const double DecodeStart = FPlatformTime::Seconds();
     LiteRtLmResponses* Responses = litert_lm_session_run_decode(Session);
     const double DecodeMs = (FPlatformTime::Seconds() - DecodeStart) * 1000.0;
     if (!Responses)
     {
         UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] litert_lm_session_run_decode returned NULL"));
-        litert_lm_session_delete(Session);
-        litert_lm_session_config_delete(SessionConfig);
-        litert_lm_engine_delete(Engine);
-        return;
+            TEXT("[NeuTTS][BackboneSpike]   decode FAILED (responses=NULL)"));
+        return false;
     }
 
     const int NumCandidates = litert_lm_responses_get_num_candidates(Responses);
     UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][BackboneSpike] decode OK in %.1f ms — %d candidates"),
+        TEXT("[NeuTTS][BackboneSpike]   decode OK in %.1f ms — %d candidates"),
         DecodeMs, NumCandidates);
 
-    // -----------------------------------------------------------------
-    // 6. Parse the first candidate's text. Extract <|speech_N|> ids.
-    // -----------------------------------------------------------------
-    bool bAnySpeechToken = false;
+    bool bAnySpeech = false;
     if (NumCandidates > 0)
     {
-        const char* ResponseText = litert_lm_responses_get_response_text_at(Responses, 0);
-        const FString ResponseStr = ResponseText ? UTF8_TO_TCHAR(ResponseText) : FString();
+        const char* RespC = litert_lm_responses_get_response_text_at(Responses, 0);
+        const FString Resp = RespC ? UTF8_TO_TCHAR(RespC) : FString();
         UE_LOG(LogInoAgents, Log,
-            TEXT("[NeuTTS][BackboneSpike] response (%d chars, full text follows):"),
-            ResponseStr.Len());
-        UE_LOG(LogInoAgents, Log, TEXT("[NeuTTS][BackboneSpike] >>> %s"), *ResponseStr);
+            TEXT("[NeuTTS][BackboneSpike]   response (%d chars):"), Resp.Len());
+        UE_LOG(LogInoAgents, Log, TEXT("[NeuTTS][BackboneSpike]   >>> %s"), *Resp);
 
-        TArray<int32> ParsedSpeechIds;
-        const FRegexPattern SpeechPattern(TEXT("<\\|speech_(\\d+)\\|>"));
-        FRegexMatcher Matcher(SpeechPattern, ResponseStr);
-        while (Matcher.FindNext())
+        TArray<int32> Ids;
+        const FRegexPattern Pat(TEXT("<\\|speech_(\\d+)\\|>"));
+        FRegexMatcher M(Pat, Resp);
+        while (M.FindNext())
         {
-            const FString Captured = Matcher.GetCaptureGroup(1);
-            ParsedSpeechIds.Add(FCString::Atoi(*Captured));
+            Ids.Add(FCString::Atoi(*M.GetCaptureGroup(1)));
         }
-        bAnySpeechToken = ParsedSpeechIds.Num() > 0;
+        bAnySpeech = Ids.Num() > 0;
 
-        FString IdsPreview;
-        for (int32 i = 0; i < FMath::Min(10, ParsedSpeechIds.Num()); ++i)
+        FString Preview;
+        for (int32 i = 0; i < FMath::Min(10, Ids.Num()); ++i)
         {
-            if (i > 0) IdsPreview += TEXT(", ");
-            IdsPreview += FString::Printf(TEXT("%d"), ParsedSpeechIds[i]);
+            if (i > 0) Preview += TEXT(", ");
+            Preview += FString::Printf(TEXT("%d"), Ids[i]);
         }
         UE_LOG(LogInoAgents, Log,
-            TEXT("[NeuTTS][BackboneSpike] parsed %d <|speech_N|> ids — first 10: [%s]"),
-            ParsedSpeechIds.Num(), *IdsPreview);
+            TEXT("[NeuTTS][BackboneSpike]   parsed %d <|speech_N|> ids — first 10: [%s]"),
+            Ids.Num(), *Preview);
+    }
+
+    litert_lm_responses_delete(Responses);
+    return bAnySpeech;
+}
+
+// ---------------------------------------------------------------------
+// Run one probe: build the config, try to create a session, and
+// optionally drive a decode if create succeeded. The decode is only
+// attempted on the first successful probe (controlled by the
+// `bAlreadyDecodedSomewhere` flag the caller threads through).
+// Returns true iff create_session succeeded for this probe.
+// ---------------------------------------------------------------------
+static bool RunProbe(LiteRtLmEngine* Engine, EProbeKind Kind, bool& bRanDecode,
+                     bool& bSpeechSeen)
+{
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] probe '%s' — "), ProbeKindName(Kind));
+
+    LiteRtLmSessionConfig* Cfg = BuildConfigForProbe(Kind);
+    if (Kind != EProbeKind::NullConfig && !Cfg)
+    {
+        UE_LOG(LogInoAgents, Error,
+            TEXT("[NeuTTS][BackboneSpike]   BuildConfigForProbe returned NULL "
+                 "(could not even create the empty config)"));
+        return false;
+    }
+
+    LiteRtLmSession* Session = litert_lm_engine_create_session(Engine, Cfg);
+    if (!Session)
+    {
+        UE_LOG(LogInoAgents, Warning,
+            TEXT("[NeuTTS][BackboneSpike]   create_session FAILED (returned NULL)"));
+        if (Cfg) litert_lm_session_config_delete(Cfg);
+        return false;
+    }
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike]   create_session OK"));
+
+    // On the FIRST successful probe, also exercise prefill+decode to
+    // verify the chosen config produces speech tokens from our hand-
+    // built prompt. We only do this once because each decode costs
+    // several seconds and the goal is just to know whether the chosen
+    // config bypasses templating, not to benchmark.
+    if (!bRanDecode)
+    {
+        bSpeechSeen = DriveDecodeAndCheckForSpeechTokens(Session);
+        bRanDecode = true;
+    }
+
+    litert_lm_session_delete(Session);
+    if (Cfg) litert_lm_session_config_delete(Cfg);
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Main entry.
+// ---------------------------------------------------------------------
+static void RunBackboneSpikeTest(const TArray<FString>& Args)
+{
+    if (Args.Num() < 1)
+    {
+        UE_LOG(LogInoAgents, Error,
+            TEXT("[NeuTTS][BackboneSpike] usage: Ino.NeuTTS.BackboneSpikeTest <abs path to .litertlm>"));
+        return;
+    }
+    const FString ModelPath = Args[0];
+
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] === BEGIN === model=%s"), *ModelPath);
+    litert_lm_set_min_log_level(2 /* INFO */);
+
+    // -----------------------------------------------------------------
+    // 1. Load the engine. (Already proven to work in the v1 spike.)
+    // -----------------------------------------------------------------
+    const FTCHARToUTF8 PathUtf8(*ModelPath);
+    LiteRtLmEngineSettings* Settings = litert_lm_engine_settings_create(
+        PathUtf8.Get(), /*backend_str=*/"cpu",
+        /*vision_backend_str=*/nullptr, /*audio_backend_str=*/nullptr);
+    if (!Settings)
+    {
+        UE_LOG(LogInoAgents, Error,
+            TEXT("[NeuTTS][BackboneSpike] engine_settings_create returned NULL"));
+        return;
+    }
+    litert_lm_engine_settings_set_max_num_tokens(Settings, 2048);
+
+    const double EngineStart = FPlatformTime::Seconds();
+    LiteRtLmEngine* Engine = litert_lm_engine_create(Settings);
+    litert_lm_engine_settings_delete(Settings);
+    if (!Engine)
+    {
+        UE_LOG(LogInoAgents, Error,
+            TEXT("[NeuTTS][BackboneSpike] engine_create returned NULL"));
+        return;
+    }
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] engine loaded in %.1f ms"),
+        (FPlatformTime::Seconds() - EngineStart) * 1000.0);
+
+    // -----------------------------------------------------------------
+    // 2. Run all 7 probes in order and tally which succeeded.
+    // -----------------------------------------------------------------
+    static constexpr EProbeKind AllProbes[] = {
+        EProbeKind::NullConfig,
+        EProbeKind::EmptyConfig,
+        EProbeKind::ApplyTemplateOnly,
+        EProbeKind::MaxOutputTokensOnly,
+        EProbeKind::SamplerOnly,
+        EProbeKind::TemplateAndMaxTokens,
+        EProbeKind::AllThree,
+    };
+
+    bool bRanDecode = false;
+    bool bSpeechSeen = false;
+    TArray<EProbeKind> Passed;
+    for (EProbeKind Kind : AllProbes)
+    {
+        if (RunProbe(Engine, Kind, bRanDecode, bSpeechSeen))
+        {
+            Passed.Add(Kind);
+        }
     }
 
     // -----------------------------------------------------------------
-    // 7. Verdict.
+    // 3. Verdict.
     // -----------------------------------------------------------------
-    if (bAnySpeechToken)
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] ---- SUMMARY ----"));
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] %d / %d probes created a session"),
+        Passed.Num(), static_cast<int32>(UE_ARRAY_COUNT(AllProbes)));
+    for (EProbeKind K : Passed)
     {
         UE_LOG(LogInoAgents, Log,
-            TEXT("[NeuTTS][BackboneSpike] PASS — model continued the seeded <|speech_*|> sequence. ")
-            TEXT("LiteRT-LM `apply_prompt_template=false` works for custom seeding. ")
-            TEXT("Proceed with the .litertlm path for the backbone."));
+            TEXT("[NeuTTS][BackboneSpike]   ✓ %s"), ProbeKindName(K));
+    }
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][BackboneSpike] speech-token test: %s"),
+        bRanDecode ? (bSpeechSeen ? TEXT("PASS — <|speech_*|> present in response")
+                                   : TEXT("FAIL — no <|speech_*|> in response (re-templated or stuck)"))
+                   : TEXT("not run (no probe succeeded)"));
+
+    if (Passed.Num() > 0 && bSpeechSeen)
+    {
+        UE_LOG(LogInoAgents, Log,
+            TEXT("[NeuTTS][BackboneSpike] PATH OK — use the first passing config for production."));
+    }
+    else if (Passed.Num() > 0 && !bSpeechSeen)
+    {
+        UE_LOG(LogInoAgents, Warning,
+            TEXT("[NeuTTS][BackboneSpike] PARTIAL — session creates but generation didn't ")
+            TEXT("produce <|speech_*|> tokens. The chat template is likely being applied ")
+            TEXT("despite our config. Two follow-ups: (a) try re-converting the .litertlm ")
+            TEXT("with empty _USER_PREFIX / _USER_SUFFIX in build_litertlm.py, or ")
+            TEXT("(b) pivot the backbone to raw .tflite via bare LiteRT C API."));
     }
     else
     {
         UE_LOG(LogInoAgents, Error,
-            TEXT("[NeuTTS][BackboneSpike] FAIL — no <|speech_*|> ids in response. ")
-            TEXT("Either the no-template flag didn't bypass the chat wrapper, ")
-            TEXT("or the model rejected the custom prompt. ")
-            TEXT("Investigate before committing to .litertlm; raw .tflite via bare ")
-            TEXT("LiteRT C API (mirroring Phase 0a) is the fallback."));
+            TEXT("[NeuTTS][BackboneSpike] HARD FAIL — no session-config variant accepted. ")
+            TEXT("Pivot the backbone to raw .tflite via bare LiteRT C API ")
+            TEXT("(neutts_nano_q8_ekv2048.tflite + signature runners — mirrors test_tts.py)."));
     }
 
-    // -----------------------------------------------------------------
-    // 8. Cleanup.
-    // -----------------------------------------------------------------
-    litert_lm_responses_delete(Responses);
-    litert_lm_session_delete(Session);
-    litert_lm_session_config_delete(SessionConfig);
     litert_lm_engine_delete(Engine);
-
     UE_LOG(LogInoAgents, Log, TEXT("[NeuTTS][BackboneSpike] === END ==="));
 }
 
 static FAutoConsoleCommand GBackboneSpikeCmd(
     TEXT("Ino.NeuTTS.BackboneSpikeTest"),
-    TEXT("Phase 0b spike — confirms LiteRT-LM `apply_prompt_template=false` lets us ")
-    TEXT("inject a custom prompt with a <|speech_N|> seed block past the chat-template ")
-    TEXT("suffix. Args: <abs path to neutts_nano_*.litertlm>"),
+    TEXT("Phase 0b spike — bisect probe over LiteRT-LM SessionConfig variants to find ")
+    TEXT("which (if any) accepts attachment and bypasses the baked chat template. ")
+    TEXT("Args: <abs path to neutts_nano_*.litertlm>"),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunBackboneSpikeTest));
 
 } // namespace
