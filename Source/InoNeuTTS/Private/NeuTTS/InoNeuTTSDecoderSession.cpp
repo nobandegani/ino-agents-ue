@@ -39,6 +39,12 @@ TUniquePtr<FInoNeuTTSDecoderSession> FInoNeuTTSDecoderSession::Create(
 
 FInoNeuTTSDecoderSession::~FInoNeuTTSDecoderSession()
 {
+    // Destroy cached tensor buffers BEFORE the model/environment they
+    // depend on. Tensor buffers keep an opaque reference to the env
+    // internally.
+    if (Cache.InBuf)  { LiteRtDestroyTensorBuffer(Cache.InBuf);  Cache.InBuf  = nullptr; }
+    if (Cache.OutBuf) { LiteRtDestroyTensorBuffer(Cache.OutBuf); Cache.OutBuf = nullptr; }
+
     if (CompiledModel) LiteRtDestroyCompiledModel(CompiledModel);
     if (Options)       LiteRtDestroyOptions(Options);
     if (Model)         LiteRtDestroyModel(Model);
@@ -131,32 +137,44 @@ bool FInoNeuTTSDecoderSession::Decode(
     }
     const LiteRtParamIndex SigIdx = static_cast<LiteRtParamIndex>(Picked->SignatureIndex);
 
-    // Tensor types (input is `codes:int64[1,1,F]`, output is `audio:float32[1,1,(F-1)*480]`).
-    LiteRtSignature Sig = nullptr;
-    LiteRtGetModelSignature(Model, SigIdx, &Sig);
-    LiteRtTensor InT = nullptr;  LiteRtGetSignatureInputTensorByIndex(Sig, 0, &InT);
-    LiteRtTensor OutT = nullptr; LiteRtGetSignatureOutputTensorByIndex(Sig, 0, &OutT);
-    LiteRtRankedTensorType InType{}, OutType{};
-    LiteRtGetRankedTensorType(InT, &InType);
-    LiteRtGetRankedTensorType(OutT, &OutType);
-
-    LiteRtTensorBufferRequirements InReqs = nullptr;
-    if (!CheckStatusLog(LiteRtGetCompiledModelInputBufferRequirements(CompiledModel, SigIdx, 0, &InReqs),
-                        TEXT("GetInputBufferRequirements"), OutError)) return false;
-    LiteRtTensorBufferRequirements OutReqs = nullptr;
-    if (!CheckStatusLog(LiteRtGetCompiledModelOutputBufferRequirements(CompiledModel, SigIdx, 0, &OutReqs),
-                        TEXT("GetOutputBufferRequirements"), OutError)) return false;
-
-    LiteRtTensorBuffer InBuf = nullptr;
-    if (!CheckStatusLog(LiteRtCreateManagedTensorBufferFromRequirements(Environment, &InType, InReqs, &InBuf),
-                        TEXT("CreateInputBuffer"), OutError)) return false;
-    LiteRtTensorBuffer OutBuf = nullptr;
-    if (!CheckStatusLog(LiteRtCreateManagedTensorBufferFromRequirements(Environment, &OutType, OutReqs, &OutBuf),
-                        TEXT("CreateOutputBuffer"), OutError))
+    // ----- Tensor-buffer cache: reuse if the bucket matches the cached one.
+    if (Cache.SignatureIndex != Picked->SignatureIndex)
     {
-        LiteRtDestroyTensorBuffer(InBuf);
-        return false;
+        // Different bucket — drop the cached buffers, recreate.
+        if (Cache.InBuf)  { LiteRtDestroyTensorBuffer(Cache.InBuf);  Cache.InBuf  = nullptr; }
+        if (Cache.OutBuf) { LiteRtDestroyTensorBuffer(Cache.OutBuf); Cache.OutBuf = nullptr; }
+        Cache.SignatureIndex = -1;
+
+        // Tensor types (input is `codes:int64[1,1,F]`, output is `audio:float32[1,1,(F-1)*480]`).
+        LiteRtSignature Sig = nullptr;
+        LiteRtGetModelSignature(Model, SigIdx, &Sig);
+        LiteRtTensor InT = nullptr;  LiteRtGetSignatureInputTensorByIndex(Sig, 0, &InT);
+        LiteRtTensor OutT = nullptr; LiteRtGetSignatureOutputTensorByIndex(Sig, 0, &OutT);
+        LiteRtRankedTensorType InType{}, OutType{};
+        LiteRtGetRankedTensorType(InT, &InType);
+        LiteRtGetRankedTensorType(OutT, &OutType);
+
+        LiteRtTensorBufferRequirements InReqs = nullptr;
+        if (!CheckStatusLog(LiteRtGetCompiledModelInputBufferRequirements(CompiledModel, SigIdx, 0, &InReqs),
+                            TEXT("GetInputBufferRequirements"), OutError)) return false;
+        LiteRtTensorBufferRequirements OutReqs = nullptr;
+        if (!CheckStatusLog(LiteRtGetCompiledModelOutputBufferRequirements(CompiledModel, SigIdx, 0, &OutReqs),
+                            TEXT("GetOutputBufferRequirements"), OutError)) return false;
+
+        if (!CheckStatusLog(LiteRtCreateManagedTensorBufferFromRequirements(Environment, &InType, InReqs, &Cache.InBuf),
+                            TEXT("CreateInputBuffer"), OutError)) return false;
+        if (!CheckStatusLog(LiteRtCreateManagedTensorBufferFromRequirements(Environment, &OutType, OutReqs, &Cache.OutBuf),
+                            TEXT("CreateOutputBuffer"), OutError))
+        {
+            LiteRtDestroyTensorBuffer(Cache.InBuf);
+            Cache.InBuf = nullptr;
+            return false;
+        }
+        Cache.SignatureIndex = Picked->SignatureIndex;
     }
+
+    LiteRtTensorBuffer InBuf  = Cache.InBuf;
+    LiteRtTensorBuffer OutBuf = Cache.OutBuf;
 
     bool bOK = true;
 
@@ -214,8 +232,7 @@ bool FInoNeuTTSDecoderSession::Decode(
         }
     }
 
-    LiteRtDestroyTensorBuffer(InBuf);
-    LiteRtDestroyTensorBuffer(OutBuf);
+    // Do NOT destroy InBuf / OutBuf — they live on Cache for the next call.
     return bOK;
 }
 

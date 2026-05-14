@@ -85,6 +85,37 @@ public:
         FString& OutError,
         TFunction<bool()> CancelCheck = nullptr);
 
+    /**
+     * Streaming synth — async-decode variant of RunSynthesis.
+     *
+     * Fires `OnTokenChunk(NewIds, bIsFinal)` zero-or-more times AS the
+     * model decodes; the final call has bIsFinal=true. The callback runs
+     * on a background thread managed by LiteRT-LM (not the caller's
+     * thread); make sure your handler is thread-safe.
+     *
+     * Behavior:
+     *   1. Creates a session (same SessionConfig pattern as RunSynthesis:
+     *      apply_prompt_template=false + optional max_output_tokens cap).
+     *   2. Runs prefill blocking.
+     *   3. Kicks off `litert_lm_session_run_decode_async` with an internal
+     *      C-callback bridge. The bridge accumulates text chunks, regex-
+     *      parses `<|speech_(\d+)|>` ids, and forwards new ids to your
+     *      OnTokenChunk handler.
+     *   4. Waits for is_final from the bridge, polling `CancelCheck` every
+     *      100 ms. On cancel, calls `litert_lm_session_cancel_process` and
+     *      then waits up to 5 s for the final callback before bailing.
+     *   5. Tears down the session.
+     *
+     * Returns true if the stream completed normally (with at least one
+     * chunk and a clean is_final), false on cancel / error.
+     */
+    bool RunStreamingSynthesis(
+        const FString& FullPrompt,
+        int32 MaxNewTokens,
+        TFunction<void(TArrayView<const int32> NewIds, bool bIsFinal)> OnTokenChunk,
+        FString& OutError,
+        TFunction<bool()> CancelCheck = nullptr);
+
     /** Tiny dummy synth (MaxNewTokens=1, near-empty prompt) to pay
      *  engine warmup cost at load time. */
     bool Warmup(FString& OutError);

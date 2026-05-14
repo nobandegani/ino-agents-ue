@@ -26,6 +26,25 @@ namespace InoNeuTTSNative
     constexpr int32 kSampleRate     = 24000;   // Hz, mono
     constexpr int32 kNumChannels    = 1;
 
+    // ----------------------------------------------------------------
+    // Streaming-decode constants. Ported from Neuphonic's
+    // `_infer_stream_ggml` reference (see `Convert/NeuTTS/scripts/test_tts.py`
+    // streaming path) and the deprecated InoNeuTtsNative module's
+    // overlap-add notes.
+    //
+    // Per chunk:
+    //   - Decode WINDOW = [last_emitted - kStreamLookback,
+    //                      last_emitted + ChunkTokens + kStreamLookforward + kStreamOverlapFrames)
+    //   - EMIT only ChunkTokens worth of audio (lookback + lookforward are
+    //     context for stable decode + crossfade with neighbours).
+    //   - Cross-fade with the previous chunk's tail using linear weights
+    //     across kStreamOverlapFrames * 480 PCM samples.
+    // ----------------------------------------------------------------
+    constexpr int32 kStreamLookback           = 50;  // frames of past context per chunk
+    constexpr int32 kStreamLookforward        = 5;   // frames of future context per chunk
+    constexpr int32 kStreamOverlapFrames      = 1;   // crossfade region length, in frames
+    constexpr int32 kStreamDefaultChunkTokens = 25;  // emit 25 frames (~0.5 s audio) per chunk by default
+
     /** Resolve the on-disk path for a backbone (.litertlm) by DisplayName
      *  OR LocalFileName. Returns `<persistent>/InoAgents/NeuTTS/<LocalFileName>`
      *  if found in UInoNeuTTSSettings::BackboneModels; empty otherwise.

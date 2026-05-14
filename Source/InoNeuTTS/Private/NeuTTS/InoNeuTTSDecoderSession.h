@@ -14,11 +14,13 @@ typedef class LiteRtEnvironmentT*    LiteRtEnvironment;
 typedef class LiteRtModelT*          LiteRtModel;
 typedef struct LiteRtOptionsT*       LiteRtOptions;
 typedef class LiteRtCompiledModelT*  LiteRtCompiledModel;
+typedef class LiteRtTensorBufferT*   LiteRtTensorBuffer;
 #else
 typedef struct LiteRtEnvironmentT*   LiteRtEnvironment;
 typedef struct LiteRtModelT*         LiteRtModel;
 typedef struct LiteRtOptionsT*       LiteRtOptions;
 typedef struct LiteRtCompiledModelT* LiteRtCompiledModel;
+typedef struct LiteRtTensorBufferT*  LiteRtTensorBuffer;
 #endif
 
 /**
@@ -93,4 +95,21 @@ private:
     };
     TArray<FSignatureInfo> Signatures;
     int32 MaxBucketFrames = 0;
+
+    /**
+     * Reusable tensor-buffer cache. Streaming synthesis hammers Decode
+     * many times against the same bucket; pre-allocating + reusing the
+     * input/output tensor buffers avoids ~1ms of allocation overhead per
+     * chunk and saves the GPU/CPU driver from churn. We cache exactly
+     * ONE bucket at a time — streaming uses one bucket steady-state, and
+     * if the caller switches bucket (e.g. one-shot after streaming) we
+     * just drop + reallocate. Destroyed in the dtor.
+     */
+    struct FCachedBuffers
+    {
+        LiteRtTensorBuffer InBuf  = nullptr;
+        LiteRtTensorBuffer OutBuf = nullptr;
+        int32              SignatureIndex = -1;  // -1 = empty
+    };
+    FCachedBuffers Cache;
 };
