@@ -111,5 +111,14 @@ public class InoNeuTTS : ModuleRules
                                      // fallback for any bundled assets).
             }
             );
+
+        // EditorFramework supplies UAssetImportData, referenced by the
+        // editor-only UPROPERTY on UInoNeuTTSVoiceAsset (used by the
+        // .inv UFactory to track the source file for Reimport).
+        // Guarded so cooked / shipping builds don't pull editor deps.
+        if (Target.bBuildEditor)
+        {
+            PrivateDependencyModuleNames.Add("EditorFramework");
+        }
     }
 }

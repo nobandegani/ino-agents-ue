@@ -9,22 +9,35 @@
 
 #include "InoNeuTTSVoiceAsset.generated.h"
 
+// Forward declare the editor-only asset-import metadata class. The full
+// include is in the .cpp (under #if WITH_EDITORONLY_DATA) and a Build.cs
+// conditional adds the EditorFramework dep only for editor targets, so
+// shipping builds compile cleanly without the symbol.
+class UAssetImportData;
+
 /**
  * Blueprint-friendly UAsset wrapper around an encoded NeuTTS voice.
  *
  * One asset = one voice. Holds the reference transcript, optional
  * pre-baked IPA phonemization, and the NeuCodec FSQ codes that
- * represent the voice. Constructed either:
+ * represent the voice.
  *
- *   (a) programmatically via `NewObject<UInoNeuTTSVoiceAsset>` +
- *       populating the fields directly (C++ / Blueprint), OR
- *   (b) at runtime by a JSON loader the caller provides (we don't
- *       ship one yet — the editor UFactory + .inv import workflow
- *       was deferred per the original Phase 2 scope).
+ * Two ways to create one:
  *
- * Passed to UInoNeuTTSSubsystem::SetActiveVoiceAsync to prime the
- * runner for synthesis. The subsystem calls ToRuntimeVoice() to
- * convert this asset to the runner-side FInoNeuTTSVoice struct.
+ *   (a) **`.inv` import** (editor) — your Python script writes the voice
+ *       data as `.json`, you rename it `.inv` and drag it into the
+ *       Content Browser. UInoNeuTTSVoiceFactory (editor-only module
+ *       InoNeuTTSEditor) parses the JSON and populates a fresh asset.
+ *       Right-click → Reimport refreshes from the source file.
+ *
+ *   (b) **Programmatic** — `NewObject<UInoNeuTTSVoiceAsset>` then fill
+ *       the fields directly (C++ / Blueprint). Useful for runtime-
+ *       generated voices.
+ *
+ * Pass the asset to UInoNeuTTSSubsystem::SetActiveVoiceAsync to prime
+ * the runner for synthesis. The subsystem calls ToRuntimeVoice()
+ * internally to convert this asset to the runner-side FInoNeuTTSVoice
+ * struct.
  *
  * Edit-time hook: changing RefText clears RefPhones so the runner
  * re-phonemizes via InoSpeakNG on next synth.
@@ -37,13 +50,15 @@ class INONEUTTS_API UInoNeuTTSVoiceAsset : public UObject
 public:
     /** Voice identifier / cache key used by FInoNeuTTSRunner. Should be
      *  short, alpha-only, and unique within a project (e.g. "jo",
-     *  "dave", "narrator"). */
+     *  "dave", "narrator"). When importing from `.inv`, defaults to the
+     *  source file's basename if the JSON omits the field. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice")
     FString Name;
 
     /** eSpeak language code matching the reference audio's language.
      *  Common values: "en-us", "en-gb", "de", "fr-fr", "es", "ja",
-     *  "multi". Drives input-text phonemization at synth time. */
+     *  "multi". Drives input-text phonemization at synth time. Defaults
+     *  to "en-us" on import when the JSON omits the field. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice")
     FString Language = TEXT("en-us");
 
@@ -62,10 +77,18 @@ public:
 
     /** NeuCodec FSQ codes (50 Hz, single codebook). Produced by the
      *  offline encoder from the reference WAV. ~650 codes for a 13-second
-     *  reference clip. Manual edits break the voice — re-encode the
-     *  source WAV to refresh. Each value is in [0, 65535]. */
+     *  reference clip. Manual edits break the voice — re-import the
+     *  source `.inv` (right-click → Reimport) instead of editing the
+     *  array directly. Each value is in [0, 65535]. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Voice|Advanced")
     TArray<int32> RefCodes;
+
+#if WITH_EDITORONLY_DATA
+    /** Tracks the source `.inv` path so right-click → Reimport works.
+     *  Editor-only — stripped from cooked / shipping builds. */
+    UPROPERTY(VisibleAnywhere, Instanced, Category = "ImportSettings")
+    TObjectPtr<UAssetImportData> AssetImportData;
+#endif
 
     /** True if Name + Language + RefCodes are all set. UMG-safe
      *  property to gate "Set Active Voice" buttons. */
@@ -81,6 +104,8 @@ public:
      *  conversion). */
     FInoNeuTTSVoice ToRuntimeVoice() const;
 
+    //~ UObject interface
+    virtual void PostInitProperties() override;
 #if WITH_EDITOR
     /** Clear RefPhones whenever RefText is edited so the runner
      *  re-phonemizes on next synth. RefCodes are NOT cleared — those
@@ -89,4 +114,10 @@ public:
      *  broken one. */
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
+#if WITH_EDITORONLY_DATA
+    /** Surface Name / Language / RefCodes count as Content Browser
+     *  columns when filtering by asset class. */
+    virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+#endif
+    //~ End UObject interface
 };

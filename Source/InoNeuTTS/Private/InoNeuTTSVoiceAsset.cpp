@@ -2,6 +2,10 @@
 
 #include "InoNeuTTSVoiceAsset.h"
 
+#if WITH_EDITORONLY_DATA
+#include "EditorFramework/AssetImportData.h"
+#endif
+
 FInoNeuTTSVoice UInoNeuTTSVoiceAsset::ToRuntimeVoice() const
 {
     FInoNeuTTSVoice V;
@@ -12,6 +16,22 @@ FInoNeuTTSVoice UInoNeuTTSVoiceAsset::ToRuntimeVoice() const
     V.RefCodes  = RefCodes;
     V.bIsValid  = IsUsable();
     return V;
+}
+
+void UInoNeuTTSVoiceAsset::PostInitProperties()
+{
+    Super::PostInitProperties();
+#if WITH_EDITORONLY_DATA
+    // Construct the import-data sub-object so UInoNeuTTSVoiceFactory has
+    // somewhere to record the source `.inv` path. Skip on the CDO — it
+    // doesn't need its own import data and creating sub-objects there
+    // would leak across instances.
+    if (!HasAnyFlags(RF_ClassDefaultObject))
+    {
+        AssetImportData = NewObject<UAssetImportData>(
+            this, TEXT("AssetImportData"));
+    }
+#endif
 }
 
 #if WITH_EDITOR
@@ -28,5 +48,22 @@ void UInoNeuTTSVoiceAsset::PostEditChangeProperty(FPropertyChangedEvent& Propert
         // offline encoder and survive a transcript fix.
         RefPhones.Reset();
     }
+}
+#endif
+
+#if WITH_EDITORONLY_DATA
+void UInoNeuTTSVoiceAsset::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+    Super::GetAssetRegistryTags(Context);
+    Context.AddTag(FAssetRegistryTag(
+        TEXT("VoiceName"), Name, FAssetRegistryTag::TT_Alphabetical));
+    Context.AddTag(FAssetRegistryTag(
+        TEXT("Language"), Language, FAssetRegistryTag::TT_Alphabetical));
+    Context.AddTag(FAssetRegistryTag(
+        TEXT("RefCodeCount"), FString::FromInt(RefCodes.Num()),
+        FAssetRegistryTag::TT_Numerical));
+    Context.AddTag(FAssetRegistryTag(
+        TEXT("HasRefPhones"), RefPhones.IsEmpty() ? TEXT("false") : TEXT("true"),
+        FAssetRegistryTag::TT_Alphabetical));
 }
 #endif
