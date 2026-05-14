@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+#include "NeuTTS/InoNeuTTSTypes.h"  // EInoNeuTTSBackend, EInoNeuTTSActivationType
+
 // Opaque LiteRT-LM engine handle, forward-declared.
 extern "C" { struct LiteRtLmEngine; }
 
@@ -33,8 +35,25 @@ class FInoNeuTTSEngineBackend
 {
 public:
     /** Load `.litertlm`, create engine. Returns nullptr on failure;
-     *  OutError describes what went wrong. */
-    static TUniquePtr<FInoNeuTTSEngineBackend> Create(const FString& ModelPath, FString& OutError);
+     *  OutError describes what went wrong.
+     *
+     *  @param ModelPath        Absolute path to `<name>.litertlm`.
+     *  @param Backend          Hardware accelerator ("cpu" / "gpu" / "npu").
+     *  @param ActivationType   F32 / F16 / I16 / I8 activation precision.
+     *  @param MaxNumTokens     Engine token budget (KV cache size). 0 =
+     *                          use the value baked into the bundle.
+     *  @param CacheDir         Custom XNNPACK cache dir. Empty = engine
+     *                          default (alongside the model file).
+     *  @param PrefillChunkSize CPU-backend prefill chunk size. 0 =
+     *                          engine default. */
+    static TUniquePtr<FInoNeuTTSEngineBackend> Create(
+        const FString& ModelPath,
+        EInoNeuTTSBackend Backend,
+        EInoNeuTTSActivationType ActivationType,
+        int32 MaxNumTokens,
+        const FString& CacheDir,
+        int32 PrefillChunkSize,
+        FString& OutError);
 
     ~FInoNeuTTSEngineBackend();
 
@@ -72,7 +91,14 @@ public:
 
 private:
     FInoNeuTTSEngineBackend() = default;
-    bool Initialize(const FString& ModelPath, FString& OutError);
+    bool Initialize(
+        const FString& ModelPath,
+        EInoNeuTTSBackend Backend,
+        EInoNeuTTSActivationType ActivationType,
+        int32 MaxNumTokens,
+        const FString& CacheDir,
+        int32 PrefillChunkSize,
+        FString& OutError);
 
     LiteRtLmEngine* Engine = nullptr;
 };

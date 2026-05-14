@@ -210,25 +210,33 @@ void UInoNeuTTSSubsystem::DispatchRunnerLoad(
     check(IsInGameThread());
 
     TWeakObjectPtr<UInoNeuTTSSubsystem> WeakThis(this);
-    const bool bWarmupBackbone = LoadedConfig.bWarmupBackboneOnLoad;
-    const bool bWarmupDecoder  = LoadedConfig.bWarmupDecoderOnLoad;
     const FString BackbonePathFull = FPaths::ConvertRelativePathToFull(BackbonePath);
     const FString DecoderPathFull  = FPaths::ConvertRelativePathToFull(DecoderPath);
+    // Snapshot the entire LoadedConfig so the worker has its own copy —
+    // Config carries all backend / activation / cache-dir / warmup knobs.
+    const FInoNeuTTSConfig ConfigCopy = LoadedConfig;
 
     UE_LOG(LogInoAgents, Log,
-        TEXT("[NeuTTS][Subsystem] dispatching runner load (backbone=%s, decoder=%s, warmup_backbone=%d, warmup_decoder=%d)"),
+        TEXT("[NeuTTS][Subsystem] dispatching runner load (backbone=%s, decoder=%s, ")
+        TEXT("backbone_backend=%d, decoder_backend=%d, activation=%d, max_tokens=%d, ")
+        TEXT("warmup_backbone=%d, warmup_decoder=%d)"),
         *BackbonePathFull, *DecoderPathFull,
-        bWarmupBackbone ? 1 : 0, bWarmupDecoder ? 1 : 0);
+        static_cast<int32>(ConfigCopy.BackboneBackend),
+        static_cast<int32>(ConfigCopy.DecoderBackend),
+        static_cast<int32>(ConfigCopy.ActivationType),
+        ConfigCopy.MaxNumTokens,
+        ConfigCopy.bWarmupBackboneOnLoad ? 1 : 0,
+        ConfigCopy.bWarmupDecoderOnLoad ? 1 : 0);
 
     Async(EAsyncExecution::ThreadPool,
-        [BackbonePathFull, DecoderPathFull, bWarmupBackbone, bWarmupDecoder, WeakThis]()
+        [BackbonePathFull, DecoderPathFull, ConfigCopy, WeakThis]()
     {
         // ============= WORKER THREAD =============
         // Do not touch WeakThis here — weak-pointer access is game-thread only.
         FString Err;
         TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> NewRunner =
             FInoNeuTTSRunner::Create(BackbonePathFull, DecoderPathFull,
-                                     bWarmupBackbone, bWarmupDecoder, Err);
+                                     ConfigCopy, Err);
 
         // Marshal back to game thread to commit the runner.
         AsyncTask(ENamedThreads::GameThread,
@@ -334,6 +342,14 @@ void UInoNeuTTSSubsystem::SetActiveVoiceAsync(
         OnReady.ExecuteIfBound(false, TEXT("Voice priming already in flight"));
         return;
     }
+    if (bSynthInFlight)
+    {
+        // Priming mutates the runner's cache; running concurrently with a
+        // synth that's reading the cache would race. Cancel first or wait.
+        OnReady.ExecuteIfBound(false,
+            TEXT("Cannot change active voice while a synth is in flight — call CancelSynthesis first"));
+        return;
+    }
 
     const FInoNeuTTSVoice Voice = VoiceAsset->ToRuntimeVoice();
     bIsPrimingVoice = true;
@@ -392,6 +408,7 @@ void UInoNeuTTSSubsystem::SynthesizeAsync(
 
     if (!Runner.IsValid())          { FailWith(TEXT("Model not loaded")); return; }
     if (!ActiveVoice.bIsValid)      { FailWith(TEXT("No active voice set — call SetActiveVoiceAsync first")); return; }
+    if (bIsPrimingVoice)            { FailWith(TEXT("Voice priming in flight — wait for OnReady before synthesizing")); return; }
     if (bSynthInFlight)             { FailWith(TEXT("Another synth is already in flight")); return; }
 
     bSynthInFlight    = true;
@@ -439,6 +456,7 @@ void UInoNeuTTSSubsystem::SynthesizeStreamAsync(
 
     if (!Runner.IsValid())          { FailWith(TEXT("Model not loaded")); return; }
     if (!ActiveVoice.bIsValid)      { FailWith(TEXT("No active voice set")); return; }
+    if (bIsPrimingVoice)            { FailWith(TEXT("Voice priming in flight — wait for OnReady before synthesizing")); return; }
     if (bSynthInFlight)             { FailWith(TEXT("Another synth is already in flight")); return; }
 
     bSynthInFlight    = true;

@@ -13,19 +13,26 @@
 TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> FInoNeuTTSRunner::Create(
     const FString& BackbonePath,
     const FString& DecoderPath,
-    bool bWarmupBackbone,
-    bool bWarmupDecoder,
+    const FInoNeuTTSConfig& Config,
     FString& OutError)
 {
     TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> R(new FInoNeuTTSRunner());
 
-    R->Engine = FInoNeuTTSEngineBackend::Create(BackbonePath, OutError);
+    R->Engine = FInoNeuTTSEngineBackend::Create(
+        BackbonePath,
+        Config.BackboneBackend,
+        Config.ActivationType,
+        Config.MaxNumTokens,
+        Config.CacheDir,
+        Config.PrefillChunkSize,
+        OutError);
     if (!R->Engine.IsValid()) return nullptr;
 
-    R->Decoder = FInoNeuTTSDecoderSession::Create(DecoderPath, OutError);
+    R->Decoder = FInoNeuTTSDecoderSession::Create(
+        DecoderPath, Config.DecoderBackend, OutError);
     if (!R->Decoder.IsValid()) return nullptr;
 
-    if (bWarmupBackbone)
+    if (Config.bWarmupBackboneOnLoad)
     {
         FString WarmupErr;
         if (!R->Engine->Warmup(WarmupErr))
@@ -35,7 +42,7 @@ TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> FInoNeuTTSRunner::Create(
                 *WarmupErr);
         }
     }
-    if (bWarmupDecoder)
+    if (Config.bWarmupDecoderOnLoad)
     {
         FString WarmupErr;
         if (!R->Decoder->Warmup(WarmupErr))

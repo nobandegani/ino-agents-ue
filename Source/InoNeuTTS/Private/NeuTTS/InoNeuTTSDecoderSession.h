@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+#include "NeuTTS/InoNeuTTSTypes.h"  // EInoNeuTTSBackend
+
 // Forward-declare the LiteRT opaque handles via the same macros LiteRT
 // uses internally — keeps this header free of `litert/c/*.h` includes
 // so consumers don't drag in the full C API surface.
@@ -42,8 +44,16 @@ class FInoNeuTTSDecoderSession
 {
 public:
     /** Load + compile. Returns empty TUniquePtr on failure; OutError
-     *  describes what went wrong. */
-    static TUniquePtr<FInoNeuTTSDecoderSession> Create(const FString& ModelPath, FString& OutError);
+     *  describes what went wrong.
+     *
+     *  @param ModelPath  Absolute path to the NeuCodec `.tflite`.
+     *  @param Backend    Hardware accelerator. Maps to the
+     *                    LiteRtHwAccelerators bit passed to
+     *                    LiteRtSetOptionsHardwareAccelerators. */
+    static TUniquePtr<FInoNeuTTSDecoderSession> Create(
+        const FString& ModelPath,
+        EInoNeuTTSBackend Backend,
+        FString& OutError);
 
     ~FInoNeuTTSDecoderSession();
 
@@ -68,7 +78,7 @@ public:
 
 private:
     FInoNeuTTSDecoderSession() = default;
-    bool Initialize(const FString& ModelPath, FString& OutError);
+    bool Initialize(const FString& ModelPath, EInoNeuTTSBackend Backend, FString& OutError);
 
     LiteRtEnvironment    Environment   = nullptr;
     LiteRtModel          Model         = nullptr;

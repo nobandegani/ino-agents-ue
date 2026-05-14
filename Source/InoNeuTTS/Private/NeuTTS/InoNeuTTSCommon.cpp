@@ -5,6 +5,8 @@
 #include "InoNeuTTSSettings.h"
 #include "NeuTTS/InoNeuTTSTypes.h"
 
+#include "litert/c/litert_common.h"  // kLiteRtHwAccelerator* enum values
+
 namespace InoNeuTTSNative
 {
 
@@ -53,6 +55,42 @@ FString NormalizePhones(const FString& Phones)
         Out.RemoveAt(Out.Len() - 1);
     }
     return Out;
+}
+
+const char* BackendToLiteRtLmString(EInoNeuTTSBackend Backend)
+{
+    switch (Backend)
+    {
+        case EInoNeuTTSBackend::Gpu: return "gpu";
+        case EInoNeuTTSBackend::Npu: return "npu";
+        case EInoNeuTTSBackend::Cpu:
+        default:                     return "cpu";
+    }
+}
+
+int32 BackendToLiteRtAcceleratorBit(EInoNeuTTSBackend Backend)
+{
+    switch (Backend)
+    {
+        case EInoNeuTTSBackend::Gpu: return kLiteRtHwAcceleratorGpu;
+        case EInoNeuTTSBackend::Npu: return kLiteRtHwAcceleratorNpu;
+        case EInoNeuTTSBackend::Cpu:
+        default:                     return kLiteRtHwAcceleratorCpu;
+    }
+}
+
+int32 ActivationTypeToInt(EInoNeuTTSActivationType ActivationType)
+{
+    // Per LiteRT-LM's executor_settings_base.h ActivationDataType enum:
+    //   F32 = 0, F16 = 1, I16 = 2, I8 = 3
+    switch (ActivationType)
+    {
+        case EInoNeuTTSActivationType::F16: return 1;
+        case EInoNeuTTSActivationType::I16: return 2;
+        case EInoNeuTTSActivationType::I8:  return 3;
+        case EInoNeuTTSActivationType::F32:
+        default:                            return 0;
+    }
 }
 
 } // namespace InoNeuTTSNative

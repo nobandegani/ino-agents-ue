@@ -2,6 +2,8 @@
 
 #include "InoNeuTTSDecoderSession.h"
 
+#include "InoNeuTTSCommon.h"  // BackendToLiteRtAcceleratorBit
+
 #include "InoAgentsLog.h"
 
 #include "litert/c/litert_common.h"
@@ -28,10 +30,10 @@ namespace
 }
 
 TUniquePtr<FInoNeuTTSDecoderSession> FInoNeuTTSDecoderSession::Create(
-    const FString& ModelPath, FString& OutError)
+    const FString& ModelPath, EInoNeuTTSBackend Backend, FString& OutError)
 {
     TUniquePtr<FInoNeuTTSDecoderSession> Inst(new FInoNeuTTSDecoderSession());
-    if (!Inst->Initialize(ModelPath, OutError)) return nullptr;
+    if (!Inst->Initialize(ModelPath, Backend, OutError)) return nullptr;
     return Inst;
 }
 
@@ -43,7 +45,8 @@ FInoNeuTTSDecoderSession::~FInoNeuTTSDecoderSession()
     if (Environment)   LiteRtDestroyEnvironment(Environment);
 }
 
-bool FInoNeuTTSDecoderSession::Initialize(const FString& ModelPath, FString& OutError)
+bool FInoNeuTTSDecoderSession::Initialize(
+    const FString& ModelPath, EInoNeuTTSBackend Backend, FString& OutError)
 {
     if (!CheckStatusLog(LiteRtCreateEnvironment(0, nullptr, &Environment),
                         TEXT("CreateEnvironment"), OutError)) return false;
@@ -86,11 +89,17 @@ bool FInoNeuTTSDecoderSession::Initialize(const FString& ModelPath, FString& Out
         TEXT("[NeuTTS][Decoder] %d signatures, buckets up to f%d"),
         Signatures.Num(), MaxBucketFrames);
 
-    // Compile (CPU). Future: expose other accelerators via Config.
+    // Compile with the caller-selected accelerator.
     if (!CheckStatusLog(LiteRtCreateOptions(&Options),
                         TEXT("CreateOptions"), OutError)) return false;
-    CheckStatusLog(LiteRtSetOptionsHardwareAccelerators(Options, kLiteRtHwAcceleratorCpu),
+    const int32 AcceleratorBit = InoNeuTTSNative::BackendToLiteRtAcceleratorBit(Backend);
+    CheckStatusLog(LiteRtSetOptionsHardwareAccelerators(
+                       Options,
+                       static_cast<LiteRtHwAcceleratorSet>(AcceleratorBit)),
                    TEXT("SetOptionsHardwareAccelerators"), OutError);
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][Decoder] compiling with accelerator bit 0x%x"),
+        AcceleratorBit);
     if (!CheckStatusLog(LiteRtCreateCompiledModel(Environment, Model, Options, &CompiledModel),
                         TEXT("CreateCompiledModel"), OutError)) return false;
 

@@ -62,6 +62,54 @@ struct FInoNeuTTSVoice
 };
 
 // ============================================================================
+// Hardware backend + activation-precision selectors.
+// ============================================================================
+
+/**
+ * Which hardware accelerator to drive inference on.
+ *
+ * - Backbone (LiteRT-LM): maps to the `backend_str` arg of
+ *   `litert_lm_engine_settings_create` ("cpu"/"gpu"/"npu").
+ * - Decoder (bare LiteRT): maps to a `LiteRtHwAccelerators` bit
+ *   for `LiteRtSetOptionsHardwareAccelerators`.
+ *
+ * Availability depends on the platform + the InoLiteRT build. CPU is
+ * always available. GPU is Win64-via-DirectML / Android-via-OpenCL+WebGPU
+ * / Mac-via-Metal — see Plugins/InoLiteRT/CLAUDE.md for the per-platform
+ * matrix. NPU is reserved for future Android NPU support.
+ *
+ * Pick CPU as the safe default. Switch to GPU once you've verified the
+ * model works on the target GPU (NeuTTS Nano Q8 is small enough to be
+ * latency-bound on CPU anyway — GPU mainly helps on the FP16/FP32
+ * variants).
+ */
+UENUM(BlueprintType)
+enum class EInoNeuTTSBackend : uint8
+{
+    Cpu  UMETA(DisplayName = "CPU"),
+    Gpu  UMETA(DisplayName = "GPU"),
+    Npu  UMETA(DisplayName = "NPU"),
+};
+
+/**
+ * Activation precision for the backbone (LiteRT-LM). Lower precision =
+ * faster + less RAM but more quantization noise. The actual model
+ * weights' dtype is intrinsic to the `.litertlm` file; this knob only
+ * controls how activations are stored / computed.
+ *
+ * F16 typically halves activation memory vs F32 with no audible quality
+ * loss on NeuTTS Nano. Try F32 first, drop to F16 if RAM-pressed.
+ */
+UENUM(BlueprintType)
+enum class EInoNeuTTSActivationType : uint8
+{
+    F32  UMETA(DisplayName = "Float32 (full precision)"),
+    F16  UMETA(DisplayName = "Float16 (half precision)"),
+    I16  UMETA(DisplayName = "Int16"),
+    I8   UMETA(DisplayName = "Int8 (most quantized)"),
+};
+
+// ============================================================================
 // Model registry entries — Project Settings → Plugins → InoNeuTTS.
 // ============================================================================
 
@@ -170,13 +218,59 @@ struct FInoNeuTTSConfig
 {
     GENERATED_BODY()
 
+    // ---------- Model selection ----------
+
     /** Backbone DisplayName (or LocalFileName). Empty = first BackboneModels entry. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Models")
     FString BackboneModelName;
 
     /** Decoder DisplayName (or LocalFileName). Empty = first DecoderModels entry. */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Models")
     FString DecoderModelName;
+
+    // ---------- Hardware backend ----------
+
+    /** Which accelerator the BACKBONE (LiteRT-LM) runs on. Defaults to
+     *  CPU. Map to `backend_str` of litert_lm_engine_settings_create. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backend")
+    EInoNeuTTSBackend BackboneBackend = EInoNeuTTSBackend::Cpu;
+
+    /** Which accelerator the DECODER (bare LiteRT) runs on. Defaults to
+     *  CPU. Maps to LiteRtHwAccelerators bits for
+     *  LiteRtSetOptionsHardwareAccelerators. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backend")
+    EInoNeuTTSBackend DecoderBackend = EInoNeuTTSBackend::Cpu;
+
+    // ---------- Backbone engine tuning ----------
+
+    /** Activation precision for the backbone. F16 halves memory vs F32
+     *  with negligible quality loss on NeuTTS Nano; lower precisions
+     *  trade more quantization noise for less RAM. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backbone")
+    EInoNeuTTSActivationType ActivationType = EInoNeuTTSActivationType::F32;
+
+    /** Engine-level token budget (KV cache size). 0 = use the value
+     *  baked into the .litertlm bundle (2048 for the converted NeuTTS
+     *  Nano). Set lower to reduce KV memory at the cost of max output
+     *  length. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backbone",
+              meta = (ClampMin = "0"))
+    int32 MaxNumTokens = 0;
+
+    /** Custom XNNPACK / kernel cache directory. Empty = engine default
+     *  (next to the model file). Useful if you want a single shared
+     *  cache for multiple voices or to clear cache between project
+     *  versions. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backbone")
+    FString CacheDir;
+
+    /** Prefill chunk size (CPU backend only, dynamic models). 0 =
+     *  engine default. Tune for prefill latency on long prompts. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoNeuTTS|Backbone",
+              meta = (ClampMin = "0"))
+    int32 PrefillChunkSize = 0;
+
+    // ---------- Warmups ----------
 
     /** Drive a tiny dummy generate through the backbone at load time to
      *  pay JIT / kernel-selection / KV allocation jitter once. Removes

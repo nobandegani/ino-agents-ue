@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+#include "NeuTTS/InoNeuTTSTypes.h"  // EInoNeuTTSBackend, EInoNeuTTSActivationType
+
 namespace InoNeuTTSNative
 {
     // ----------------------------------------------------------------
@@ -43,4 +45,22 @@ namespace InoNeuTTSNative
      *  eSpeak occasionally emits leading/trailing whitespace per clause;
      *  if not normalized, BPE tokenization drifts vs the vendor reference. */
     FString NormalizePhones(const FString& Phones);
+
+    // ----------------------------------------------------------------
+    // Backend / activation enum → vendor C API mappings.
+    // ----------------------------------------------------------------
+
+    /** Convert EInoNeuTTSBackend → the static string LiteRT-LM expects
+     *  in `litert_lm_engine_settings_create`'s backend_str arg. */
+    const char* BackendToLiteRtLmString(EInoNeuTTSBackend Backend);
+
+    /** Convert EInoNeuTTSBackend → the LiteRtHwAccelerators bit used by
+     *  `LiteRtSetOptionsHardwareAccelerators`. Returns int32 so callers
+     *  don't need to include the bare LiteRT headers here. */
+    int32 BackendToLiteRtAcceleratorBit(EInoNeuTTSBackend Backend);
+
+    /** Convert EInoNeuTTSActivationType → the int code LiteRT-LM expects
+     *  in `litert_lm_engine_settings_set_activation_data_type` (0=F32,
+     *  1=F16, 2=I16, 3=I8 per executor_settings_base.h). */
+    int32 ActivationTypeToInt(EInoNeuTTSActivationType ActivationType);
 }

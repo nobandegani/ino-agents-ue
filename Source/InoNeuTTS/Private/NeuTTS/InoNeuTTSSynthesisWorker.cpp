@@ -65,18 +65,22 @@ FInoNeuTTSResult RunSynthesis(
     if (IsCancelled(CancelFlag)) { Result.ErrorMessage = TEXT("Cancelled"); return Result; }
 
     // -----------------------------------------------------------------
-    // 1. Ensure the voice is primed in the runner's cache.
-    //    Subsystem normally calls SetActiveVoiceAsync to pre-prime;
-    //    inline priming is the fallback for callers that skip that.
+    // 1. Require the voice to already be primed in the runner's cache.
+    //    The subsystem enforces this contract (rejects SynthesizeAsync
+    //    when bIsPrimingVoice == true), and the inline-fallback prime
+    //    that used to live here is gone because it could race with a
+    //    concurrent SetActiveVoiceAsync worker mutating the same cache.
+    //    Callers MUST await SetActiveVoiceAsync's OnReady before
+    //    invoking synth.
     // -----------------------------------------------------------------
     if (!Runner->HasCachedVoice(Voice.Name))
     {
-        FString PrimeErr;
-        if (!Runner->PrimeVoice(Voice, PrimeErr))
-        {
-            Result.ErrorMessage = FString::Printf(TEXT("PrimeVoice failed: %s"), *PrimeErr);
-            return Result;
-        }
+        Result.ErrorMessage = FString::Printf(
+            TEXT("Voice '%s' is not primed on the runner. Call ")
+            TEXT("UInoNeuTTSSubsystem::SetActiveVoiceAsync and wait for OnReady ")
+            TEXT("before SynthesizeAsync."),
+            *Voice.Name);
+        return Result;
     }
 
     // -----------------------------------------------------------------

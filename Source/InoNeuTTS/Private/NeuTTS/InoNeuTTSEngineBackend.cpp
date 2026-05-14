@@ -2,6 +2,8 @@
 
 #include "InoNeuTTSEngineBackend.h"
 
+#include "InoNeuTTSCommon.h"  // BackendToLiteRtLmString, ActivationTypeToInt
+
 #include "InoAgentsLog.h"
 
 #include "HAL/PlatformTime.h"
@@ -10,10 +12,20 @@
 #include "litert/lm/engine.h"
 
 TUniquePtr<FInoNeuTTSEngineBackend> FInoNeuTTSEngineBackend::Create(
-    const FString& ModelPath, FString& OutError)
+    const FString& ModelPath,
+    EInoNeuTTSBackend Backend,
+    EInoNeuTTSActivationType ActivationType,
+    int32 MaxNumTokens,
+    const FString& CacheDir,
+    int32 PrefillChunkSize,
+    FString& OutError)
 {
     TUniquePtr<FInoNeuTTSEngineBackend> Inst(new FInoNeuTTSEngineBackend());
-    if (!Inst->Initialize(ModelPath, OutError)) return nullptr;
+    if (!Inst->Initialize(ModelPath, Backend, ActivationType, MaxNumTokens,
+                          CacheDir, PrefillChunkSize, OutError))
+    {
+        return nullptr;
+    }
     return Inst;
 }
 
@@ -22,12 +34,20 @@ FInoNeuTTSEngineBackend::~FInoNeuTTSEngineBackend()
     if (Engine) litert_lm_engine_delete(Engine);
 }
 
-bool FInoNeuTTSEngineBackend::Initialize(const FString& ModelPath, FString& OutError)
+bool FInoNeuTTSEngineBackend::Initialize(
+    const FString& ModelPath,
+    EInoNeuTTSBackend Backend,
+    EInoNeuTTSActivationType ActivationType,
+    int32 MaxNumTokens,
+    const FString& CacheDir,
+    int32 PrefillChunkSize,
+    FString& OutError)
 {
     const FTCHARToUTF8 PathUtf8(*ModelPath);
+    const char* BackendStr = InoNeuTTSNative::BackendToLiteRtLmString(Backend);
 
     LiteRtLmEngineSettings* Settings = litert_lm_engine_settings_create(
-        PathUtf8.Get(), /*backend_str=*/"cpu",
+        PathUtf8.Get(), BackendStr,
         /*vision_backend_str=*/nullptr,
         /*audio_backend_str=*/nullptr);
     if (!Settings)
@@ -36,8 +56,37 @@ bool FInoNeuTTSEngineBackend::Initialize(const FString& ModelPath, FString& OutE
         UE_LOG(LogInoAgents, Error, TEXT("[NeuTTS][Engine] %s"), *OutError);
         return false;
     }
-    // Match the bundle's baked max_num_tokens (2048 — see build_litertlm.py).
-    litert_lm_engine_settings_set_max_num_tokens(Settings, 2048);
+
+    // Activation precision (always set — F32 == 0 == LiteRT-LM default,
+    // but explicit is clearer than implicit).
+    litert_lm_engine_settings_set_activation_data_type(
+        Settings, InoNeuTTSNative::ActivationTypeToInt(ActivationType));
+
+    // Override max_num_tokens only when the caller set a non-zero value.
+    // Zero means "use the value baked into the .litertlm bundle"
+    // (2048 for the converted NeuTTS Nano — see build_litertlm.py).
+    if (MaxNumTokens > 0)
+    {
+        litert_lm_engine_settings_set_max_num_tokens(Settings, MaxNumTokens);
+    }
+
+    if (!CacheDir.IsEmpty())
+    {
+        const FTCHARToUTF8 CacheDirUtf8(*CacheDir);
+        litert_lm_engine_settings_set_cache_dir(Settings, CacheDirUtf8.Get());
+    }
+
+    if (PrefillChunkSize > 0)
+    {
+        litert_lm_engine_settings_set_prefill_chunk_size(Settings, PrefillChunkSize);
+    }
+
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][Engine] creating engine (backend=%s, activation=%d, ")
+        TEXT("max_tokens=%d, prefill_chunk=%d, cache_dir='%s')"),
+        ANSI_TO_TCHAR(BackendStr),
+        InoNeuTTSNative::ActivationTypeToInt(ActivationType),
+        MaxNumTokens, PrefillChunkSize, *CacheDir);
 
     const double T0 = FPlatformTime::Seconds();
     Engine = litert_lm_engine_create(Settings);

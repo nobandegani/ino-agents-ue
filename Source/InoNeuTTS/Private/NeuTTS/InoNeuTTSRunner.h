@@ -33,12 +33,17 @@ class FInoNeuTTSEngineBackend;
 class FInoNeuTTSRunner
 {
 public:
-    /** Load both models + optional warmups. Returns nullptr on failure. */
+    /** Load both models + optional warmups. Returns nullptr on failure.
+     *
+     *  Takes the full FInoNeuTTSConfig (instead of separate params) so
+     *  adding new tuning knobs (Backend, ActivationType, MaxNumTokens,
+     *  CacheDir, PrefillChunkSize) doesn't churn the signature on every
+     *  bump. The Config's ModelName fields are unused here — the caller
+     *  has already resolved them to the BackbonePath / DecoderPath args. */
     static TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> Create(
         const FString& BackbonePath,
         const FString& DecoderPath,
-        bool bWarmupBackbone,
-        bool bWarmupDecoder,
+        const FInoNeuTTSConfig& Config,
         FString& OutError);
 
     ~FInoNeuTTSRunner();
