@@ -6,6 +6,7 @@
 
 #include "InoAgentsLog.h"
 
+#include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 
