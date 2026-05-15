@@ -31,7 +31,12 @@ const FInoLiteRtLmModelEntry* UInoLiteRtLmSettings::FindModel(
 {
     if (NameOrFileName.IsEmpty())
     {
-        return nullptr;
+        // Empty → pick first registry entry, matching InoNeuTTS's
+        // FindBackbone/FindDecoder forgiving lookup. Lets callers leave
+        // FInoLiteRtLmModelConfig::ModelFileName at its default empty
+        // value and "just get whatever's configured first" rather than
+        // having to know the exact LocalFileName up front.
+        return Models.Num() > 0 ? &Models[0] : nullptr;
     }
 
     // Prefer exact file-name match — if someone has a model named

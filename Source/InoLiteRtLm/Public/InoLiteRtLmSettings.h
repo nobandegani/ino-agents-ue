@@ -53,7 +53,10 @@ public:
 
     /** Look up a model entry by either its DisplayName ("Gemma 4 E2B") or
      *  its LocalFileName ("gemma-4-E2B-it.litertlm"). Case-insensitive.
-     *  Returns nullptr if no entry matches either field.
+     *  Empty `NameOrFileName` returns the first registry entry (matches
+     *  the forgiving lookup InoNeuTTS uses for its backbone/decoder
+     *  arrays). Returns nullptr if the registry is empty OR if a
+     *  non-empty name doesn't match any entry.
      *
      *  This is the forgiving lookup used by
      *  UInoLiteRtLmSubsystem::LoadModelAsync so Blueprint users don't

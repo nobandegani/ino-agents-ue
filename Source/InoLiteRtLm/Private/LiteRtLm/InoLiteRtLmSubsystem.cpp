@@ -125,10 +125,19 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
 
     if (Entry == nullptr)
     {
-        const FString Err = FString::Printf(
-            TEXT("Model '%s' is not in the registry. Add an entry in Project Settings "
-                 "→ Plugins → InoLiteRtLm → Models (match either DisplayName or LocalFileName)."),
-            *Config.ModelFileName);
+        // Two failure modes share this branch:
+        //   1. ModelFileName is set but doesn't match any entry → bad name.
+        //   2. ModelFileName is empty AND the Models array is empty → no
+        //      models configured at all. FindModel("") returns nullptr in
+        //      that case (rather than first-of-empty-array). Print a
+        //      tailored message so the user knows what to do.
+        const FString Err = Config.ModelFileName.IsEmpty()
+            ? FString(TEXT("No models configured. Add at least one entry in Project Settings "
+                           "→ Plugins → InoLiteRtLm → Models."))
+            : FString::Printf(
+                TEXT("Model '%s' is not in the registry. Add an entry in Project Settings "
+                     "→ Plugins → InoLiteRtLm → Models (match either DisplayName or LocalFileName)."),
+                *Config.ModelFileName);
         UE_LOG(LogInoAgents, Error, TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
         OnLoaded.ExecuteIfBound(false, Err);
         return;

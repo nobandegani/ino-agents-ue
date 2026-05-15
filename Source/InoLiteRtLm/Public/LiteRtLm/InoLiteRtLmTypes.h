@@ -135,9 +135,13 @@ struct FInoLiteRtLmModelConfig
 
     // ----- Model file + backend -----
 
-    /** Filename of the .litertlm model file. */
+    /** Filename of the .litertlm model file. Empty = pick the first
+     *  entry in Project Settings → Plugins → InoLiteRtLm → Models
+     *  (matches the forgiving lookup pattern InoNeuTTS uses for its
+     *  backbone/decoder names). Set to a DisplayName or LocalFileName
+     *  from the registry to load a specific bundle. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
-    FString ModelFileName = TEXT("gemma-4-E4B-it.litertlm");
+    FString ModelFileName;
 
     /** Which backend the engine should use. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
