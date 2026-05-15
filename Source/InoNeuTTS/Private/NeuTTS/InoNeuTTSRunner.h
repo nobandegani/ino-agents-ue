@@ -77,4 +77,11 @@ private:
     FString CachedVoiceName;
     FString CachedRefPhones;
     FString CachedSpeechBlock;
+
+    /** True iff Config.bWarmupBackboneOnLoad was set at Create time and
+     *  the backbone hasn't been warmed yet. Cleared after the first
+     *  successful PrimeVoice triggers Engine->WarmupForVoice. Decoder
+     *  warmup is unaffected — it can warm immediately at Create time
+     *  with an all-zero codes vector since it has no per-voice state. */
+    bool bBackboneWarmupPending = false;
 };

@@ -2,7 +2,8 @@
 
 #include "InoNeuTTSEngineBackend.h"
 
-#include "InoNeuTTSCommon.h"  // BackendToLiteRtLmString, ActivationTypeToInt
+#include "InoNeuTTSCommon.h"        // BackendToLiteRtLmString, ActivationTypeToInt
+#include "InoNeuTTSPromptBuilder.h"  // BuildSynthesisPrompt — used by WarmupForVoice
 
 #include "InoAgentsLog.h"
 
@@ -453,10 +454,32 @@ bool FInoNeuTTSEngineBackend::RunStreamingSynthesis(
 bool FInoNeuTTSEngineBackend::Warmup(FString& OutError)
 {
     // Minimal prompt + MaxNewTokens=1 to exercise the prefill + first
-    // decode kernel without burning seconds on full generation.
+    // decode kernel without burning seconds on full generation. The
+    // <|SPEECH_GENERATION_START|> is unaccompanied by any speech tokens
+    // here — that's an unusual context vs real synth but it's still a
+    // valid path for warming the kernels.
     static const FString DummyPrompt =
         TEXT("user: Convert the text to speech:<|TEXT_PROMPT_START|> ")
         TEXT("<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>");
     TArray<int32> Throwaway;
     return RunSynthesis(DummyPrompt, /*MaxNewTokens=*/1, Throwaway, OutError, nullptr);
+}
+
+bool FInoNeuTTSEngineBackend::WarmupForVoice(
+    const FString& RefPhones,
+    const FString& SpeechBlock,
+    FString& OutError)
+{
+    // Real-shape warmup. Build the same prompt structure a real synth
+    // uses (prefix + RefPhones + " " + empty-input + suffix +
+    // SpeechBlock) and run a single decode step through it. The empty
+    // input segment keeps prefill cheap while still exercising the
+    // full kernel path actual synth calls take.
+    const FString WarmupPrompt = InoNeuTTSNative::BuildSynthesisPrompt(
+        RefPhones, /*InputPhones=*/FString(), SpeechBlock);
+    TArray<int32> Throwaway;
+    UE_LOG(LogInoAgents, Log,
+        TEXT("[NeuTTS][Engine] WarmupForVoice — prompt %d chars (RefPhones=%d, SpeechBlock=%d)"),
+        WarmupPrompt.Len(), RefPhones.Len(), SpeechBlock.Len());
+    return RunSynthesis(WarmupPrompt, /*MaxNewTokens=*/1, Throwaway, OutError, nullptr);
 }

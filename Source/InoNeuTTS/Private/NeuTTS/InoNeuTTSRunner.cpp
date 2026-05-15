@@ -32,18 +32,20 @@ TSharedPtr<FInoNeuTTSRunner, ESPMode::ThreadSafe> FInoNeuTTSRunner::Create(
         DecoderPath, Config.DecoderBackend, OutError);
     if (!R->Decoder.IsValid()) return nullptr;
 
-    if (Config.bWarmupBackboneOnLoad)
-    {
-        FString WarmupErr;
-        if (!R->Engine->Warmup(WarmupErr))
-        {
-            UE_LOG(LogInoAgents, Warning,
-                TEXT("[NeuTTS][Runner] backbone warmup failed (non-fatal): %s"),
-                *WarmupErr);
-        }
-    }
+    // Backbone warmup is DEFERRED until the first successful PrimeVoice.
+    // Warming at Create time would require running synth without any
+    // reference voice — an unusual context that doesn't match real
+    // synth calls. Instead, we stash the flag here and let PrimeVoice
+    // fire WarmupForVoice with the just-cached voice's real ref phones
+    // + speech-tokens block. Slight one-time latency hit on the first
+    // SetActiveVoiceAsync, but the first user-visible synth becomes
+    // jitter-free on exactly the kernel path it'll actually take.
+    R->bBackboneWarmupPending = Config.bWarmupBackboneOnLoad;
+
     if (Config.bWarmupDecoderOnLoad)
     {
+        // Decoder warmup is voice-agnostic (operates on FSQ codes only),
+        // so it stays at Create time. Smallest bucket + all-zero codes.
         FString WarmupErr;
         if (!R->Decoder->Warmup(WarmupErr))
         {
@@ -97,6 +99,27 @@ bool FInoNeuTTSRunner::PrimeVoice(const FInoNeuTTSVoice& Voice, FString& OutErro
         TEXT("[NeuTTS][Runner] primed voice '%s' (%d RefCodes, %d ref-phoneme chars, %d block chars)"),
         *CachedVoiceName, Voice.RefCodes.Num(), CachedRefPhones.Len(),
         CachedSpeechBlock.Len());
+
+    // Run deferred backbone warmup on this voice's real ref phones +
+    // speech-tokens block, once. Failure is non-fatal — the first user
+    // synth will pay the warmup cost itself if this trips a vendor bug.
+    // Always clear the flag so we don't retry on subsequent prime calls
+    // (a subsequent prime swaps the voice cache; warming each new voice
+    // would multiply load latency for no benefit — kernel paths are
+    // mostly voice-shape-independent once the first synth has primed
+    // them).
+    if (bBackboneWarmupPending && Engine.IsValid())
+    {
+        bBackboneWarmupPending = false;
+        FString WarmupErr;
+        if (!Engine->WarmupForVoice(CachedRefPhones, CachedSpeechBlock, WarmupErr))
+        {
+            UE_LOG(LogInoAgents, Warning,
+                TEXT("[NeuTTS][Runner] backbone warmup failed (non-fatal): %s"),
+                *WarmupErr);
+        }
+    }
+
     return true;
 }
 

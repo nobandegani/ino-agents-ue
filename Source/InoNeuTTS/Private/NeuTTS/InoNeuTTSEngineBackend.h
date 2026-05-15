@@ -117,8 +117,26 @@ public:
         TFunction<bool()> CancelCheck = nullptr);
 
     /** Tiny dummy synth (MaxNewTokens=1, near-empty prompt) to pay
-     *  engine warmup cost at load time. */
+     *  engine warmup cost at load time.
+     *
+     *  Prefer `WarmupForVoice` when a primed voice is available — that
+     *  variant feeds the model a real-shape prompt (with reference
+     *  phones + speech-tokens block) and warms the kernel path actual
+     *  synth calls take. This baseline `Warmup` is kept for callers
+     *  that want to warm without any voice context. */
     bool Warmup(FString& OutError);
+
+    /** Real-shape warmup: builds the full synthesis prompt (prefix +
+     *  RefPhones + " " + empty-input + suffix + SpeechBlock) and runs
+     *  MaxNewTokens=1 through it. This pays JIT / KV-allocation /
+     *  kernel-selection cost on the EXACT path real synths use, so the
+     *  first user-visible synth is jitter-free. Called by
+     *  FInoNeuTTSRunner::PrimeVoice on the first successful prime when
+     *  bWarmupBackboneOnLoad was true at runner construction. */
+    bool WarmupForVoice(
+        const FString& RefPhones,
+        const FString& SpeechBlock,
+        FString& OutError);
 
 private:
     FInoNeuTTSEngineBackend() = default;
