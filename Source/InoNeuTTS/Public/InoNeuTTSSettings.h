@@ -71,7 +71,7 @@ public:
 
     /**
      * Directory where downloaded model files are stored:
-     *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/
+     *   <FPaths::ProjectPersistentDownloadDir()>/ino-agents/neu-tts/
      *
      * Per-user, sandboxed on mobile, persists across project reinstalls.
      * Backbones and decoders share this directory; their LocalFileName

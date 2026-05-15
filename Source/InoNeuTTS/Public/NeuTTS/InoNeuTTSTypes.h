@@ -118,7 +118,7 @@ enum class EInoNeuTTSActivationType : uint8
  * on-disk filename to a download URL so the subsystem can auto-download
  * on first use. Same shape as InoLiteRtLm's model entry.
  *
- * File lands at `<FPaths::ProjectPersistentDownloadDir()>/InoAgents/NeuTTS/<LocalFileName>`.
+ * File lands at `<FPaths::ProjectPersistentDownloadDir()>/ino-agents/neu-tts/<LocalFileName>`.
  * ExpectedSha256 (when set) is verified after download AND against any
  * existing cached file, so a corrupt cached file is re-downloaded
  * automatically.
@@ -174,7 +174,7 @@ struct FInoNeuTTSBackboneEntry
  * backbone entry, minus the language field — NeuCodec is
  * language-agnostic (operates on FSQ codes, not text).
  *
- * File lands at the same `<persistent>/InoAgents/NeuTTS/<LocalFileName>`
+ * File lands at the same `<persistent>/ino-agents/neu-tts/<LocalFileName>`
  * directory as backbones.
  */
 USTRUCT(BlueprintType)

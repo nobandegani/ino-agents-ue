@@ -49,8 +49,12 @@ const FInoNeuTTSDecoderEntry* UInoNeuTTSSettings::FindDecoder(const FString& Nam
 
 FString UInoNeuTTSSettings::GetModelsDir()
 {
+    // Kebab-case path matches the sibling InoLiteRtLm convention
+    // (`ino-agents/lite-rt-lm/`). Existing installs with files under the
+    // previous PascalCase path will re-download into the new location on
+    // first load.
     return FPaths::Combine(FPaths::ProjectPersistentDownloadDir(),
-                           TEXT("InoAgents"), TEXT("NeuTTS"));
+                           TEXT("ino-agents"), TEXT("neu-tts"));
 }
 
 FString UInoNeuTTSSettings::ResolveLocalPath(const FString& LocalFileName)

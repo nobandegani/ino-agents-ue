@@ -46,7 +46,7 @@ namespace InoNeuTTSNative
     constexpr int32 kStreamDefaultChunkTokens = 25;  // emit 25 frames (~0.5 s audio) per chunk by default
 
     /** Resolve the on-disk path for a backbone (.litertlm) by DisplayName
-     *  OR LocalFileName. Returns `<persistent>/InoAgents/NeuTTS/<LocalFileName>`
+     *  OR LocalFileName. Returns `<persistent>/ino-agents/neu-tts/<LocalFileName>`
      *  if found in UInoNeuTTSSettings::BackboneModels; empty otherwise.
      *  Does NOT check that the file exists on disk. */
     FString ResolveBackbonePath(const FString& NameOrFileName = FString());
