@@ -65,8 +65,9 @@ ENUM_CLASS_FLAGS(EInoLiteRtLmSentenceSplit);
  * sentence-split punctuation): the single space / newline immediately after
  * a closed tag gets dropped, so "[hello] world" cleans to "world".
  *
- * Default: SquareBrackets | CurlyBraces (matches the original hard-coded
- * behaviour from before this flag existed).
+ * Default: SquareBrackets only (see TagStripFlags below for why curly
+ * stripping is no longer on by default — it silently ate legitimate
+ * brace-containing model output).
  */
 UENUM(BlueprintType, meta = (Bitflags, UseEnumValuesAsMaskValuesInEditor = "true"))
 enum class EInoLiteRtLmTagStrip : uint8
@@ -433,9 +434,15 @@ public:
      * Bitmask of delimiter pairs that get stripped from CleanText surfaces.
      * See EInoLiteRtLmTagStrip for the flag set.
      *
-     * Default: SquareBrackets | CurlyBraces (matches the pre-flag hardcoded
-     * behavior — OnToken.CleanText / OnSentence.CleanText had [bracket] and
-     * {curly} tags stripped unconditionally).
+     * Default: SquareBrackets only. Square-bracket stage directions like
+     * "[cheerfully]" are the documented TTS-hint use case. CurlyBraces is
+     * deliberately NOT default: the LiteRT-LM C API already parses the
+     * model's function-call / channel protocol tokens out of `content`
+     * before it reaches us, so curly stripping serves no protocol
+     * purpose here and would silently delete legitimate model output
+     * containing braces (JSON, code, set notation) from CleanText. Enable
+     * CurlyBraces explicitly via SetTagStripFlags only if your model is
+     * configured to emit {curly} stage directions.
      *
      * Changing mid-stream is allowed; the change takes effect on the NEXT
      * character processed. Already-accumulated tag state (e.g. if we are
@@ -445,8 +452,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="InoAgents|LiteRT-LM",
               meta = (Bitmask, BitmaskEnum = "/Script/InoLiteRtLm.EInoLiteRtLmTagStrip"))
     int32 TagStripFlags =
-          static_cast<int32>(EInoLiteRtLmTagStrip::SquareBrackets)
-        | static_cast<int32>(EInoLiteRtLmTagStrip::CurlyBraces);
+          static_cast<int32>(EInoLiteRtLmTagStrip::SquareBrackets);
 
     /** Replace the current tag-strip flags. Pass any combination of
      *  EInoLiteRtLmTagStrip values OR'd into an int32. */
@@ -569,6 +575,15 @@ private:
      *  sentence is broadcast via OnSentence and the buffer shifts to
      *  whatever follows the delimiter. */
     FString SentenceBuffer;
+
+    /** Incremental scan cursor into SentenceBuffer. Each token only
+     *  appends to the end, so once a region has been scanned with no
+     *  delimiter it never needs re-scanning — only the (at most 2-char)
+     *  straddle at the old tail. Without this, AccumulateTokenForSentence
+     *  re-Find()s the whole growing buffer per token → O(n^2) over a
+     *  long reply. Reset to 0 whenever SentenceBuffer is trimmed or
+     *  cleared. */
+    int32 SentenceScanOffset = 0;
 
     // Worker owns the pinned thread + native conversation + native config.
     // TUniquePtr because FInoLiteRtLmConversationWorker is a plain C++ class,

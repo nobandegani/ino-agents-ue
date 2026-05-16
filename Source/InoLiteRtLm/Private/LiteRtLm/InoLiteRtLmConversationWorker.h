@@ -126,9 +126,12 @@ public:
      * which unblocks the worker thread's StreamEvent wait and causes
      * it to dispatch OnError("Cancelled by caller").
      *
-     * Safe to call with no stream in flight (no-op). Safe to call from
-     * any thread, though the public API only ever calls it from the
-     * game thread.
+     * Safe to call with no stream in flight: it latches the cancel and
+     * issues an idempotent native cancel; ProcessMessage clears the
+     * latch before the next dequeued message, so queued-but-not-started
+     * messages still run (Cancel does not drain the queue). Safe to
+     * call from any thread, though the public API only ever calls it
+     * from the game thread.
      */
     void Cancel();
 

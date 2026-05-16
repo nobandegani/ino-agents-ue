@@ -14,6 +14,32 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
+namespace
+{
+    /**
+     * Defuse Gemma-4 control-token digraphs in untrusted strings before
+     * they are injected into the prompt. The model's chat template
+     * renders user / context content verbatim (`{{ item['text'] | trim }}`
+     * — no escaping), so a literal "<|turn>", "<|tool_call>",
+     * "<|tool_response>", "<|channel>", "<|\"|>", "<|think|>" (or the
+     * matching "<...|>" closers) embedded in game state or player text
+     * would spoof a turn / tool / channel boundary in the token stream.
+     *
+     * The SentencePiece tokenizer only matches the exact, uninterrupted
+     * control strings, so breaking the contiguous "<|" and "|>" digraphs
+     * with a space fully neutralises every Gemma-4 control token while
+     * leaving the text human-readable. Cheap (two ReplaceInline passes)
+     * and applied per context entry.
+     */
+    FString InoLrlSanitizeForPrompt(const FString& In)
+    {
+        FString Out = In;
+        Out.ReplaceInline(TEXT("<|"), TEXT("< |"), ESearchCase::CaseSensitive);
+        Out.ReplaceInline(TEXT("|>"), TEXT("| >"), ESearchCase::CaseSensitive);
+        return Out;
+    }
+}
+
 // Out-of-line ctors/dtor. These MUST live in this translation unit (not
 // in the header) because the Worker TUniquePtr's deleter needs the full
 // definition of FInoLiteRtLmConversationWorker to `delete` it, and only
@@ -65,7 +91,8 @@ void UInoLiteRtLmConversation::Initialize(
     // IMPORTANT: pass as a PLAIN STRING, not as a JSON object like
     // {"type":"text","text":"..."}.
     //
-    // The C API (c/engine.cc:214-226) tries to JSON-parse the string.
+    // The C API (litert_lm_conversation_config_set_system_message in
+    // c/engine.cc) tries to JSON-parse the string.
     // If parsing fails, it treats the raw string as the "content"
     // field of a {"role":"system","content":"..."} message. Gemma's
     // Jinja2 chat template expects "content" to be a plain string
@@ -141,24 +168,47 @@ void UInoLiteRtLmConversation::Initialize(
         bAttachSessionConfig ? litert_lm_session_config_create() : nullptr;
     if (SessionConfig != nullptr)
     {
+        // The staged LiteRT-LM runtime's sampler factory implements only
+        // TOP_P on CPU/GPU (no top-k kernel, no dedicated greedy kernel).
+        // Passing kLiteRtLmSamplerTypeTopK / ...Greedy makes
+        // CreateCpuSampler return UnimplementedError, which makes
+        // engine_create_session return NULL — i.e. the conversation
+        // silently fails to construct. So clamp every requested strategy
+        // to TOP_P:
+        //   - TopK   → TopP (keep the top_k value; the Top-P sampler
+        //              also honours top_k as a pre-filter).
+        //   - Greedy → TopP with temperature 0 + top_p 1.0, which is
+        //              argmax-equivalent (deterministic) without needing
+        //              a dedicated greedy kernel.
         LiteRtLmSamplerParams NativeSampler = {};
-        switch (InConfig.Sampler.Type)
-        {
-            case EInoLiteRtLmSamplerType::TopK:
-                NativeSampler.type = kLiteRtLmSamplerTypeTopK;   break;
-            case EInoLiteRtLmSamplerType::TopP:
-                NativeSampler.type = kLiteRtLmSamplerTypeTopP;   break;
-            case EInoLiteRtLmSamplerType::Greedy:
-                NativeSampler.type = kLiteRtLmSamplerTypeGreedy; break;
-            default:
-                NativeSampler.type = kLiteRtLmSamplerTypeTopK;   break;
-        }
+        NativeSampler.type        = kLiteRtLmSamplerTypeTopP;
         NativeSampler.top_k       = InConfig.Sampler.TopK;
         NativeSampler.top_p       = InConfig.Sampler.TopP;
         NativeSampler.temperature = InConfig.Sampler.Temperature;
-        NativeSampler.seed        = InConfig.Sampler.Seed >= 0
+
+        if (InConfig.Sampler.Type == EInoLiteRtLmSamplerType::Greedy)
+        {
+            NativeSampler.temperature = 0.0f;
+            NativeSampler.top_p       = 1.0f;
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Conversation: sampler 'Greedy' mapped to Top-P "
+                        "with temperature 0 (the staged runtime has no greedy "
+                        "kernel; this is argmax-equivalent)."));
+        }
+        else if (InConfig.Sampler.Type == EInoLiteRtLmSamplerType::TopK)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Conversation: sampler 'Top-K' clamped to Top-P "
+                        "(the staged CPU/GPU runtime has no top-k kernel; "
+                        "top_k=%d is still applied as a Top-P pre-filter)."),
+                   InConfig.Sampler.TopK);
+        }
+
+        // Widen the host RNG seed: FMath::Rand() is only ~15 bits on
+        // some platforms, a poor distribution for a 32-bit seed field.
+        NativeSampler.seed = InConfig.Sampler.Seed >= 0
             ? InConfig.Sampler.Seed
-            : FMath::Rand();
+            : (FMath::Rand() ^ (FMath::Rand() << 15) ^ (FMath::Rand() << 30));
         litert_lm_session_config_set_sampler_params(SessionConfig, &NativeSampler);
 
         if (InConfig.MaxOutputTokens > 0)
@@ -173,7 +223,8 @@ void UInoLiteRtLmConversation::Initialize(
     // [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
     // via FJsonSerializer rather than hand-rolled string concat — the
     // serializer escapes control characters, surrogate pairs, and the
-    // edge cases the manual replace() chain didn't (\b, \f,  -001f).
+    // edge cases the manual replace() chain didn't (all control chars
+    // U+0000-U+001F, e.g. backspace / form-feed).
     FString MessagesJsonString;
     if (InInitialMessages.Num() > 0)
     {
@@ -321,6 +372,7 @@ void UInoLiteRtLmConversation::SendMessageAsync(const FString& UserText)
 
     // Clear per-send state from a prior send.
     SentenceBuffer.Empty();
+    SentenceScanOffset     = 0;
     TokenSquareDepth       = 0;
     TokenAngleDepth        = 0;
     TokenCurlyDepth        = 0;
@@ -519,12 +571,17 @@ FString UInoLiteRtLmConversation::BuildMergedContext() const
     //   - player_class: knight
     FString Result;
 
+    // Context keys/values are game/player-supplied and therefore
+    // untrusted — sanitize each so an embedded Gemma-4 control token
+    // can't escape the [Context] block and spoof a turn / tool boundary.
     if (SystemContextMap.Num() > 0)
     {
         Result += TEXT("Game state:\n");
         for (const auto& Pair : SystemContextMap)
         {
-            Result += FString::Printf(TEXT("- %s: %s\n"), *Pair.Key, *Pair.Value);
+            Result += FString::Printf(TEXT("- %s: %s\n"),
+                *InoLrlSanitizeForPrompt(Pair.Key),
+                *InoLrlSanitizeForPrompt(Pair.Value));
         }
     }
 
@@ -533,7 +590,9 @@ FString UInoLiteRtLmConversation::BuildMergedContext() const
         Result += TEXT("Player state:\n");
         for (const auto& Pair : UserContextMap)
         {
-            Result += FString::Printf(TEXT("- %s: %s\n"), *Pair.Key, *Pair.Value);
+            Result += FString::Printf(TEXT("- %s: %s\n"),
+                *InoLrlSanitizeForPrompt(Pair.Key),
+                *InoLrlSanitizeForPrompt(Pair.Value));
         }
     }
 
@@ -760,6 +819,14 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
         { TEXT(": "), 2, EInoLiteRtLmSentenceSplit::Colon       },
     };
 
+    // Incremental scan: a delimiter that wasn't present before can only
+    // newly appear inside the just-appended text or straddling the old
+    // tail. Delimiters are at most 2 chars, so re-including the single
+    // last previously-scanned char is enough to catch a straddle. This
+    // turns the per-token cost from O(buffer) to O(chunk).
+    int32 SearchStart =
+        FMath::Clamp(SentenceScanOffset, 0, FMath::Max(0, SentenceBuffer.Len()));
+
     while (true)
     {
         int32 SplitIndex = INDEX_NONE;
@@ -767,7 +834,9 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 
         if (EnumHasAnyFlags(Flags, EInoLiteRtLmSentenceSplit::Newline))
         {
-            const int32 NlIdx = SentenceBuffer.Find(TEXT("\n"));
+            const int32 NlIdx = SentenceBuffer.Find(
+                TEXT("\n"), ESearchCase::CaseSensitive,
+                ESearchDir::FromStart, SearchStart);
             if (NlIdx != INDEX_NONE)
             {
                 SplitIndex = NlIdx;
@@ -781,7 +850,9 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
             {
                 continue;
             }
-            const int32 Idx = SentenceBuffer.Find(Candidate.Delim);
+            const int32 Idx = SentenceBuffer.Find(
+                Candidate.Delim, ESearchCase::CaseSensitive,
+                ESearchDir::FromStart, SearchStart);
             if (Idx != INDEX_NONE
                 && (SplitIndex == INDEX_NONE || Idx < SplitIndex))
             {
@@ -792,6 +863,10 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
 
         if (SplitIndex == INDEX_NONE)
         {
+            // Nothing to split yet. Remember how far we got so the next
+            // token doesn't rescan it; keep 1 char of overlap so a
+            // 2-char delimiter split across the next append is caught.
+            SentenceScanOffset = FMath::Max(0, SentenceBuffer.Len() - 1);
             break;
         }
 
@@ -800,6 +875,11 @@ void UInoLiteRtLmConversation::AccumulateTokenForSentence(const FString& Chunk)
         const int32 SentenceEnd = (SplitLen == 2) ? SplitIndex + 1 : SplitIndex;
         FString RawLine = SentenceBuffer.Left(SentenceEnd).TrimStartAndEnd();
         SentenceBuffer.MidInline(SplitIndex + SplitLen);
+
+        // Buffer was reindexed by the trim — the remaining text must be
+        // rescanned from its new start.
+        SearchStart        = 0;
+        SentenceScanOffset = 0;
 
         if (!RawLine.IsEmpty())
         {
@@ -820,6 +900,7 @@ void UInoLiteRtLmConversation::FlushSentenceBuffer()
 
     const FString Remainder = SentenceBuffer.TrimStartAndEnd();
     SentenceBuffer.Empty();
+    SentenceScanOffset = 0;
 
     if (!Remainder.IsEmpty())
     {

@@ -35,16 +35,30 @@ INOLITERTLM_API const char* LiteRtLmBackendToString(EInoLiteRtLmBackend Backend)
 // Sampler + activation enums/structs
 // ============================================================================
 
-/** Sampling strategy for token selection. */
+/**
+ * Sampling strategy for token selection.
+ *
+ * IMPORTANT: the staged LiteRT-LM runtime's sampler factory implements
+ * only Top-P on CPU/GPU (Top-K and a dedicated Greedy sampler are not
+ * built in). When a per-conversation SessionConfig is attached
+ * (FInoLiteRtLmModelConfig::bAttachSessionConfig), TopK / Greedy are
+ * therefore clamped to TopP at session-config build time (with a
+ * Warning) to avoid an UnimplementedError that would NULL the engine.
+ * For deterministic output prefer Greedy (mapped to Top-P with
+ * temperature 0) rather than relying on a dedicated greedy kernel.
+ */
 UENUM(BlueprintType)
 enum class EInoLiteRtLmSamplerType : uint8
 {
-    /** Probabilistically pick among the top-k tokens. */
-    TopK    UMETA(DisplayName = "Top-K"),
-    /** Top-k first, then pick among tokens summing to >= p probability. */
+    /** Probabilistically pick among the top-k tokens. NOTE: clamped to
+     *  Top-P in the current staged runtime (no CPU/GPU top-k kernel). */
+    TopK    UMETA(DisplayName = "Top-K (clamped to Top-P)"),
+    /** Top-k first, then pick among tokens summing to >= p probability.
+     *  The only natively-supported probabilistic sampler. */
     TopP    UMETA(DisplayName = "Top-P"),
-    /** Always pick the highest-probability token (deterministic). */
-    Greedy  UMETA(DisplayName = "Greedy (deterministic)"),
+    /** Deterministic. Mapped to Top-P with temperature 0 (no dedicated
+     *  greedy kernel in the staged runtime). */
+    Greedy  UMETA(DisplayName = "Greedy (deterministic, via Top-P t=0)"),
 };
 
 /** Sampling parameters for token generation. */
@@ -53,9 +67,11 @@ struct FInoLiteRtLmSamplerConfig
 {
     GENERATED_BODY()
 
-    /** Sampling strategy. */
+    /** Sampling strategy. Defaults to Top-P — the only sampler the
+     *  staged CPU/GPU runtime implements. TopK/Greedy are accepted but
+     *  clamped to Top-P (see EInoLiteRtLmSamplerType). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM")
-    EInoLiteRtLmSamplerType Type = EInoLiteRtLmSamplerType::TopK;
+    EInoLiteRtLmSamplerType Type = EInoLiteRtLmSamplerType::TopP;
 
     /** Number of top tokens to consider (for TopK / TopP). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM",
@@ -189,6 +205,22 @@ struct FInoLiteRtLmModelConfig
     /** Custom XNNPACK cache directory. Empty = default (next to model file). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
     FString CacheDir;
+
+    /**
+     * Run a throwaway prime generation right after the engine is created
+     * (on the load worker thread, before OnLoaded fires). This pays the
+     * one-time XNNPACK/GPU shader-compile + KV-cache allocation cost up
+     * front so the user's FIRST real SendMessageAsync streams its first
+     * token promptly instead of stalling for seconds with no feedback.
+     *
+     * Costs a few seconds of extra load time. Default false to preserve
+     * the historical fast-OnLoaded behaviour; turn on for production /
+     * GPU builds where first-token latency matters more than load time.
+     * Warmup failure never fails the load — it logs a warning and
+     * proceeds.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "InoAgents|LiteRT-LM|Engine")
+    bool bWarmUpOnLoad = false;
 };
 
 /**
@@ -197,7 +229,7 @@ struct FInoLiteRtLmModelConfig
  * download URL so the subsystem can auto-download on first use.
  *
  * The file lands at:
- *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/Models/<LocalFileName>
+ *   <FPaths::ProjectPersistentDownloadDir()>/ino-agents/lite-rt-lm/<LocalFileName>
  *
  * If the file is already present at that path, no download happens
  * and DownloadUrl is unused. ExpectedSha256 (when set) is checked
@@ -229,7 +261,7 @@ struct FInoLiteRtLmModelEntry
 
     /**
      * Filename to save as locally. The runtime concatenates this with
-     * <persistent>/InoAgents/Models/ to get the full path. Must end in
+     * <persistent>/ino-agents/lite-rt-lm/ to get the full path. Must end in
      * `.litertlm` for LiteRT-LM to recognize it.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "Model")
@@ -278,9 +310,9 @@ struct FInoLiteRtLmModelEntry
 };
 
 /** Resolve the on-disk path for a model filename. Checks:
- *  1. PersistentDownloadDir/InoAgents/Models/ (downloaded/cached;
- *     same path UInoLiteRtLmSettings::ResolveLocalPath builds)
- *  2. Plugins/InoAgents/Models/ (legacy dev path)
+ *  1. <ProjectPersistentDownloadDir>/ino-agents/lite-rt-lm/ (downloaded/
+ *     cached; same path UInoLiteRtLmSettings::ResolveLocalPath builds)
+ *  2. <InoAgents plugin base>/LiteRTLM/ (legacy dev path)
  *  Returns empty string if not found anywhere. */
 INOLITERTLM_API FString LiteRtLmResolveModelPath(const FString& LocalFileName);
 

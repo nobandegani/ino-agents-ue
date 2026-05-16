@@ -118,7 +118,8 @@ static void RunLoadEngineSmokeTest(const TArray<FString>& /*Args*/)
 static FAutoConsoleCommand GLoadEngineTestCommand(
     TEXT("Ino.LoadEngineTest"),
     TEXT("Phase-1 smoke test: synchronously load and destroy a LiteRT-LM engine "
-         "from Plugins/InoAgents/Models/gemma-4-E2B-it.litertlm on the game "
-         "thread. Freezes the editor for 2-30 s. No session or generation; "
-         "this only proves the engine can be constructed and destroyed cleanly."),
+         "(resolved via <ProjectPersistentDownloadDir>/ino-agents/lite-rt-lm/ then "
+         "the legacy <InoAgents>/LiteRTLM/ drop) on the game thread. Freezes the "
+         "editor for 2-30 s. No session or generation; this only proves the "
+         "engine can be constructed and destroyed cleanly."),
     FConsoleCommandWithArgsDelegate::CreateStatic(&RunLoadEngineSmokeTest));

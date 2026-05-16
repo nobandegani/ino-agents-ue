@@ -39,6 +39,39 @@ namespace
     // pulled out of the air but generous — real interactions rarely
     // need more than 2-3 rounds.
     constexpr int32 kMaxAgentLoopRounds = 8;
+
+    // Upper bound on how long the worker will wait for a single tool's
+    // game-thread Execute() to return. A misbehaving tool (infinite
+    // loop, blocking I/O, waiting on user input) must not wedge the
+    // worker thread — and therefore conversation teardown — forever.
+    constexpr double kToolExecuteTimeoutSeconds = 30.0;
+
+    // Poll granularity while the worker waits for a tool result. Tool
+    // round-trips are bounded and this is the worker thread (never the
+    // game thread), so a few ms of latency is irrelevant next to LLM
+    // token timing.
+    constexpr float kToolPollSeconds = 0.005f;
+
+    // Heap channel shared (by TSharedPtr) between the worker thread and
+    // the game-thread tool task. Shared ownership means an early worker
+    // return (timeout / shutdown) cannot dangle a stack reference, and
+    // a late game-thread write after the worker gave up lands in still-
+    // alive memory instead of corrupting the stack or a recycled FEvent.
+    struct FInoToolExecChannel
+    {
+        FString       Result;
+        TAtomic<bool> bDone{ false };
+    };
+
+    // stderr is a PROCESS-GLOBAL FILE*. The diagnostic capture below
+    // freopen()s it for the whole generation; two concurrent captures
+    // (a second conversation, or the sibling InoNeuTTS module which
+    // shares this LiteRT-LM runtime) would race freopen on the same
+    // FILE* — itself UB in the CRT — and cross-contaminate each other's
+    // logs. This lock is acquired with a NON-blocking TryLock: whoever
+    // wins owns the capture for that round; anyone who can't get it
+    // simply skips capturing (no blocking, no generation serialised).
+    static FCriticalSection GStderrCaptureCS;
 }
 
 FInoLiteRtLmConversationWorker::FInoLiteRtLmConversationWorker(
@@ -89,27 +122,34 @@ FInoLiteRtLmConversationWorker::~FInoLiteRtLmConversationWorker()
     // graceful shutdown from the game thread.
     bStopRequested = true;
 
-    // If a stream is in flight, we must cancel it so the LiteRT-LM
-    // callback fires its final chunk and signals StreamEvent. Otherwise
-    // the worker thread is stuck inside ProcessMessage's StreamEvent->
-    // Wait and will never see bStopRequested, and Thread->WaitForCompletion
-    // below will hang forever.
+    // Cancel UNCONDITIONALLY (no bStreamInFlight gate). A stream may be
+    // in flight (worker blocked in StreamEvent->Wait) OR the worker may
+    // be between agent-loop rounds about to start another generation
+    // (bStreamInFlight transiently false). In the second case a gated
+    // cancel was lost and Thread->WaitForCompletion below would block
+    // for a whole extra generation on the game thread during teardown.
+    // The native cancel is idempotent and harmless with nothing in
+    // flight, so calling it always is strictly safer.
     //
     // Setting bStreamCancelled first ensures that when the worker wakes
-    // up from StreamEvent->Wait, it dispatches OnError("Cancelled")
-    // rather than OnComplete(partial text). That error will fire on the
-    // game thread AFTER this destructor returns, but the AsyncTask
-    // broadcast checks the weak pointer — if the owning UInoLiteRtLmConversation
-    // has already been GC'd, the broadcast is skipped.
-    if (bStreamInFlight.Load())
+    // from StreamEvent->Wait (or hits the between-rounds check) it
+    // dispatches OnError("Cancelled") rather than OnComplete. That error
+    // fires on the game thread AFTER this destructor returns, but the
+    // AsyncTask broadcast checks the weak pointer — if the owning
+    // UInoLiteRtLmConversation has already been GC'd, it is skipped.
+    //
+    // Deadlock note: if the worker is parked in ExecuteToolSynchronously
+    // (blocked waiting for a game-thread AsyncTask) while this destructor
+    // runs ON the game thread, that task can never run. ExecuteTool
+    // Synchronously's wait is bounded and also polls bStopRequested
+    // (set above) so it returns promptly here instead of wedging the
+    // join — see that function.
+    UE_LOG(LogInoAgents, Log,
+           TEXT("LiteRtLm: Worker: ~Worker latching cancel + native cancel_process before join"));
+    bStreamCancelled = true;
+    if (NativeConversation != nullptr)
     {
-        UE_LOG(LogInoAgents, Log,
-               TEXT("LiteRtLm: Worker: ~Worker cancelling in-flight stream before join"));
-        bStreamCancelled = true;
-        if (NativeConversation != nullptr)
-        {
-            litert_lm_conversation_cancel_process(NativeConversation);
-        }
+        litert_lm_conversation_cancel_process(NativeConversation);
     }
 
     // Wake the queue-wait event in case the worker is idle between
@@ -187,29 +227,25 @@ void FInoLiteRtLmConversationWorker::EnqueueMessage(FString UserText, FString Ex
 
 void FInoLiteRtLmConversationWorker::Cancel()
 {
-    // No-op if nothing is in flight. Reading the atomic once is fine
-    // here — the worst case is a TOCTOU where the stream finishes
-    // between our read and the cancel_process call, in which case
-    // cancel_process is itself harmless (LiteRT-LM handles "cancel
-    // with nothing to cancel" gracefully per the C API docs).
-    if (!bStreamInFlight.Load())
-    {
-        UE_LOG(LogInoAgents, Verbose,
-               TEXT("LiteRtLm: Worker: Cancel — no stream in flight, no-op"));
-        return;
-    }
-
     UE_LOG(LogInoAgents, Log,
-           TEXT("LiteRtLm: Worker: Cancel — invoking litert_lm_conversation_cancel_process"));
+           TEXT("LiteRtLm: Worker: Cancel — latching cancel + invoking native cancel_process"));
 
-    // Mark the stream as cancelled. The worker thread reads this after
-    // StreamEvent unblocks and dispatches OnError("Cancelled by caller")
-    // instead of OnComplete. The static callback also reads it to
-    // suppress further OnToken broadcasts after cancel is requested —
-    // if any chunks arrive between the cancel call and LiteRT-LM
-    // processing it, they won't leak into the game thread.
+    // Set the cancel flag UNCONDITIONALLY (no bStreamInFlight gate).
+    // bStreamInFlight is false between agent-loop rounds (while a tool
+    // executes on the game thread); gating on it dropped cancels that
+    // arrived in exactly that window, so the next round started a fresh
+    // generation nobody could stop. The flag is observed by: the worker
+    // thread after StreamEvent unblocks, the between-rounds check at the
+    // top of ProcessMessage's loop, and OnStreamChunk (to suppress
+    // post-cancel token leakage). If the worker is idle between sends
+    // this just latches the flag; ProcessMessage clears it before the
+    // next dequeued message, so a later send is unaffected.
     bStreamCancelled = true;
 
+    // Always call the native cancel. CancelProcess is idempotent and
+    // safe with nothing in flight — it only sets an internal cancelled_
+    // flag that the next decode step polls. Calling it unconditionally
+    // closes the between-rounds lost-cancel window above.
     if (NativeConversation != nullptr)
     {
         litert_lm_conversation_cancel_process(NativeConversation);
@@ -265,6 +301,18 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
         return;
     }
 
+    // Clear any cancel latched by a PREVIOUS message — or by Cancel()
+    // called while the worker sat idle between sends. This is the ONLY
+    // place bStreamCancelled is reset, and it is deliberately here (per
+    // dequeued message) rather than in RunOneStreamRound (per round):
+    // a cancel that arrives mid-multi-round agent loop must stay latched
+    // across the remaining rounds so it is honoured, while a freshly
+    // dequeued message must always start uncancelled. Without this reset
+    // the very first Cancel() would permanently brick the conversation —
+    // every later SendMessageAsync would early-error or have its tokens
+    // suppressed forever.
+    bStreamCancelled = false;
+
     // ==================================================================
     // Multi-round agent loop
     // ==================================================================
@@ -293,6 +341,20 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
 
     for (int32 Round = 0; Round < kMaxAgentLoopRounds; ++Round)
     {
+        // A cancel can arrive BETWEEN rounds — most importantly while a
+        // tool was executing on the game thread (RunOneStreamRound has
+        // returned, so bStreamInFlight is false and the post-stream
+        // check below hasn't run for this round yet). Honour it here,
+        // before spending a whole generation on the next round.
+        if (bStreamCancelled.Load())
+        {
+            UE_LOG(LogInoAgents, Log,
+                   TEXT("LiteRtLm: Worker: cancel observed before round %d; aborting"),
+                   Round);
+            DispatchErrorOnGameThread(TEXT("Cancelled by caller"));
+            return;
+        }
+
         UE_LOG(LogInoAgents, Log,
                TEXT("LiteRtLm: Worker: agent loop round %d/%d starting (message_json_len=%d)"),
                Round, kMaxAgentLoopRounds, CurrentMessageJson.Len());
@@ -372,17 +434,52 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
                 DispatchToolCalledOnGameThread(
                     Call.Name, Call.ArgumentsJson, ResultJson);
 
-                // Build one content entry per tool call. tool_response
-                // shape matches the Phase 1 ToolCallTest — see its
-                // comment for the details. ResultJson is the raw JSON
-                // literal (bare number, string, object) from the tool;
-                // it's embedded verbatim into the "value" field.
+                // Build one content entry per tool call in the EXACT shape
+                // this model's embedded chat template consumes.
+                //
+                // The Gemma 4 bundle hard-sets use_template_for_fc_format=
+                // true, so LiteRT-LM's Gemma4DataProcessor::MessageToTemplate
+                // Input returns the message verbatim (no tool_response-
+                // unwrapping normalisation layer runs). The template's tool
+                // branch reads ONLY item['name'] and item['response']:
+                //
+                //   {%- if item['response'] is mapping -%}
+                //       response:<name>{k:format_argument(v),...}
+                //   {%- else -%}
+                //       response:<name>{value:format_argument(resp)}
+                //
+                // An OpenAI-style {"type":"tool_response","tool_response":
+                // {"name":..,"value":..}} envelope is therefore SILENTLY
+                // DROPPED — item['name']/item['response'] are undefined, the
+                // model receives `response:unknown{value:}` and never sees
+                // the real tool name or result.
+                //
+                // Correct shape: a content entry of {"name":<tool>,
+                // "response":<value>}. JSON-object results are passed
+                // straight through as `response` so the model sees the
+                // natural `response:<tool>{key:val,...}`. Scalar / string /
+                // array / bool / null results are wrapped as
+                // {"value":<result>} so they deterministically hit the
+                // template's `is mapping` branch and render as
+                // `response:<tool>{value:<result>}` (the non-mapping branch
+                // produces the same text, but keeping everything on the
+                // mapping path removes the dependency on Jinja's
+                // is-mapping classification of edge values).
                 const FString EscapedToolNameQuoted =
                     EscapeJsonString(Call.Name.ToString());
+
+                const FString TrimmedResult = ResultJson.TrimStartAndEnd();
+                const bool bResultIsJsonObject =
+                    TrimmedResult.Len() >= 2 && TrimmedResult[0] == TEXT('{');
+
+                const FString ResponseField = bResultIsJsonObject
+                    ? ResultJson
+                    : FString::Printf(TEXT(R"({"value":%s})"), *ResultJson);
+
                 const FString OneEntry = FString::Printf(
-                    TEXT(R"({"type":"tool_response","tool_response":{"name":%s,"value":%s}})"),
+                    TEXT(R"({"name":%s,"response":%s})"),
                     *EscapedToolNameQuoted,
-                    *ResultJson);
+                    *ResponseField);
 
                 if (CallIdx > 0)
                 {
@@ -391,6 +488,8 @@ void FInoLiteRtLmConversationWorker::ProcessMessage(
                 ToolResultContentParts += OneEntry;
             }
 
+            // The template requires role=='tool' AND content to be a
+            // sequence (array); each item is iterated for name/response.
             CurrentMessageJson = FString::Printf(
                 TEXT(R"({"role":"tool","content":[%s]})"),
                 *ToolResultContentParts);
@@ -439,9 +538,11 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
     // is manual-reset, so we must clear any leftover signal from the
     // previous round. StreamAccumulated and StreamPendingToolCalls are
     // cleared so only THIS round's output is visible to the caller.
-    // bStreamCancelled is intentionally NOT cleared — if the caller
-    // cancelled between rounds, we want to honour it immediately at
-    // the top of the next round.
+    // bStreamCancelled is intentionally NOT cleared here — it is reset
+    // exactly once per dequeued message, at the top of ProcessMessage.
+    // Keeping it latched across rounds is what lets a cancel that
+    // arrived between rounds be honoured by ProcessMessage's
+    // top-of-loop check.
     StreamAccumulated.Reset();
     StreamError.Reset();
     StreamPendingToolCalls.Reset();
@@ -477,17 +578,28 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
     // trips the SECURE CRT invalid-parameter handler. freopen operates
     // on the FILE* directly and works regardless of whether the
     // underlying fd was valid.
-#if PLATFORM_WINDOWS
-    FString StderrCapturePath = FPaths::CreateTempFilename(
-        *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
-    const FTCHARToUTF8 CapturePathUtf8(*StderrCapturePath);
-    FILE* RedirectedStderr = freopen(CapturePathUtf8.Get(), "w", stderr);
-    const bool bStderrCaptured = (RedirectedStderr != nullptr);
-    if (!bStderrCaptured)
+    // Dev-only: never mutate process-global stderr in a Shipping build
+    // (production has no console reader and the global side effect is
+    // not worth the risk). Take the process lock with TryLock so a
+    // concurrent capture (other conversation / InoNeuTTS) just skips
+    // its own redirect instead of racing freopen.
+#if !UE_BUILD_SHIPPING && PLATFORM_WINDOWS
+    const bool bOwnStderrCapture = GStderrCaptureCS.TryLock();
+    FString StderrCapturePath;
+    bool    bStderrCaptured = false;
+    if (bOwnStderrCapture)
     {
-        // freopen failed (rare) — best-effort, still issue the C call;
-        // we just won't be able to read back any error messages.
-        StderrCapturePath.Reset();
+        StderrCapturePath = FPaths::CreateTempFilename(
+            *FPaths::ProjectSavedDir(), TEXT("litert_stderr_"));
+        const FTCHARToUTF8 CapturePathUtf8(*StderrCapturePath);
+        FILE* RedirectedStderr = freopen(CapturePathUtf8.Get(), "w", stderr);
+        bStderrCaptured = (RedirectedStderr != nullptr);
+        if (!bStderrCaptured)
+        {
+            // freopen failed (rare) — best-effort, still issue the C
+            // call; we just won't be able to read back any messages.
+            StderrCapturePath.Reset();
+        }
     }
 #endif
 
@@ -517,7 +629,7 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
                TEXT("LiteRtLm: Worker: send_message_stream failed to start (rc=%d)"),
                StartRc);
 
-#if PLATFORM_WINDOWS
+#if !UE_BUILD_SHIPPING && PLATFORM_WINDOWS
         // Bail-out path: restore stderr + read whatever was captured
         // so the failure log includes any LiteRT-LM diagnostic.
         if (bStderrCaptured)
@@ -533,6 +645,10 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
                        TEXT("LiteRtLm: Worker: LiteRT-LM stderr (dispatch failed):\n%s"),
                        *CapturedOnFailure.TrimEnd());
             }
+        }
+        if (bOwnStderrCapture)
+        {
+            GStderrCaptureCS.Unlock();
         }
 #endif
         return false;
@@ -551,7 +667,7 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
 
     bStreamInFlight = false;
 
-#if PLATFORM_WINDOWS
+#if !UE_BUILD_SHIPPING && PLATFORM_WINDOWS
     // NOW restore stderr — the stream is done, every internal LiteRT-LM
     // log line for this round has been written to the temp file.
     FString CapturedStderr;
@@ -562,6 +678,10 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
 
         FFileHelper::LoadFileToString(CapturedStderr, *StderrCapturePath);
         IFileManager::Get().Delete(*StderrCapturePath, /*RequireExists=*/ false);
+    }
+    if (bOwnStderrCapture)
+    {
+        GStderrCaptureCS.Unlock();
     }
     if (!CapturedStderr.IsEmpty())
     {
@@ -577,21 +697,24 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
 FString FInoLiteRtLmConversationWorker::ExecuteToolSynchronously(
     const FPendingToolCall& Call)
 {
-    // Queue an AsyncTask to the game thread that looks up the tool
-    // in the subsystem's registry, invokes Execute, and fulfils the
-    // result into ToolResult. Block on DoneEvent until the task
-    // completes. Reference capture of ToolResult is safe because
-    // this stack frame is still alive throughout the Wait.
-    FString ToolResult;
-    FEvent* DoneEvent = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
+    // Queue an AsyncTask to the game thread that looks up the tool in
+    // the subsystem's registry, invokes Execute, and publishes the
+    // result through a heap channel both sides co-own. The worker then
+    // waits with a bound + shutdown check (NOT an unbounded FEvent
+    // wait): a hung tool, or teardown while a tool is mid-Execute (the
+    // game thread is then blocked in Thread->WaitForCompletion and can
+    // never run our task), must not wedge the worker / teardown.
+    TSharedPtr<FInoToolExecChannel, ESPMode::ThreadSafe> Chan =
+        MakeShared<FInoToolExecChannel, ESPMode::ThreadSafe>();
 
     TWeakObjectPtr<UInoLiteRtLmSubsystem> WeakSubs = WeakSubsystem;
     const FName    ToolName = Call.Name;
     const FString  ArgsJson = Call.ArgumentsJson;
 
     AsyncTask(ENamedThreads::GameThread,
-        [WeakSubs, ToolName, ArgsJson, &ToolResult, DoneEvent]()
+        [WeakSubs, ToolName, ArgsJson, Chan]()
     {
+        FString ToolResult;
         // Runs on the game thread. Safe to dereference weak pointers
         // and touch UObjects.
         if (UInoLiteRtLmSubsystem* Subs = WeakSubs.Get())
@@ -696,18 +819,53 @@ FString FInoLiteRtLmConversationWorker::ExecuteToolSynchronously(
             ToolResult = FString(TEXT("\"ERROR: subsystem has been destroyed\""));
         }
 
-        DoneEvent->Trigger();
+        // Publish: write the result THEN flip the atomic flag. The
+        // worker loads the flag before reading Result, so the atomic's
+        // ordering gives the happens-before edge (no extra lock needed).
+        Chan->Result = MoveTemp(ToolResult);
+        Chan->bDone  = true;
     });
 
-    // Block here on the worker thread until the game thread finishes
-    // Execute. The game thread is NOT blocked on us — the AsyncTask
-    // is a normal game-thread task that runs during the next tick /
-    // TaskGraph pass. The worker thread stays asleep until Trigger.
-    DoneEvent->Wait();
+    // Bounded wait on the worker thread. The game thread is NOT blocked
+    // on us in the normal case (the AsyncTask runs on a later tick).
+    // Three ways out:
+    //   1. Normal: the task published a result.
+    //   2. Shutdown: bStopRequested was set by Stop()/~Worker. If that
+    //      destructor is running on the game thread it is blocked in
+    //      Thread->WaitForCompletion, so our task can never run —
+    //      waiting forever here would deadlock teardown. Bail.
+    //   3. Timeout: a tool that never returns must not wedge the worker
+    //      (and therefore teardown) permanently.
+    // Chan is co-owned by the game-thread task, so a late write after
+    // we return below is harmless (it lands in live heap, not a dead
+    // stack frame or a recycled pooled event).
+    const double WaitStart = FPlatformTime::Seconds();
+    while (!Chan->bDone.Load())
+    {
+        if (bStopRequested.Load())
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Tool: \"%s\" abandoned — worker is shutting down "
+                        "before the tool's game-thread Execute could run"),
+                   *ToolName.ToString());
+            return FString(TEXT("\"ERROR: cancelled during shutdown\""));
+        }
+        if (FPlatformTime::Seconds() - WaitStart > kToolExecuteTimeoutSeconds)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Tool: \"%s\" timed out after %.0f s — returning an "
+                        "error result to the model so the agent loop can continue. "
+                        "Tool Execute() implementations must return promptly; "
+                        "dispatch long work yourself and answer quickly."),
+                   *ToolName.ToString(), kToolExecuteTimeoutSeconds);
+            return FString::Printf(
+                TEXT("\"ERROR: tool '%s' execution timed out after %.0f seconds\""),
+                *ToolName.ToString(), kToolExecuteTimeoutSeconds);
+        }
+        FPlatformProcess::Sleep(kToolPollSeconds);
+    }
 
-    FPlatformProcess::ReturnSynchEventToPool(DoneEvent);
-
-    return ToolResult;
+    return Chan->Result;
 }
 
 void FInoLiteRtLmConversationWorker::OnStreamChunkStatic(
@@ -817,6 +975,19 @@ void FInoLiteRtLmConversationWorker::OnStreamChunk(
             {
                 UE_LOG(LogInoAgents, Verbose,
                        TEXT("LiteRtLm: Worker: token chunk (%d chars)"), ChunkText.Len());
+                // Geometric reserve: appending one token at a time would
+                // otherwise reallocate StreamAccumulated repeatedly over
+                // a long reply. (The per-token full JSON DOM parse above
+                // is deliberately kept — this chunk runs on LiteRT-LM's
+                // callback thread, not the game thread, so it is a
+                // throughput cost not a frame stall, and a hand-rolled
+                // extractor on the core output path would risk mangling
+                // JSON escapes / \u sequences.)
+                const int32 Needed = StreamAccumulated.Len() + ChunkText.Len() + 1;
+                if (Needed > StreamAccumulated.GetCharArray().Max())
+                {
+                    StreamAccumulated.Reserve(FMath::Max(1024, Needed * 2));
+                }
                 StreamAccumulated += ChunkText;
                 DispatchTokenOnGameThread(ChunkText);
                 bChunkHadAnyContent = true;

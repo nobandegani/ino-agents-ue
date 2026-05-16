@@ -71,7 +71,7 @@ public:
 
     /**
      * Directory where downloaded model files are stored:
-     *   <FPaths::ProjectPersistentDownloadDir()>/InoAgents/LiteRTLM/
+     *   <FPaths::ProjectPersistentDownloadDir()>/ino-agents/lite-rt-lm/
      *
      * Per-user, sandboxed on mobile, persists across project reinstalls.
      */

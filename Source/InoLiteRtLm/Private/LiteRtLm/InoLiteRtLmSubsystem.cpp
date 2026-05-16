@@ -17,7 +17,9 @@
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/Event.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -29,6 +31,109 @@
 // The native C API. Only included in this .cpp — callers of the subsystem
 // never see LiteRT-LM types directly.
 #include "litert/lm/engine.h"
+
+namespace
+{
+    // Warmup support. Runs ONE throwaway generation on a freshly-created
+    // engine (on the load worker thread, never the game thread) so the
+    // first real conversation doesn't pay the XNNPACK/GPU shader-compile
+    // + KV-alloc cost with no UI feedback. Best-effort: any failure is
+    // logged and ignored — it never fails the model load.
+
+    struct FInoLrlWarmupCtx
+    {
+        LiteRtLmConversation* Conv        = nullptr;
+        FEvent*               Done        = nullptr;
+        bool                  bCancelSent = false;  // single-threaded:
+                                                    // LiteRT-LM serialises
+                                                    // a stream's callbacks
+    };
+
+    void InoLrlWarmupCallback(void* CallbackData, const char* /*chunk*/,
+                              bool is_final, const char* error_msg)
+    {
+        auto* const Ctx = static_cast<FInoLrlWarmupCtx*>(CallbackData);
+        if (Ctx == nullptr)
+        {
+            return;
+        }
+        // First callback means prefill ran + (for GPU) shaders compiled
+        // and the KV cache is allocated — that is all the priming we
+        // need. Cancel so we don't generate a full reply for nothing.
+        if (!Ctx->bCancelSent)
+        {
+            Ctx->bCancelSent = true;
+            if (Ctx->Conv != nullptr)
+            {
+                litert_lm_conversation_cancel_process(Ctx->Conv);
+            }
+        }
+        const bool bErrored = (error_msg != nullptr && *error_msg != '\0');
+        if ((is_final || bErrored) && Ctx->Done != nullptr)
+        {
+            Ctx->Done->Trigger();
+        }
+    }
+
+    void InoLrlWarmUpEngine(LiteRtLmEngine* Engine)
+    {
+        if (Engine == nullptr)
+        {
+            return;
+        }
+
+        LiteRtLmConversationConfig* Cfg = litert_lm_conversation_config_create();
+        if (Cfg == nullptr)
+        {
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Warmup: conversation_config_create returned NULL — skipping warmup"));
+            return;
+        }
+
+        LiteRtLmConversation* Conv = litert_lm_conversation_create(Engine, Cfg);
+        if (Conv == nullptr)
+        {
+            litert_lm_conversation_config_delete(Cfg);
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Warmup: conversation_create returned NULL — skipping warmup "
+                        "(engine still loaded; first real send just pays the prime cost)"));
+            return;
+        }
+
+        FInoLrlWarmupCtx Ctx;
+        Ctx.Conv = Conv;
+        Ctx.Done = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ true);
+
+        const double TStart = FPlatformTime::Seconds();
+        const int Rc = litert_lm_conversation_send_message_stream(
+            Conv,
+            R"({"role":"user","content":[{"type":"text","text":"hi"}]})",
+            /*extra_context=*/ nullptr,
+            /*optional_args=*/ nullptr,
+            &InoLrlWarmupCallback,
+            /*callback_data=*/ &Ctx);
+
+        if (Rc == 0 && Ctx.Done != nullptr)
+        {
+            // Bounded — warmup must NEVER hang the model load. 60 s is
+            // far more than a prefill + one decode step needs even on
+            // a cold GPU shader cache.
+            Ctx.Done->Wait(60u * 1000u);
+        }
+
+        if (Ctx.Done != nullptr)
+        {
+            FPlatformProcess::ReturnSynchEventToPool(Ctx.Done);
+            Ctx.Done = nullptr;
+        }
+        litert_lm_conversation_delete(Conv);
+        litert_lm_conversation_config_delete(Cfg);
+
+        UE_LOG(LogInoAgents, Log,
+               TEXT("LiteRtLm: Warmup: engine primed in %.2f s (rc=%d)"),
+               FPlatformTime::Seconds() - TStart, Rc);
+    }
+}
 
 void UInoLiteRtLmSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -156,6 +261,42 @@ void UInoLiteRtLmSubsystem::LoadModelAsync(
         ResolvedConfig.ModelFileName = Entry->LocalFileName;
     }
 
+    // Backend / platform sanity. The staged LiteRT-LM build's
+    // accelerator coverage is platform-specific. Selecting a backend
+    // the platform has no prebuilt for otherwise surfaces only as an
+    // opaque "engine_create returned NULL" much later — fail fast with
+    // an actionable message instead.
+    {
+        const EInoLiteRtLmBackend SelBackend = ResolvedConfig.Backend;
+#if PLATFORM_IOS
+        if (SelBackend != EInoLiteRtLmBackend::Cpu)
+        {
+            const FString Err = FString::Printf(
+                TEXT("Backend '%s' is not available on iOS — the staged LiteRT-LM "
+                     "iOS framework is CPU-only (no GPU/NPU accelerator is shipped). "
+                     "Set FInoLiteRtLmModelConfig::Backend = Cpu for iOS builds."),
+                ANSI_TO_TCHAR(LiteRtLmBackendToString(SelBackend)));
+            UE_LOG(LogInoAgents, Error,
+                   TEXT("LiteRtLm: Subsystem: LoadModelAsync FAILED: %s"), *Err);
+            OnLoaded.ExecuteIfBound(false, Err);
+            return;
+        }
+#endif
+        if (SelBackend == EInoLiteRtLmBackend::Npu)
+        {
+            // Upstream NPU is "ready, not functional": no vendor
+            // libLiteRtDispatch_<Vendor> ships in any staged dir. Don't
+            // hard-fail (a future vendor lib could make it work), but
+            // warn loudly so the inevitable engine_create failure is
+            // self-explanatory.
+            UE_LOG(LogInoAgents, Warning,
+                   TEXT("LiteRtLm: Subsystem: NPU backend selected, but no vendor NPU "
+                        "dispatch library is bundled with the staged runtime (NPU is "
+                        "'ready, not functional'). engine_create will almost certainly "
+                        "fail — CPU is always available as a fallback."));
+        }
+    }
+
     // Build the InoNodes download request. The downloader handles
     // HEAD probe → GET → .partial staging → atomic rename → streaming
     // SHA-256 verification all internally; cached files with matching
@@ -273,6 +414,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
     const int32                         MaxNumTokens    = LoadedConfig.MaxNumTokens;
     const EInoLiteRtLmActivationType       ActivationType  = LoadedConfig.ActivationType;
     const FString                       CacheDirCopy    = LoadedConfig.CacheDir;
+    const bool                          WarmUpCopy      = LoadedConfig.bWarmUpOnLoad;
     const double                        TStart          = FPlatformTime::Seconds();
 
     UE_LOG(LogInoAgents, Log,
@@ -282,7 +424,7 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
 
     Async(EAsyncExecution::ThreadPool,
         [ModelPathCopy, BackendCopy, MaxNumTokens, ActivationType,
-         CacheDirCopy, WeakThis, TStart]()
+         CacheDirCopy, WarmUpCopy, WeakThis, TStart]()
     {
         // ============== WORKER THREAD ==============
         //
@@ -332,18 +474,37 @@ void UInoLiteRtLmSubsystem::DispatchModelLoad(const FString& ModelPath)
         {
             NewEngine = litert_lm_engine_create(NewSettings);
 
-            // Settings are consumed synchronously by engine_create — see
-            // vendor/LiteRT-LM/c/engine.cc:471-488: EngineFactory::CreateDefault
-            // reads `*settings->settings` and the resulting Engine carries
-            // everything it needs forward. Free the settings handle now on
-            // BOTH branches; nothing past this point references it.
+            // Settings are consumed synchronously by engine_create:
+            // litert_lm_engine_create deep-copies *settings before
+            // handing it to EngineFactory::CreateDefault, so the
+            // resulting Engine carries everything forward. Free the
+            // settings handle now on BOTH branches; nothing past this
+            // point references it.
             litert_lm_engine_settings_delete(NewSettings);
             NewSettings = nullptr;
 
             if (NewEngine == nullptr)
             {
-                LocalError = TEXT("litert_lm_engine_create returned NULL (check LiteRT-LM internal logs above)");
+                LocalError = FString::Printf(
+                    TEXT("litert_lm_engine_create returned NULL for backend '%s'. %s"
+                         "Check the LiteRT-LM stderr capture above for the real cause "
+                         "(corrupt/incompatible model, out of memory, or this "
+                         "platform's staged build has no '%s' accelerator). CPU is "
+                         "always available."),
+                    ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)),
+                    BackendCopy != EInoLiteRtLmBackend::Cpu
+                        ? TEXT("A non-CPU backend was requested. ") : TEXT(""),
+                    ANSI_TO_TCHAR(LiteRtLmBackendToString(BackendCopy)));
             }
+        }
+
+        // Optional prime — still on the worker thread, before we hop
+        // back to the game thread, so OnLoaded(true) only fires once
+        // the engine is hot. Best-effort: never promotes to a load
+        // failure.
+        if (NewEngine != nullptr && WarmUpCopy)
+        {
+            InoLrlWarmUpEngine(NewEngine);
         }
 
         const double Elapsed = FPlatformTime::Seconds() - TStart;

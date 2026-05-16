@@ -42,7 +42,8 @@ extern "C" {
  *
  * Single-conversation invariant:
  *   LiteRT-LM sessions on the same engine share a single LlmExecutor (and
- *   thus a single KV cache) — see runtime/core/engine_impl.cc:157. Upstream
+ *   thus a single KV cache) — see the EngineImpl ctor in
+ *   runtime/core/engine_impl.cc. Upstream
  *   tests serialise session use with an explicit `session->reset()` before
  *   each new `CreateSession()` call, and the plugin enforces the same
  *   invariant: CreateConversation auto-shuts-down any prior active
@@ -140,8 +141,8 @@ public:
      * LoadModelAsync would NOT need to download it before loading.
      *
      * Resolution order matches LoadModelAsync:
-     *   1. PersistentDownloadDir/InoAgents/Models/  (auto-download cache)
-     *   2. Plugins/InoAgents/Models/                (legacy dev drop)
+     *   1. <ProjectPersistentDownloadDir>/ino-agents/lite-rt-lm/  (cache)
+     *   2. <InoAgents plugin base>/LiteRTLM/                       (legacy)
      *
      * ModelNameOrFileName accepts either:
      *   - The on-disk filename ("gemma-4-E2B-it.litertlm"), OR
@@ -282,9 +283,9 @@ private:
     // without including the LiteRT-LM C header.
     //
     // We deliberately do NOT keep a LiteRtLmEngineSettings* alive past
-    // engine_create — the settings are consumed synchronously inside
-    // EngineFactory::CreateDefault (see vendor/LiteRT-LM/c/engine.cc:471-488)
-    // and the resulting Engine carries everything it needs forward. The
+    // engine_create — litert_lm_engine_create deep-copies *settings into
+    // the EngineSettings it hands to EngineFactory::CreateDefault, and
+    // the resulting Engine carries everything it needs forward. The
     // settings handle is freed on the worker thread immediately after
     // engine_create returns.
     LiteRtLmEngine* Engine = nullptr;
