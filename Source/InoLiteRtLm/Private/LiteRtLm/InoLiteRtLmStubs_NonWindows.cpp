@@ -336,7 +336,8 @@ extern "C" void litert_lm_conversation_delete(
 extern "C" LiteRtLmJsonResponse* litert_lm_conversation_send_message(
     LiteRtLmConversation* /*conversation*/,
     const char*           /*message_json*/,
-    const char*           /*extra_context*/)
+    const char*           /*extra_context*/,
+    const LiteRtLmConversationOptionalArgs* /*optional_args*/)
 {
     return nullptr;
 }
@@ -355,6 +356,7 @@ extern "C" int litert_lm_conversation_send_message_stream(
     LiteRtLmConversation*  /*conversation*/,
     const char*            /*message_json*/,
     const char*            /*extra_context*/,
+    const LiteRtLmConversationOptionalArgs* /*optional_args*/,
     LiteRtLmStreamCallback /*callback*/,
     void*                  /*callback_data*/)
 {

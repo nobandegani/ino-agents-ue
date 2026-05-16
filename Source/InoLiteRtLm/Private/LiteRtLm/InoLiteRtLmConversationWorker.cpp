@@ -495,6 +495,7 @@ bool FInoLiteRtLmConversationWorker::RunOneStreamRound(
         NativeConversation,
         MessageJsonUtf8.Get(),
         /*extra_context=*/ ExtraContextCStr,
+        /*optional_args=*/ nullptr,
         &FInoLiteRtLmConversationWorker::OnStreamChunkStatic,
         /*callback_data=*/ this);
 

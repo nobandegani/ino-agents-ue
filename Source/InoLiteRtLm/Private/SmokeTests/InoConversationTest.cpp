@@ -137,7 +137,8 @@ static void RunConversationSmokeTest(const TArray<FString>& Args)
 
     const double TSendStart = FPlatformTime::Seconds();
     LiteRtLmJsonResponse* Response = litert_lm_conversation_send_message(
-        Conversation, MessageJsonUtf8.Get(), /* extra_context = */ nullptr);
+        Conversation, MessageJsonUtf8.Get(), /* extra_context = */ nullptr,
+        /* optional_args = */ nullptr);
     const double TSendEnd = FPlatformTime::Seconds();
 
     if (Response == nullptr)

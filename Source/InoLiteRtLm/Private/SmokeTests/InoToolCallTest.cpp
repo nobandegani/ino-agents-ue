@@ -219,7 +219,8 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
 
     const double TR1Start = FPlatformTime::Seconds();
     LiteRtLmJsonResponse* Response1 = litert_lm_conversation_send_message(
-        Conversation, UserMessageJsonUtf8.Get(), /*extra_context=*/ nullptr);
+        Conversation, UserMessageJsonUtf8.Get(), /*extra_context=*/ nullptr,
+        /*optional_args=*/ nullptr);
     const double TR1End = FPlatformTime::Seconds();
 
     if (Response1 == nullptr)
@@ -333,7 +334,8 @@ static void RunToolCallSmokeTest(const TArray<FString>& Args)
 
     const double TR2Start = FPlatformTime::Seconds();
     LiteRtLmJsonResponse* Response2 = litert_lm_conversation_send_message(
-        Conversation, ToolResultMessageJsonUtf8.Get(), /*extra_context=*/ nullptr);
+        Conversation, ToolResultMessageJsonUtf8.Get(), /*extra_context=*/ nullptr,
+        /*optional_args=*/ nullptr);
     const double TR2End = FPlatformTime::Seconds();
 
     if (Response2 == nullptr)
