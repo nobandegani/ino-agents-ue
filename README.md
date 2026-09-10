@@ -227,7 +227,9 @@ To drop a backend: delete its folder and remove its entry from `InoAgents.uplugi
 else breaks, because game code reaches each backend through
 `GetGameInstance()->GetSubsystem<...>()` on demand rather than through a compile-time
 dependency. `DepricatedModules/` holds previously retired backends (llama.cpp, Chatterbox,
-Qwen3 ASR) for reference — they are not built and not in the `.uplugin`.
+Qwen3 ASR, and an earlier GGUF/ONNX NeuTTS implementation) for reference — they are not built
+and not in the `.uplugin`. They still reference plugins this repo no longer depends on
+(`InoOnnx`, `InoLlama`), so treat them as an archive, not as buildable code.
 
 Threading follows one rule throughout: **heavy work on a thread-pool task, every delegate
 marshalled back to the game thread**, with `TWeakObjectPtr` guards so a subsystem torn down
@@ -308,8 +310,13 @@ On Android, `android.permission.INTERNET` is required for model download.
 - **[`CLAUDE.md`](CLAUDE.md)** — full architecture reference: module boundaries, threading
   model, prompt formats, streaming pipeline internals, and the reasoning behind the
   non-obvious defaults. Read this before modifying the plugin.
-- **[`docs/`](docs/)** — per-subsystem notes. Some predate the `Ino*` rename refactor and
-  refer to older class names; `CLAUDE.md` is authoritative where they disagree.
+- **[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)** — per-path licensing, including the
+  NeuTTS commercial-use threshold. Read this before shipping commercially.
+
+This README and `CLAUDE.md` are the only reference material, and both track the shipped code.
+Earlier per-subsystem notes under `docs/` were removed in favour of that — they documented a
+pre-refactor API (including an audio component that no longer exists) and had become
+misleading.
 
 ---
 
@@ -319,14 +326,27 @@ Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Inoland.
 
 ### Third-party components
 
-InoAgents integrates, but does not vendor, the following. Each remains under its own license:
+The Apache-2.0 grant above covers **`Source/`, `Content/` and `Resources/`, except where noted
+below**. Third-party components keep their own licenses — see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full per-path breakdown.
 
 | Component | License | Notes |
 |---|---|---|
-| [LiteRT / LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) | Apache-2.0 | Supplied by the InoLiteRT plugin |
-| [NeuTTS Nano / NeuCodec](https://github.com/neuphonic/neutts) | See upstream | Model weights carry their own terms |
+| [LiteRT / LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) | Apache-2.0 | Integrated, not vendored — supplied by the InoLiteRT plugin |
+| [NeuTTS Nano / NeuCodec](https://github.com/neuphonic/neutts) | **NeuTTS Open License v1.0** | ⚠️ **Vendored** under `DepricatedModules/NeuTTS/vendor/`, and the shipped voice assets derive from it. **Not** an OSI-style license — see below |
 | [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | GPL-3.0 | Consumed via InoSpeakNG through **dynamic linkage only** |
 | [RuntimeAudioImporter](https://github.com/gtreshchev/RuntimeAudioImporter) | MIT | Audio sink |
+
+> **⚠️ NeuTTS is not open source.** The **NeuTTS Open License v1.0** permits redistribution,
+> but conditions *all* commercial use on your legal entity earning **under $5,000,000 USD in
+> annual revenue** (§5; the cap is waived for 501(c)(3)-equivalent non-profits doing
+> non-commercial research). Above that threshold you need a paid license from Neuphonic —
+> for the vendored code, for the model weights, **and for the voice assets in
+> `Content/NeuTTS/Voices/`**, which are derived from Neuphonic's reference voices. The license
+> also terminates automatically on any breach. Everything else in this plugin (LiteRT-LM chat,
+> ElevenLabs, the character helpers) is unaffected — delete `Source/InoNeuTTS/`,
+> `Source/InoNeuTTSEditor/`, `Content/NeuTTS/` and `DepricatedModules/NeuTTS/` and the
+> restriction goes with it.
 
 > **eSpeak NG is GPL-3.0.** It is used only through dynamic linkage from the InoSpeakNG
 > plugin, which is what keeps InoAgents itself Apache-2.0. If you redistribute a build that

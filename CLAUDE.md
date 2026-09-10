@@ -1,6 +1,6 @@
 # CLAUDE.md — InoAgents plugin
 
-This file provides guidance to Claude Code (claude.ai/code) when working inside `Plugins/InoAgents/`. The hosting demo project is documented in `E:/Projects/InoProject/CLAUDE.md`.
+This file provides guidance to Claude Code (claude.ai/code) when working inside `Plugins/InoAgents/`. It is developed inside a host UE project; that project has its own `CLAUDE.md` and is not part of this repository.
 
 ## Purpose
 
@@ -59,7 +59,7 @@ Plugins/InoAgents/
 │   │       └── SmokeTests/
 │   │           ├── InoSmokeTestCommon.cpp
 │   │           ├── InoElevenLabsDialogueStreamTest.h
-│   │           └── InoElevenLabsDialogueStreamTest.cpp ← Ino.ElevenLabsDialogueStreamTest
+│   │           └── InoElevenLabsDialogueStreamTest.cpp ← Ino.ElevenLabs.DialogueStreamTest
 │   │
 │   └── InoLiteRtLm/                               ← LiteRT-LM Gemma 4 backend module
 │       ├── InoLiteRtLm.Build.cs                   ← deps: InoAgents (Log category +
@@ -104,11 +104,11 @@ Plugins/InoAgents/
 │           │                                       where the LiteRT-LM build hasn't
 │           │                                       been staged yet (link-time fallback)
 │           └── SmokeTests/
-│               ├── InoLoadEngineTest.cpp                  ← Ino.LiteRtLm.LoadEngineTest
-│               ├── InoGenerateTest.cpp                    ← Ino.LiteRtLm.GenerateTest
-│               ├── InoStreamTest.cpp                      ← Ino.LiteRtLm.StreamTest
-│               ├── InoConversationTest.cpp                ← Ino.LiteRtLm.ConversationTest
-│               ├── InoToolCallTest.cpp                    ← Ino.LiteRtLm.ToolCallTest
+│               ├── InoLoadEngineTest.cpp                  ← Ino.LoadEngineTest
+│               ├── InoGenerateTest.cpp                    ← Ino.GenerateTest
+│               ├── InoStreamTest.cpp                      ← Ino.StreamTest
+│               ├── InoConversationTest.cpp                ← Ino.ConversationTest
+│               ├── InoToolCallTest.cpp                    ← Ino.ToolCallTest
 │               ├── InoLiteRtLmSubsystemLoadTest.{h,cpp}   ← Ino.LiteRtLm.SubsystemLoadTest
 │               ├── InoLiteRtLmConversationSendTest.{h,cpp}
 │               ├── InoLiteRtLmConversationStreamTest.{h,cpp}
@@ -185,7 +185,7 @@ Plugins/InoAgents/
 │
 ├── Content/                                       ← (UE plugin content — Blueprints, etc.)
 ├── Resources/                                     ← plugin icon
-├── docs/                                          ← any plugin-level docs
+├── THIRD_PARTY_NOTICES.md                         ← per-path third-party licensing
 └── README.md
 ```
 
@@ -514,7 +514,8 @@ Blueprint / C++ ─┬─ UInoLiteRtLmSubsystem            (UGameInstanceSubsyst
                  │
                  ├─ UInoAgentsSettings               (UDeveloperSettings)
                  │     Project Settings → Plugins → InoAgents — ElevenLabs only:
-                 │       ApiKey, BaseUrl, DefaultModelId, DefaultOutputFormat.
+                 │       ElevenLabsApiKey, ElevenLabsBaseUrl,
+                 │       ElevenLabsDefaultModelId, ElevenLabsDefaultOutputFormat.
                  │     Sub-module-specific settings (UInoLiteRtLmSettings) live
                  │     in their own UDeveloperSettings pages owned by their
                  │     module — deleting a sub-module's directory + its
@@ -574,11 +575,11 @@ Under `Source/InoLiteRtLm/Private/SmokeTests/`. The granular tests stage on inte
 
 | Command | What it proves | PIE? |
 |---|---|---|
-| `Ino.LiteRtLm.LoadEngineTest [model name]` | Resolves Project Settings → loads the `.litertlm` engine. Logs engine ptr + load time. | no |
-| `Ino.LiteRtLm.GenerateTest [model] [prompt...]` | One-shot generate via the raw C API (bypasses the subsystem). Logs full reply + tokens/sec. | no |
-| `Ino.LiteRtLm.StreamTest [model] [prompt...]` | Streaming variant of the above — per-token arrival timing + TTFT. | no |
-| `Ino.LiteRtLm.ConversationTest [model] [turns...]` | Multi-turn conversation via the C API directly. Verifies KV cache reuse across turns. | no |
-| `Ino.LiteRtLm.ToolCallTest [model]` | Registers a stub tool, sends a prompt that elicits the call, verifies the round-trip. | no |
+| `Ino.LoadEngineTest [model name]` | Resolves Project Settings → loads the `.litertlm` engine. Logs engine ptr + load time. | no |
+| `Ino.GenerateTest [model] [prompt...]` | One-shot generate via the raw C API (bypasses the subsystem). Logs full reply + tokens/sec. | no |
+| `Ino.StreamTest [model] [prompt...]` | Streaming variant of the above — per-token arrival timing + TTFT. | no |
+| `Ino.ConversationTest [model] [turns...]` | Multi-turn conversation via the C API directly. Verifies KV cache reuse across turns. | no |
+| `Ino.ToolCallTest [model]` | Registers a stub tool, sends a prompt that elicits the call, verifies the round-trip. | no |
 | `Ino.LiteRtLm.SubsystemLoadTest [model name]` | End-to-end via `UInoLiteRtLmSubsystem::LoadModelAsync` (download, SHA-verify, engine_create, OnLoaded). | **yes** |
 | `Ino.LiteRtLm.ConversationSendTest [model] [prompt...]` | End-to-end via `Subsys->CreateConversation` + `Conv->SendMessageAsync`. Logs token / sentence / complete callbacks. | **yes** |
 | `Ino.LiteRtLm.ConversationStreamTest [model] [prompt...]` | Same path with explicit per-token / per-sentence timing log. | **yes** |
@@ -600,7 +601,8 @@ Under `Source/InoNeuTTS/Private/SmokeTests/`. The Phase-0 spike commands stage a
 
 | Command | What it proves | PIE? |
 |---|---|---|
-| `Ino.ElevenLabsDialogueStreamTest` | Streams a short two-line dialogue through `UInoElevenLabsTextToDialogueStream`, logs total bytes received + chunk count + per-format header bytes. Requires `ElevenLabsApiKey` set in Project Settings. | **yes** |
+| `Ino.ElevenLabs.DialogueStreamTest` | Streams a short two-line dialogue through `UInoElevenLabsTextToDialogueStream`, logs total bytes received + chunk count + per-format header bytes. Requires `ElevenLabsApiKey` set in Project Settings. | **yes** |
+| `Ino.ElevenLabs.ReloadSettings` | Re-reads Project Settings into the subsystem's cached fields without restarting PIE. | **yes** |
 
 ### Shared helpers + adding new tests
 

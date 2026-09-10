@@ -33,3 +33,19 @@ Models/
 # Claude Code per-developer permission grants — machine-specific local paths,
 # intentionally not shared.
 .claude/settings.local.json
+
+# JetBrains module/workspace files (the .idea/ rule above misses these when a
+# tool writes them outside .idea/).
+*.iml
+*.iws
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python caches — the NeuTTS voice-encoder scripts are run in-place.
+__pycache__/
+*.py[cod]
+.venv/
+venv/

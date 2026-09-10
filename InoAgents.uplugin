@@ -1,5 +1,6 @@
 {
 	"FileVersion": 3,
+	"EngineVersion": "5.7.0",
 	"Version": 1,
 	"VersionName": "1.0",
 	"FriendlyName": "InoAgents",
@@ -12,8 +13,8 @@
 	"SupportURL": "https://github.com/nobandegani/ino-agents-ue/issues",
 	"CanContainContent": true,
 	"IsBetaVersion": true,
-	"IsExperimentalVersion": true,
-	"Installed": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
 	"Plugins": [
 		{
 			"Name": "JsonBlueprintUtilities",

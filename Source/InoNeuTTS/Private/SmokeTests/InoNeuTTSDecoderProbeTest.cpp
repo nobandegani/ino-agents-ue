@@ -26,7 +26,7 @@
 //   Ino.NeuTTS.DecoderProbeTest <abs path to neucodec_decoder_*.tflite>
 //
 // Example:
-//   Ino.NeuTTS.DecoderProbeTest E:/Projects/InoProject/Plugins/InoLiteRT/Convert/NeuCodec/output/neucodec_decoder_q8.tflite
+//   Ino.NeuTTS.DecoderProbeTest <YourProject>/Plugins/InoLiteRT/Convert/NeuCodec/output/neucodec_decoder_q8.tflite
 
 #include "InoAgentsLog.h"
 
