@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 """
 Convert vendored NeuTTS sample voices (.pt + .txt) into .nvoice.json files
 for runtime consumption by the InoNeuTtsNative UE module.

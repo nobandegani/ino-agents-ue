@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Inoland. Licensed under the Apache License, Version 2.0.
 """
 Diagnostic for Phase B3 chunk-1 failure:
   `Gather '/speech_emb/Gather': idx=15496 must be in [-6563, 6562]`
