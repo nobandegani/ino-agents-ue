@@ -1,21 +1,35 @@
-Binaries/Win64
-Binaries/Android
-Binaries/Mac
-Binaries/IOS
-Intermediate
+# ---------------------------------------------------------------------------
+# Unreal build output
+# ---------------------------------------------------------------------------
+# Runtime binaries for this plugin are produced by UBT per-target and are not
+# committed. Native third-party runtimes (LiteRT / LiteRT-LM) are staged and
+# packaged by the sibling InoLiteRT plugin, not from here.
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
 
-# Local model files (gigabytes; never committed). The plugin locates models
-# relative to its install directory via IPluginManager::FindPlugin("InoAgents")
-# + "Models/<filename>". Developers download models here manually; they are
-# not redistributed with the plugin.
+# ---------------------------------------------------------------------------
+# Local model files
+# ---------------------------------------------------------------------------
+# Model bundles are gigabytes and are never committed. At runtime they are
+# downloaded on demand to FPaths::ProjectPersistentDownloadDir(). This entry
+# covers the legacy developer drop location (Plugins/InoAgents/Models/).
 Models/
+*.litertlm
+*.tflite
 
-# Bazel build workspace (defensive; real bazel-* symlinks live inside the submodule)
-#LiteRtLm/bazel-*
-#LiteRtLm/user.bazelrc
+# ---------------------------------------------------------------------------
+# IDE / editor / per-developer tool state
+# ---------------------------------------------------------------------------
+.vs/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
 
-# Staged LiteRT-LM artifacts (produced by LiteRtLm/scripts/build-win64.ps1, not tracked)
-#Source/ThirdParty/InoAgentsLibrary/Public/litert/
-#Source/ThirdParty/InoAgentsLibrary/Win64/LiteRtLm.lib
-
-Chatterbox/LiteRT/*
+# Claude Code per-developer permission grants — machine-specific local paths,
+# intentionally not shared.
+.claude/settings.local.json
