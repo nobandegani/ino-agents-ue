@@ -1,72 +1,338 @@
 # InoAgents
 
-Unreal Engine 5.7 runtime plugin with three integrations that compose into a complete AI agent pipeline:
+**On-device AI agents for Unreal Engine 5.7.** Tool-calling LLM chat and voice-cloning
+text-to-speech that run inside the game process — no Python runtime, no sidecar server, no
+per-request cloud bill. Plus an ElevenLabs client for when you do want the cloud.
 
-1. **LiteRT-LM / Google Gemma 4** — on-device tool-calling LLM agents running directly inside the game process. No network, no cloud, no subscription, no Python runtime, no second binary to ship. Models auto-download on first use from Hugging Face.
-2. **ElevenLabs cloud voice API** — standalone HTTP client for ElevenLabs' audio endpoints, exposed as native Blueprint latent nodes and C++ async actions. Phase 1 ships Text-to-Dialogue streaming with expressive `[emotion]` tag support; TTS and STT are on the roadmap.
-3. **Streaming audio playback component** — a `UAudioComponent` subclass that plays raw audio bytes (PCM int16, PCM float32, or MP3) fed in at runtime. Inherits every standard UAudioComponent feature (volume, pitch, attenuation, spatialization, source effect chain, sound class, concurrency).
+Everything is Blueprint-first: every capability is a Blueprint-callable node or an assignable
+delegate. C++ is available but never required.
 
-All three compose cleanly: the **LiteRT-LM Agent Component** (`UInoAgentsLiteRtLmAgentComponent`) wires them together as a single drop-on-actor scene component. Set a model config + voice ID in the details panel, call `SendMessage`, and the actor speaks with spatialised 3D audio — model loading, conversation management, per-sentence TTS dispatch, ordered audio playback, and emotion tags are all handled internally.
-
-Each integration is also usable independently. The plugin is Blueprint-first: every surface is callable or bindable from Blueprint without writing C++.
-
-**Status:** LiteRT-LM Milestone D + agent component shipped. ElevenLabs phase 1 shipped. Streaming audio component + ordered TTS queue shipped. Model auto-download shipped. All settings unified under one Project Settings page.
+> **Status: beta.** The API surface is stable enough to build on, but names and defaults can
+> still move between versions. See [Known limitations](#known-limitations).
 
 ---
 
-## Subsystem docs
+## What's in the box
 
-Each integration has its own doc with full API surface, usage patterns, smoke tests, and known limitations:
+| | Capability | Runs | Backed by |
+|---|---|---|---|
+| 🧠 | **On-device LLM chat with tool calling** | Locally | Google [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM), Gemma models |
+| 🗣️ | **On-device voice-cloning TTS** | Locally | Neuphonic [NeuTTS Nano](https://github.com/neuphonic/neutts) + NeuCodec |
+| ☁️ | **Cloud TTS** | Network | [ElevenLabs](https://elevenlabs.io/docs/api-reference) Text-to-Dialogue streaming |
+| 🎭 | **Character helpers** | Locally | Procedural blink/gaze, mono PCM utilities, gyro camera sway |
 
-- **[`docs/LiteRtLm.md`](docs/LiteRtLm.md)** — on-device Gemma 4 with tool calling. Covers the all-in-one agent component, `ULiteRtLmSubsystem`, `ULiteRtLmConversation`, `FLiteRtLmModelConfig` (struct, not a data asset), the `ILiteRtLmTool` interface, how to write tools in Blueprint or C++, model auto-download, and the smoke tests.
-- **[`docs/ElevenLabs.md`](docs/ElevenLabs.md)** — ElevenLabs HTTP client. Covers API key configuration (Project Settings → Plugins → InoAgents → ElevenLabs), `UElevenLabsSubsystem`, `UElevenLabsTextToDialogueStream` latent node, request types, Blueprint + C++ usage, and the smoke tests.
-- **[`docs/StreamingAudio.md`](docs/StreamingAudio.md)** — runtime audio byte playback via a `UAudioComponent` subclass. Covers formats (PCM int16 / PCM float32 / MP3), the format-vs-sample-rate-vs-channels distinction, the ordered TTS dialogue queue (`UInoAgentsLiteRtLmDialogueQueue`), Blueprint + C++ usage, and the smoke tests.
-
----
-
-## Quick start — the easy path
-
-### 1. Enable the plugin
-
-Drop `Plugins/InoAgents/` into your project's `Plugins/` directory (or use `InoAgentDemo` as a starting point). Add `InoAgents` to your `.uproject`'s Plugins array, regenerate project files.
-
-### 2. Build `LiteRtLm.dll` (one-time)
-
-See [`docs/LiteRtLm.md → Requirements`](docs/LiteRtLm.md#requirements) for the Bazel build steps. ~15-40 minutes cold build.
-
-### 3. Drop the agent component on an actor
-
-- Add Component → **LiteRT-LM Agent**
-- In the details panel: set **Model Config → Model File Name** (e.g. `gemma-4-E4B-it.litertlm`), set **Voice Id** to your ElevenLabs voice, set **Model Config → System Message** for the agent's personality.
-- The model auto-downloads from Hugging Face on first Play if it isn't cached locally. Progress fires via `OnDownloadProgress`.
-- Call `Send Message ("Hello")` from any trigger — the actor speaks.
-
-### 4. Configure API keys + model URLs
-
-**Project Settings → Plugins → InoAgents** has two sections:
-
-| Section | What to configure |
-|---|---|
-| **ElevenLabs** | API Key (get one at https://elevenlabs.io/app/settings/api-keys), Base URL, default model/format |
-| **LiteRT-LM → Models** | Array of `{DisplayName, ModelFileName, DownloadUrl}` — default entries point at Hugging Face for Gemma 4 E2B and E4B |
+The name is deliberate: the goal isn't just text generation, it's **tool-use workflows** —
+the model calls into your Blueprint functions, gets results back, and keeps going.
 
 ---
 
 ## Requirements
 
-| Thing | Why |
-|---|---|
-| **Unreal Engine 5.7** | Minimum tested version. |
-| **Windows (Win64, MSVC)** | Only platform currently supported. Android, iOS, Linux, macOS on the roadmap. |
-| **A built `LiteRtLm.dll`** | See [`docs/LiteRtLm.md`](docs/LiteRtLm.md). Not needed if you only use ElevenLabs or the audio component. |
+- **Unreal Engine 5.7**
+- **Visual Studio 2022** (Win64) or the matching toolchain for your target platform
+- A model file — downloaded automatically on first use, see [Models](#models)
 
-Model files (~2.5–5 GB) are auto-downloaded to `PersistentDownloadDir/InoAgents/Models/` on first use. No manual download step needed unless you want to pre-cache.
+### Plugin dependencies
+
+InoAgents composes with four sibling plugins. Clone them into your project's `Plugins/`
+directory alongside this one:
+
+| Plugin | Provides | Required for |
+|---|---|---|
+| **InoLiteRT** | LiteRT + LiteRT-LM C APIs, runtime binary staging, per-platform packaging | LiteRT-LM chat, NeuTTS |
+| **InoSpeakNG** | eSpeak NG phonemization (IPA) | NeuTTS |
+| **InoNodes** | Resumable downloader with streaming SHA-256 verification | Model auto-download |
+| **RuntimeAudioImporter** | `UStreamingSoundWave` — the audio sink for TTS output | Playing TTS audio |
+
+`JsonBlueprintUtilities` ships with the engine — just enable it.
+
+> InoAgents core (ElevenLabs, animation, audio, camera helpers) has **no** backend
+> dependencies. If you only want cloud TTS and the character helpers, the on-device
+> plugins are optional.
 
 ---
 
-## Further reading
+## Install
 
-- **[`CLAUDE.md`](CLAUDE.md)** — architecture, threading model, Bazel build notes, Windows gotchas, tool-calling flow. Read this if you are modifying the plugin itself.
-- **LiteRT-LM upstream** — https://github.com/google-ai-edge/LiteRT-LM
-- **Gemma 4 edge models on Hugging Face** — https://huggingface.co/litert-community
-- **ElevenLabs API reference** — https://elevenlabs.io/docs/api-reference
+```bash
+cd YourProject/Plugins
+git clone https://github.com/nobandegani/ino-agents-ue.git InoAgents
+```
+
+Add `InoAgents` to your `.uproject` Plugins array, regenerate project files, and build.
+
+---
+
+## Quick start
+
+### On-device chat with tool calling
+
+```cpp
+UInoLiteRtLmSubsystem* Subsys =
+    GetGameInstance()->GetSubsystem<UInoLiteRtLmSubsystem>();
+
+// 1. Load (downloads + SHA-verifies on first run, cached after)
+FInoLiteRtLmModelConfig Config;
+Config.ModelFileName  = TEXT("Gemma 4 E2B");   // DisplayName from Project Settings
+Config.Backend        = EInoLiteRtLmBackend::Cpu;
+Config.SystemMessage  = TEXT("You are a terse shopkeeper in a fantasy RPG.");
+
+FOnInoLiteRtLmModelLoaded OnLoaded;
+OnLoaded.BindDynamic(this, &AMyActor::HandleModelLoaded);
+Subsys->LoadModelAsync(Config, /*OnDownloadProgress=*/{}, OnLoaded);
+
+// 2. Register any tools BEFORE creating the conversation
+Subsys->RegisterTool(NewObject<UInoLiteRtLmAddNumbersTool>(this));
+
+// 3. Converse
+UInoLiteRtLmConversation* Conv = Subsys->CreateConversation();
+Conv->OnToken.AddDynamic(this, &AMyActor::HandleToken);
+Conv->OnSentence.AddDynamic(this, &AMyActor::HandleSentence);
+Conv->OnComplete.AddDynamic(this, &AMyActor::HandleComplete);
+Conv->SendMessageAsync(TEXT("What do you have for sale?"));
+```
+
+**Streaming callbacks.** `OnToken` and `OnSentence` each deliver a `RawText` / `CleanText`
+pair. `CleanText` has `[bracketed]` delivery tags stripped; `RawText` keeps them. That split
+exists so you can subtitle with `CleanText` while feeding `RawText` straight to ElevenLabs,
+which reads `[cheerfully]` as a delivery hint.
+
+`OnSentenceBoundary` fires right after each `OnSentence` as a payload-less cue — handy for
+driving animation or viseme triggers.
+
+Terminal events are `OnComplete(FullText)` **or** `OnError(Message)`, never both.
+
+**Writing a tool.** Subclass `UInoLiteRtLmToolBase` in C++ or Blueprint, set `ToolName`,
+`Description` and `Parameters` (a JSON schema string), and implement `Execute`. See
+`UInoLiteRtLmAddNumbersTool` for the canonical example.
+
+Tools execute on the **game thread**, so you can touch UE state freely — but they stall token
+streaming while they run. For anything slow, return immediately and call
+`Conv->SubmitDeferredToolResult(ToolCallId, ResultJson)` once your async work lands.
+
+---
+
+### On-device voice cloning
+
+NeuTTS clones a voice from a short reference sample. You prime one voice, then synthesize
+many lines against it.
+
+```cpp
+UInoNeuTTSSubsystem* TTS = GetGameInstance()->GetSubsystem<UInoNeuTTSSubsystem>();
+
+FInoNeuTTSConfig Cfg;                       // backbone + decoder names, backends, precision
+TTS->LoadModelAsync(Cfg, OnLoaded, OnProgress);
+
+// Prime a voice asset (imported from a .inv file — see below). Required before any synth.
+TTS->SetActiveVoiceAsync(MyVoiceAsset, OnReady);
+
+// Streaming synthesis — OnAudioChunk fires repeatedly, ~0.5 s of audio per chunk
+TTS->SynthesizeStreamAsync(
+    TEXT("Welcome, traveller."), Options, /*ChunkTokens=*/25,
+    OnAudioChunk, OnComplete);
+```
+
+Output is **24 kHz mono int16 PCM (little-endian)** — feed it straight into
+`UStreamingSoundWave::AppendAudioDataFromRAW`.
+
+Streaming does real chunked decoding with an overlap-add crossfade at chunk boundaries, not a
+one-big-buffer placeholder. Decode costs roughly 14% of real-time on CPU, so playback keeps
+ahead of synthesis comfortably.
+
+**Voice assets.** A Python encoder emits a `<voice>.inv` JSON file (transcript + FSQ codes).
+Drag it into the Content Browser and `UInoNeuTTSVoiceFactory` turns it into a
+`UInoNeuTTSVoiceAsset`. Right-click → Reimport picks up re-encodes.
+
+> Only one voice prime and one synthesis may be in flight at a time. Wait for `OnReady`
+> before synthesizing — the worker has no inline fallback and will refuse.
+
+---
+
+### Cloud TTS (ElevenLabs)
+
+A latent Blueprint node, **ElevenLabs Stream Text-to-Dialogue**, or from C++:
+
+```cpp
+UInoElevenLabsTextToDialogueStream::StreamTextToDialogue(
+    this, Request, /*ApiKeyOverride=*/TEXT(""));
+```
+
+`OnAudioChunk` delivers delta bytes as they arrive, `OnComplete` the full buffer, `OnError` on
+failure. Output format is selectable via `EInoElevenLabsOutputFormat` (MP3 / PCM / µ-law).
+Playback is yours to own — there's no built-in audio component.
+
+---
+
+## Configuration
+
+Three Project Settings pages under **Plugins**, one per module:
+
+| Page | Holds |
+|---|---|
+| **InoAgents** | ElevenLabs API key, base URL, default model id + output format |
+| **InoLiteRtLm** | `Models[]` — the LLM model registry |
+| **InoNeuTTS** | `BackboneModels[]` + `DecoderModels[]` |
+
+### ⚠️ A note on your ElevenLabs API key
+
+The key is a `Config` property, so **Unreal writes it in plaintext to your project's
+`Config/DefaultGame.ini`** — a file most projects commit. The editor masks the field, but the
+`.ini` is not encrypted.
+
+If your project repo is public or shared, prefer one of:
+
+- Pass `ApiKeyOverride` to `StreamTextToDialogue` and source the key from an environment
+  variable or your own secret store at runtime.
+- Add `Config/DefaultGame.ini` to `.gitignore`, or keep the key out of it and inject at launch.
+
+Leave the Project Settings field empty in any committed configuration.
+
+### Models
+
+Model files are gigabytes and are **never** committed. `LoadModelAsync` downloads them on
+first use — HEAD probe, `.partial` staging, atomic rename, streaming SHA-256, multi-connection
+range requests, exponential-backoff retries, and cancellation are all handled by InoNodes.
+
+Files land under `FPaths::ProjectPersistentDownloadDir()`:
+
+```
+<PersistentDownloadDir>/InoAgents/LiteRTLM/<name>.litertlm
+<PersistentDownloadDir>/InoAgents/NeuTTS/<name>.litertlm   (backbone)
+<PersistentDownloadDir>/InoAgents/NeuTTS/<name>.tflite     (decoder)
+```
+
+Each registry entry carries a `DownloadUrl`, `LocalFileName`, and an optional
+`ExpectedSha256`. Set the hash — a corrupt cache is then detected, deleted and re-fetched
+automatically instead of failing mysteriously at load.
+
+`IsModelDownloaded()` is a cheap stat probe on both subsystems, so it's safe to poll from UMG
+to decide whether to show a download-progress screen.
+
+---
+
+## Architecture
+
+InoAgents uses a **core + backends** module split. Each backend is a self-contained deletion
+unit — it owns its settings page and its smoke tests, and core never depends on it.
+
+```
+Source/
+├── InoAgents/         core — log category, ElevenLabs, animation/audio/camera helpers
+├── InoLiteRtLm/       backend — Gemma chat + tool calling
+├── InoNeuTTS/         backend — NeuTTS Nano voice cloning
+└── InoNeuTTSEditor/   editor-only — .inv voice import factory
+```
+
+To drop a backend: delete its folder and remove its entry from `InoAgents.uplugin`. Nothing
+else breaks, because game code reaches each backend through
+`GetGameInstance()->GetSubsystem<...>()` on demand rather than through a compile-time
+dependency. `DepricatedModules/` holds previously retired backends (llama.cpp, Chatterbox,
+Qwen3 ASR) for reference — they are not built and not in the `.uplugin`.
+
+Threading follows one rule throughout: **heavy work on a thread-pool task, every delegate
+marshalled back to the game thread**, with `TWeakObjectPtr` guards so a subsystem torn down
+mid-flight cancels cleanly instead of dispatching into freed memory.
+
+---
+
+## Smoke tests
+
+Console commands that exercise the real API surface end to end. Run them from the editor's
+Output Log. They stage from lowest level to highest, so a regression is bisectable.
+
+Raw C API — no PIE session needed, each isolates one layer:
+
+```
+Ino.LoadEngineTest [model]                    engine load only
+Ino.GenerateTest [model] [prompt]             one-shot generate, logs tokens/sec
+Ino.StreamTest [model] [prompt]               per-token arrival timing + TTFT
+Ino.ConversationTest [model] [turns...]       multi-turn, verifies KV cache reuse
+Ino.ToolCallTest [model]                      tool round-trip
+```
+
+Subsystem level — these need a running PIE session:
+
+```
+Ino.LiteRtLm.SubsystemLoadTest [model]        download + SHA-verify + engine create
+Ino.LiteRtLm.ConversationSendTest [model]     CreateConversation + SendMessageAsync
+Ino.LiteRtLm.ConversationStreamTest [model]   per-token / per-sentence timing
+Ino.LiteRtLm.ConversationContextTest [model]  CreateConversationWithHistory
+Ino.LiteRtLm.ConversationToolTest [model]     RegisterTool through OnToolCalled
+Ino.LiteRtLm.ToolRegistryTest                 registry semantics (no PIE needed)
+
+Ino.NeuTTS.DecoderProbeTest <abs .tflite>     bare LiteRT C API spike (no PIE)
+Ino.NeuTTS.BackboneSpikeTest <abs .litertlm>  SessionConfig bisect probe (no PIE)
+Ino.NeuTTS.LoadTest [backbone] [decoder]      batch download + runner construction
+
+Ino.ElevenLabs.DialogueStreamTest             cloud round-trip (needs API key)
+Ino.ElevenLabs.ReloadSettings                 re-read Project Settings without restart
+```
+
+---
+
+## Platform support
+
+The **UE-facing API is identical on every platform.** Native runtime availability is owned by
+the sibling InoLiteRT plugin — see its docs for the current per-platform matrix.
+
+Where LiteRT-LM binaries haven't been staged, link-time stubs keep the module loading cleanly
+and `LoadModelAsync` fails with a clear error instead of crashing. ElevenLabs cloud TTS and
+all the animation / audio / camera helpers work everywhere regardless.
+
+On Android, `android.permission.INTERNET` is required for model download.
+
+---
+
+## Known limitations
+
+- **Session config is detached by default.** `FInoLiteRtLmModelConfig::bAttachSessionConfig`
+  defaults to `false` because LiteRT-LM `v0.11.0-rc.1` returned NULL from `Conversation::Create`
+  when a user `SessionConfig` was attached. While false, `Sampler` and `MaxOutputTokens` are
+  ignored and conversations run with engine defaults.
+- **NeuTTS on GPU is unreliable.** The backbone `q8` bundle typically fails on the WebGPU
+  delegate; use the `fp16` bundle for GPU, or `q8` on CPU. The NeuCodec decoder currently
+  fails on GPU outright — keep it on CPU.
+- **NeuTTS sampler parameters are placeholders.** `Temperature` / `TopK` / `RandomSeed` on
+  `FInoNeuTTSOptions` are informational until an upstream LiteRT-LM regression around
+  `set_sampler_params` is fixed.
+- **One conversation per engine.** LiteRT-LM sessions on a shared engine share a single
+  executor and KV cache, so creating a conversation shuts down any prior live one.
+- **Async argument order differs between backends** — LiteRtLm takes
+  `(Config, OnProgress, OnLoaded)` while NeuTTS takes `(Config, OnLoaded, OnProgress)`. Watch
+  the order until this is unified.
+
+---
+
+## Documentation
+
+- **[`CLAUDE.md`](CLAUDE.md)** — full architecture reference: module boundaries, threading
+  model, prompt formats, streaming pipeline internals, and the reasoning behind the
+  non-obvious defaults. Read this before modifying the plugin.
+- **[`docs/`](docs/)** — per-subsystem notes. Some predate the `Ino*` rename refactor and
+  refer to older class names; `CLAUDE.md` is authoritative where they disagree.
+
+---
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Inoland.
+
+### Third-party components
+
+InoAgents integrates, but does not vendor, the following. Each remains under its own license:
+
+| Component | License | Notes |
+|---|---|---|
+| [LiteRT / LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) | Apache-2.0 | Supplied by the InoLiteRT plugin |
+| [NeuTTS Nano / NeuCodec](https://github.com/neuphonic/neutts) | See upstream | Model weights carry their own terms |
+| [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | GPL-3.0 | Consumed via InoSpeakNG through **dynamic linkage only** |
+| [RuntimeAudioImporter](https://github.com/gtreshchev/RuntimeAudioImporter) | MIT | Audio sink |
+
+> **eSpeak NG is GPL-3.0.** It is used only through dynamic linkage from the InoSpeakNG
+> plugin, which is what keeps InoAgents itself Apache-2.0. If you redistribute a build that
+> includes eSpeak NG, review your obligations — including for console and mobile stores, where
+> dynamic-linkage arguments are weaker. NeuTTS is the only feature that needs it; every other
+> capability works without it.
+
+Model weights are **not** redistributed here. They download from their upstream hosts at
+runtime and remain subject to their own licenses — including Google's Gemma Terms of Use.
