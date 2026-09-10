@@ -120,12 +120,29 @@ download at runtime and are subject to Google's
 
 **License:** GPL-3.0. **Upstream:** https://github.com/espeak-ng/espeak-ng
 
-No copy exists in this repository. It is consumed through the sibling **InoSpeakNG** plugin via
-**dynamic linkage only**, which is what keeps InoAgents itself Apache-2.0. It is required only
-by the NeuTTS backend; every other capability works without it.
+No copy exists in this repository. It is consumed through the sibling **InoSpeakNG** plugin
+(itself GPL-3.0), and **the linkage is not dynamic on every platform**:
 
-> If you redistribute a build that includes eSpeak NG, review your GPL obligations — including
-> for console and mobile stores, where dynamic-linkage arguments are weaker.
+| Platform | Linkage | Artifact |
+|---|---|---|
+| Win64 | Dynamic | `espeak-ng.dll` |
+| Android (arm64-v8a, x86_64) | Dynamic | `libespeak-ng.so` |
+| **iOS** (arm64) | **Static** | `libespeak-ng.a` linked into the executable |
+| **macOS** (universal) | **Static** | `libespeak-ng.a` linked into the executable |
+
+> **⚠️ On iOS and macOS, eSpeak NG's object code is compiled into your shipped binary.** The
+> "it's only dynamically linked, so the GPL doesn't reach my code" argument is not available to
+> you there — and it is contested even on Win64 and Android. If you ship a closed-source
+> commercial build, or target a console or locked-down store where GPL-3.0's anti-tivoization
+> terms (§6) apply, get the obligations reviewed before shipping.
+
+eSpeak NG is required **only** by the NeuTTS backend. LiteRT-LM chat, ElevenLabs cloud TTS, and
+every animation / audio / camera helper work without it — and deleting the NeuTTS backend (see
+§1, "Removing the restriction entirely") removes the eSpeak NG dependency at the same time,
+which is what keeps InoAgents itself Apache-2.0.
+
+Per-platform detail and the GPL-3.0 §6 corresponding-source pointer live in
+[ino-espeak-ng-ue](https://github.com/nobandegani/ino-espeak-ng-ue#licensing).
 
 ---
 

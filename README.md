@@ -334,7 +334,7 @@ below**. Third-party components keep their own licenses — see
 |---|---|---|
 | [LiteRT / LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) | Apache-2.0 | Integrated, not vendored — supplied by the InoLiteRT plugin |
 | [NeuTTS Nano / NeuCodec](https://github.com/neuphonic/neutts) | **NeuTTS Open License v1.0** | ⚠️ **Vendored** under `DepricatedModules/NeuTTS/vendor/`, and the shipped voice assets derive from it. **Not** an OSI-style license — see below |
-| [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | GPL-3.0 | Consumed via InoSpeakNG through **dynamic linkage only** |
+| [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | GPL-3.0 | Via InoSpeakNG. Dynamic on Win64/Android, **static on iOS and macOS** — see below |
 | [RuntimeAudioImporter](https://github.com/gtreshchev/RuntimeAudioImporter) | MIT | Audio sink |
 
 > **⚠️ NeuTTS is not open source.** The **NeuTTS Open License v1.0** permits redistribution,
@@ -348,11 +348,22 @@ below**. Third-party components keep their own licenses — see
 > `Source/InoNeuTTSEditor/`, `Content/NeuTTS/` and `DepricatedModules/NeuTTS/` and the
 > restriction goes with it.
 
-> **eSpeak NG is GPL-3.0.** It is used only through dynamic linkage from the InoSpeakNG
-> plugin, which is what keeps InoAgents itself Apache-2.0. If you redistribute a build that
-> includes eSpeak NG, review your obligations — including for console and mobile stores, where
-> dynamic-linkage arguments are weaker. NeuTTS is the only feature that needs it; every other
-> capability works without it.
+> **⚠️ eSpeak NG is GPL-3.0, and on iOS and macOS it is linked statically.** It reaches
+> InoAgents through the sibling InoSpeakNG plugin, which links eSpeak NG dynamically on Win64
+> (DLL) and Android (`.so`) but **statically on iOS and macOS** (`libespeak-ng.a` is linked
+> directly into the shipped executable). InoSpeakNG is therefore itself GPL-3.0.
+>
+> So the "it's only dynamically linked" argument is **not available on iOS or macOS**, and it is
+> contested even where it does apply. If you ship a build that includes eSpeak NG — especially a
+> closed-source commercial one, or anything on a console or locked-down store where GPL-3.0's
+> anti-tivoization terms bite — review your obligations properly before you do.
+>
+> **NeuTTS is the only capability that needs eSpeak NG.** LiteRT-LM chat, ElevenLabs cloud TTS,
+> and every animation / audio / camera helper work without it, and InoAgents keeps its
+> Apache-2.0 posture as long as you don't ship the NeuTTS backend. See
+> [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the delete-list, and
+> [ino-espeak-ng-ue](https://github.com/nobandegani/ino-espeak-ng-ue#licensing) for the full
+> per-platform breakdown.
 
 Model weights are **not** redistributed here. They download from their upstream hosts at
 runtime and remain subject to their own licenses — including Google's Gemma Terms of Use.
